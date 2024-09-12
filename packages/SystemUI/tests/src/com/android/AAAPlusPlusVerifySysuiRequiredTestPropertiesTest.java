@@ -14,18 +14,20 @@
 
 package com.android;
 
-import static org.junit.Assert.assertFalse;
+import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.is;
+import static org.junit.Assert.assertThat;
 
-import android.support.test.filters.LargeTest;
-import android.support.test.filters.MediumTest;
-import android.support.test.filters.SmallTest;
-import android.support.test.internal.runner.ClassPathScanner;
-import android.support.test.internal.runner.ClassPathScanner.ChainedClassNameFilter;
-import android.support.test.internal.runner.ClassPathScanner.ExternalClassNameFilter;
-import android.support.test.internal.runner.TestLoader;
 import android.testing.AndroidTestingRunner;
 import android.text.TextUtils;
 import android.util.Log;
+
+import androidx.test.filters.LargeTest;
+import androidx.test.filters.MediumTest;
+import androidx.test.filters.SmallTest;
+import androidx.test.internal.runner.ClassPathScanner;
+import androidx.test.internal.runner.ClassPathScanner.ChainedClassNameFilter;
+import androidx.test.internal.runner.ClassPathScanner.ExternalClassNameFilter;
 
 import com.android.systemui.SysuiBaseFragmentTest;
 import com.android.systemui.SysuiTestCase;
@@ -34,6 +36,9 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -54,7 +59,7 @@ public class AAAPlusPlusVerifySysuiRequiredTestPropertiesTest extends SysuiTestC
 
     private static final String TAG = "AAA++VerifyTest";
 
-    private static final Class[] BASE_CLS_WHITELIST = {
+    private static final Class[] BASE_CLS_TO_INCLUDE = {
             SysuiTestCase.class,
             SysuiBaseFragmentTest.class,
     };
@@ -63,21 +68,20 @@ public class AAAPlusPlusVerifySysuiRequiredTestPropertiesTest extends SysuiTestC
             SmallTest.class,
             MediumTest.class,
             LargeTest.class,
-            android.test.suitebuilder.annotation.SmallTest.class,
-            android.test.suitebuilder.annotation.MediumTest.class,
-            android.test.suitebuilder.annotation.LargeTest.class,
+            androidx.test.filters.SmallTest.class,
+            androidx.test.filters.MediumTest.class,
+            androidx.test.filters.LargeTest.class,
     };
 
     @Test
-    public void testAllClassInheritance() {
-        boolean anyClassWrong = false;
-        TestLoader loader = new TestLoader();
+    public void testAllClassInheritance() throws Throwable {
+        ArrayList<String> fails = new ArrayList<>();
         for (String className : getClassNamesFromClassPath()) {
-            Class<?> cls = loader.loadIfTest(className);
-            if (cls == null) continue;
+            Class<?> cls = Class.forName(className, false, this.getClass().getClassLoader());
+            if (!isTestClass(cls)) continue;
 
             boolean hasParent = false;
-            for (Class<?> parent : BASE_CLS_WHITELIST) {
+            for (Class<?> parent : BASE_CLS_TO_INCLUDE) {
                 if (parent.isAssignableFrom(cls)) {
                     hasParent = true;
                     break;
@@ -85,17 +89,15 @@ public class AAAPlusPlusVerifySysuiRequiredTestPropertiesTest extends SysuiTestC
             }
             boolean hasSize = hasSize(cls);
             if (!hasSize) {
-                anyClassWrong = true;
-                Log.e(TAG, cls.getName() + " does not have size annotation, such as @SmallTest");
+                fails.add(cls.getName() + " does not have size annotation, such as @SmallTest");
             }
             if (!hasParent) {
-                anyClassWrong = true;
-                Log.e(TAG, cls.getName() + " does not extend any of " + getClsStr());
+                fails.add(cls.getName() + " does not extend any of " + getClsStr());
             }
         }
 
-        assertFalse("All sysui test classes must have size and extend one of " + getClsStr(),
-                anyClassWrong);
+        assertThat("All sysui test classes must have size and extend one of " + getClsStr(),
+                fails, is(empty()));
     }
 
     private boolean hasSize(Class<?> cls) {
@@ -108,21 +110,119 @@ public class AAAPlusPlusVerifySysuiRequiredTestPropertiesTest extends SysuiTestC
     private Collection<String> getClassNamesFromClassPath() {
         ClassPathScanner scanner = new ClassPathScanner(mContext.getPackageCodePath());
 
+        ChainedClassNameFilter filter = makeClassNameFilter();
+
+        try {
+            return scanner.getClassPathEntries(filter);
+        } catch (IOException e) {
+            Log.e(getTag(), "Failed to scan classes", e);
+        }
+        return Collections.emptyList();
+    }
+
+    protected ChainedClassNameFilter makeClassNameFilter() {
         ChainedClassNameFilter filter = new ChainedClassNameFilter();
 
         filter.add(new ExternalClassNameFilter());
         filter.add(s -> s.startsWith("com.android.systemui")
                 || s.startsWith("com.android.keyguard"));
-        try {
-            return scanner.getClassPathEntries(filter);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to scan classes", e);
-        }
-        return Collections.emptyList();
+
+        // Screenshots run in an isolated process and should not be run
+        // with the main process dependency graph because it will not exist
+        // at runtime and could lead to incorrect tests which assume
+        // the main SystemUI process. Therefore, exclude this package
+        // from the base class allowlist.
+        filter.add(s -> !s.startsWith("com.android.systemui.screenshot"));
+        return filter;
     }
 
     private String getClsStr() {
-        return TextUtils.join(",", Arrays.asList(BASE_CLS_WHITELIST)
+        return TextUtils.join(",", Arrays.asList(BASE_CLS_TO_INCLUDE)
                 .stream().map(cls -> cls.getSimpleName()).toArray());
+    }
+
+    /**
+     * Determines if given class is a valid test class.
+     *
+     * @param loadedClass
+     * @return <code>true</code> if loadedClass is a test
+     */
+    private boolean isTestClass(Class<?> loadedClass) {
+        try {
+            if (Modifier.isAbstract(loadedClass.getModifiers())) {
+                logDebug(String.format("Skipping abstract class %s: not a test",
+                        loadedClass.getName()));
+                return false;
+            }
+            // TODO: try to find upstream junit calls to replace these checks
+            if (junit.framework.Test.class.isAssignableFrom(loadedClass)) {
+                // ensure that if a TestCase, it has at least one test method otherwise
+                // TestSuite will throw error
+                if (junit.framework.TestCase.class.isAssignableFrom(loadedClass)) {
+                    return hasJUnit3TestMethod(loadedClass);
+                }
+                return true;
+            }
+            // TODO: look for a 'suite' method?
+            if (loadedClass.isAnnotationPresent(org.junit.runner.RunWith.class)) {
+                return true;
+            }
+            for (Method testMethod : loadedClass.getMethods()) {
+                if (testMethod.isAnnotationPresent(org.junit.Test.class)) {
+                    return true;
+                }
+            }
+            logDebug(String.format("Skipping class %s: not a test", loadedClass.getName()));
+            return false;
+        } catch (Exception e) {
+            // Defensively catch exceptions - Will throw runtime exception if it cannot load methods.
+            // For earlier versions of Android (Pre-ICS), Dalvik might try to initialize a class
+            // during getMethods(), fail to do so, hide the error and throw a NoSuchMethodException.
+            // Since the java.lang.Class.getMethods does not declare such an exception, resort to a
+            // generic catch all.
+            // For ICS+, Dalvik will throw a NoClassDefFoundException.
+            Log.w(TAG, String.format("%s in isTestClass for %s", e.toString(),
+                    loadedClass.getName()));
+            return false;
+        } catch (Error e) {
+            // defensively catch Errors too
+            Log.w(TAG, String.format("%s in isTestClass for %s", e.toString(),
+                    loadedClass.getName()));
+            return false;
+        }
+    }
+
+    private boolean hasJUnit3TestMethod(Class<?> loadedClass) {
+        for (Method testMethod : loadedClass.getMethods()) {
+            if (isPublicTestMethod(testMethod)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // copied from junit.framework.TestSuite
+    private boolean isPublicTestMethod(Method m) {
+        return isTestMethod(m) && Modifier.isPublic(m.getModifiers());
+    }
+
+    // copied from junit.framework.TestSuite
+    private boolean isTestMethod(Method m) {
+        return m.getParameterTypes().length == 0 && m.getName().startsWith("test")
+                && m.getReturnType().equals(Void.TYPE);
+    }
+
+    /**
+     * Utility method for logging debug messages. Only actually logs a message if TAG is marked
+     * as loggable to limit log spam during normal use.
+     */
+    private void logDebug(String msg) {
+        if (Log.isLoggable(getTag(), Log.DEBUG)) {
+            Log.d(getTag(), msg);
+        }
+    }
+
+    protected String getTag() {
+        return TAG;
     }
 }

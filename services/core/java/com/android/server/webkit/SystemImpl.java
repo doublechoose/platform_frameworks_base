@@ -16,37 +16,41 @@
 
 package com.android.server.webkit;
 
+import static android.webkit.Flags.updateServiceV2;
+
 import android.app.ActivityManager;
 import android.app.AppGlobals;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
-import android.content.pm.IPackageDeleteObserver;
 import android.content.pm.PackageInfo;
+import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.UserInfo;
 import android.content.res.XmlResourceParser;
-import android.database.ContentObserver;
 import android.os.Build;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.UserManager;
-import android.provider.Settings.Global;
 import android.provider.Settings;
 import android.util.AndroidRuntimeException;
 import android.util.Log;
+import android.util.Slog;
 import android.webkit.UserPackage;
 import android.webkit.WebViewFactory;
 import android.webkit.WebViewProviderInfo;
 import android.webkit.WebViewZygote;
 
 import com.android.internal.util.XmlUtils;
+import com.android.server.LocalServices;
+import com.android.server.PinnerService;
+
+import org.xmlpull.v1.XmlPullParserException;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-
-import org.xmlpull.v1.XmlPullParserException;
 
 /**
  * Default implementation for the WebView preparation Utility interface.
@@ -62,6 +66,7 @@ public class SystemImpl implements SystemInterface {
     private static final String TAG_AVAILABILITY = "availableByDefault";
     private static final String TAG_SIGNATURE = "signature";
     private static final String TAG_FALLBACK = "isFallback";
+    private static final String PIN_GROUP = "webview";
     private final WebViewProviderInfo[] mWebViewProviderPackages;
 
     // Initialization-on-demand holder idiom for getting the WebView provider packages once and
@@ -77,7 +82,6 @@ public class SystemImpl implements SystemInterface {
     private SystemImpl() {
         int numFallbackPackages = 0;
         int numAvailableByDefaultPackages = 0;
-        int numAvByDefaultAndNotFallback = 0;
         XmlResourceParser parser = null;
         List<WebViewProviderInfo> webViewProviders = new ArrayList<WebViewProviderInfo>();
         try {
@@ -121,9 +125,6 @@ public class SystemImpl implements SystemInterface {
                     }
                     if (currentProvider.availableByDefault) {
                         numAvailableByDefaultPackages++;
-                        if (!currentProvider.isFallback) {
-                            numAvByDefaultAndNotFallback++;
-                        }
                     }
                     webViewProviders.add(currentProvider);
                 }
@@ -140,10 +141,6 @@ public class SystemImpl implements SystemInterface {
             throw new AndroidRuntimeException("There must be at least one WebView package "
                     + "that is available by default");
         }
-        if (numAvByDefaultAndNotFallback == 0) {
-            throw new AndroidRuntimeException("There must be at least one WebView package "
-                    + "that is available by default and not a fallback");
-        }
         mWebViewProviderPackages =
                 webViewProviders.toArray(new WebViewProviderInfo[webViewProviders.size()]);
     }
@@ -156,9 +153,10 @@ public class SystemImpl implements SystemInterface {
         return mWebViewProviderPackages;
     }
 
-    public int getFactoryPackageVersion(String packageName) throws NameNotFoundException {
+    public long getFactoryPackageVersion(String packageName) throws NameNotFoundException {
         PackageManager pm = AppGlobals.getInitialApplication().getPackageManager();
-        return pm.getPackageInfo(packageName, PackageManager.MATCH_FACTORY_ONLY).versionCode;
+        return pm.getPackageInfo(packageName, PackageManager.MATCH_FACTORY_ONLY)
+                .getLongVersionCode();
     }
 
     /**
@@ -204,36 +202,7 @@ public class SystemImpl implements SystemInterface {
             ActivityManager.getService().killPackageDependents(packageName,
                     UserHandle.USER_ALL);
         } catch (RemoteException e) {
-        }
-    }
-
-    @Override
-    public boolean isFallbackLogicEnabled() {
-        // Note that this is enabled by default (i.e. if the setting hasn't been set).
-        return Settings.Global.getInt(AppGlobals.getInitialApplication().getContentResolver(),
-                Settings.Global.WEBVIEW_FALLBACK_LOGIC_ENABLED, 1) == 1;
-    }
-
-    @Override
-    public void enableFallbackLogic(boolean enable) {
-        Settings.Global.putInt(AppGlobals.getInitialApplication().getContentResolver(),
-                Settings.Global.WEBVIEW_FALLBACK_LOGIC_ENABLED, enable ? 1 : 0);
-    }
-
-    @Override
-    public void uninstallAndDisablePackageForAllUsers(Context context, String packageName) {
-        enablePackageForAllUsers(context, packageName, false);
-        try {
-            PackageManager pm = AppGlobals.getInitialApplication().getPackageManager();
-            ApplicationInfo applicationInfo = pm.getApplicationInfo(packageName, 0);
-            if (applicationInfo != null && applicationInfo.isUpdatedSystemApp()) {
-                pm.deletePackage(packageName, new IPackageDeleteObserver.Stub() {
-                        public void packageDeleted(String packageName, int returnCode) {
-                            enablePackageForAllUsers(context, packageName, false);
-                        }
-                    }, PackageManager.DELETE_SYSTEM_APP | PackageManager.DELETE_ALL_USERS);
-            }
-        } catch (NameNotFoundException e) {
+            Slog.wtf(TAG, "failed to call killPackageDependents for " + packageName, e);
         }
     }
 
@@ -245,8 +214,7 @@ public class SystemImpl implements SystemInterface {
         }
     }
 
-    @Override
-    public void enablePackageForUser(String packageName, boolean enable, int userId) {
+    private void enablePackageForUser(String packageName, boolean enable, int userId) {
         try {
             AppGlobals.getPackageManager().setApplicationEnabledSetting(
                     packageName,
@@ -257,6 +225,21 @@ public class SystemImpl implements SystemInterface {
             Log.w(TAG, "Tried to " + (enable ? "enable " : "disable ") + packageName
                     + " for user " + userId + ": " + e);
         }
+    }
+
+    @Override
+    public void installExistingPackageForAllUsers(Context context, String packageName) {
+        UserManager userManager = context.getSystemService(UserManager.class);
+        for (UserInfo userInfo : userManager.getUsers()) {
+            installPackageForUser(packageName, userInfo.id);
+        }
+    }
+
+    private void installPackageForUser(String packageName, int userId) {
+        final Context context = AppGlobals.getInitialApplication();
+        final Context contextAsUser = context.createContextAsUser(UserHandle.of(userId), 0);
+        final PackageInstaller installer = contextAsUser.getPackageManager().getPackageInstaller();
+        installer.installExistingPackage(packageName, PackageManager.INSTALL_REASON_UNKNOWN, null);
     }
 
     @Override
@@ -279,28 +262,78 @@ public class SystemImpl implements SystemInterface {
 
     @Override
     public int getMultiProcessSetting(Context context) {
-        return Settings.Global.getInt(context.getContentResolver(),
-                                      Settings.Global.WEBVIEW_MULTIPROCESS, 0);
+        if (updateServiceV2()) {
+            throw new IllegalStateException(
+                    "getMultiProcessSetting shouldn't be called if update_service_v2 flag is set.");
+        }
+        return Settings.Global.getInt(
+                context.getContentResolver(), Settings.Global.WEBVIEW_MULTIPROCESS, 0);
     }
 
     @Override
     public void setMultiProcessSetting(Context context, int value) {
-        Settings.Global.putInt(context.getContentResolver(),
-                               Settings.Global.WEBVIEW_MULTIPROCESS, value);
+        if (updateServiceV2()) {
+            throw new IllegalStateException(
+                    "setMultiProcessSetting shouldn't be called if update_service_v2 flag is set.");
+        }
+        Settings.Global.putInt(
+                context.getContentResolver(), Settings.Global.WEBVIEW_MULTIPROCESS, value);
     }
 
     @Override
     public void notifyZygote(boolean enableMultiProcess) {
+        if (updateServiceV2()) {
+            throw new IllegalStateException(
+                    "notifyZygote shouldn't be called if update_service_v2 flag is set.");
+        }
         WebViewZygote.setMultiprocessEnabled(enableMultiProcess);
     }
 
     @Override
+    public void ensureZygoteStarted() {
+        WebViewZygote.getProcess();
+    }
+
+    @Override
     public boolean isMultiProcessDefaultEnabled() {
+        // Multiprocess is enabled by default for all devices.
         return true;
+    }
+
+    @Override
+    public void pinWebviewIfRequired(ApplicationInfo appInfo) {
+        PinnerService pinnerService = LocalServices.getService(PinnerService.class);
+        int webviewPinQuota = pinnerService.getWebviewPinQuota();
+        if (webviewPinQuota <= 0) {
+            return;
+        }
+
+        pinnerService.unpinGroup(PIN_GROUP);
+
+        ArrayList<String> apksToPin = new ArrayList<>();
+        boolean pinSharedFirst = appInfo.metaData.getBoolean("PIN_SHARED_LIBS_FIRST", true);
+        if (appInfo.sharedLibraryFiles != null) {
+            for (String sharedLib : appInfo.sharedLibraryFiles) {
+                apksToPin.add(sharedLib);
+            }
+        }
+        apksToPin.add(appInfo.sourceDir);
+        if (!pinSharedFirst) {
+            // We want to prioritize pinning of the native library that is most likely used by apps
+            // which in some build flavors live in the main apk and as a shared library for others.
+            Collections.reverse(apksToPin);
+        }
+        for (String apk : apksToPin) {
+            if (webviewPinQuota <= 0) {
+                break;
+            }
+            int bytesPinned = pinnerService.pinFile(apk, webviewPinQuota, appInfo, PIN_GROUP);
+            webviewPinQuota -= bytesPinned;
+        }
     }
 
     // flags declaring we want extra info from the package manager for webview providers
     private final static int PACKAGE_FLAGS = PackageManager.GET_META_DATA
-            | PackageManager.GET_SIGNATURES | PackageManager.MATCH_DEBUG_TRIAGED_MISSING
-            | PackageManager.MATCH_ANY_USER;
+            | PackageManager.GET_SIGNATURES | PackageManager.GET_SHARED_LIBRARY_FILES
+            | PackageManager.MATCH_DEBUG_TRIAGED_MISSING | PackageManager.MATCH_ANY_USER;
 }

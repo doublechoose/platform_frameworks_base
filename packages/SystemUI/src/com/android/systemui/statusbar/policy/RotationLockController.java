@@ -23,7 +23,9 @@ public interface RotationLockController extends Listenable,
     int getRotationLockOrientation();
     boolean isRotationLockAffordanceVisible();
     boolean isRotationLocked();
-    void setRotationLocked(boolean locked);
+    boolean isCameraRotationEnabled();
+    void setRotationLocked(boolean locked, String caller);
+    void setRotationLockedAtAngle(boolean locked, int rotation, String caller);
 
     public interface RotationLockControllerCallback {
         void onRotationLockStateChanged(boolean rotationLocked, boolean affordanceVisible);

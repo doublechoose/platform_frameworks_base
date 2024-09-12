@@ -18,6 +18,7 @@ package com.android.internal.widget;
 
 import android.annotation.DrawableRes;
 import android.annotation.NonNull;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
@@ -31,6 +32,7 @@ import android.os.Parcelable;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.util.MathUtils;
+import android.view.AbsSavedState;
 import android.view.FocusFinder;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -45,6 +47,7 @@ import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction;
 import android.view.animation.Interpolator;
+import android.view.inspector.InspectableProperty;
 import android.widget.EdgeEffect;
 import android.widget.Scroller;
 
@@ -242,6 +245,7 @@ public class ViewPager extends ViewGroup {
          * @param positionOffset Value from [0, 1) indicating the offset from the page at position.
          * @param positionOffsetPixels Value in pixels indicating the offset from position.
          */
+        @UnsupportedAppUsage
         public void onPageScrolled(int position, float positionOffset, int positionOffsetPixels);
 
         /**
@@ -250,6 +254,7 @@ public class ViewPager extends ViewGroup {
          *
          * @param position Position index of the new selected page.
          */
+        @UnsupportedAppUsage
         public void onPageSelected(int position);
 
         /**
@@ -262,6 +267,7 @@ public class ViewPager extends ViewGroup {
          * @see com.android.internal.widget.ViewPager#SCROLL_STATE_DRAGGING
          * @see com.android.internal.widget.ViewPager#SCROLL_STATE_SETTLING
          */
+        @UnsupportedAppUsage
         public void onPageScrollStateChanged(int state);
     }
 
@@ -347,8 +353,8 @@ public class ViewPager extends ViewGroup {
         mTouchSlop = configuration.getScaledPagingTouchSlop();
         mMinimumVelocity = (int) (MIN_FLING_VELOCITY * density);
         mMaximumVelocity = configuration.getScaledMaximumFlingVelocity();
-        mLeftEdge = new EdgeEffect(context);
-        mRightEdge = new EdgeEffect(context);
+        mLeftEdge = new EdgeEffect(context, attrs);
+        mRightEdge = new EdgeEffect(context, attrs);
 
         mFlingDistance = (int) (MIN_DISTANCE_FOR_FLING * density);
         mCloseEnough = (int) (CLOSE_ENOUGH * density);
@@ -482,6 +488,7 @@ public class ViewPager extends ViewGroup {
         setCurrentItemInternal(item, smoothScroll, false);
     }
 
+    @UnsupportedAppUsage
     public int getCurrentItem() {
         return mCurItem;
     }
@@ -1198,16 +1205,12 @@ public class ViewPager extends ViewGroup {
      * state, in which case it should implement a subclass of this which
      * contains that state.
      */
-    public static class SavedState extends BaseSavedState {
+    public static class SavedState extends AbsSavedState {
         int position;
         Parcelable adapterState;
         ClassLoader loader;
 
-        public SavedState(Parcel source) {
-            super(source);
-        }
-
-        public SavedState(Parcelable superState) {
+        public SavedState(@NonNull Parcelable superState) {
             super(superState);
         }
 
@@ -1225,10 +1228,15 @@ public class ViewPager extends ViewGroup {
                     + " position=" + position + "}";
         }
 
-        public static final Creator<SavedState> CREATOR = new Creator<SavedState>() {
+        public static final Creator<SavedState> CREATOR = new ClassLoaderCreator<SavedState>() {
+            @Override
+            public SavedState createFromParcel(Parcel in, ClassLoader loader) {
+                return new SavedState(in, loader);
+            }
+
             @Override
             public SavedState createFromParcel(Parcel in) {
-                return new SavedState(in);
+                return new SavedState(in, null);
             }
             @Override
             public SavedState[] newArray(int size) {
@@ -1237,7 +1245,7 @@ public class ViewPager extends ViewGroup {
         };
 
         SavedState(Parcel in, ClassLoader loader) {
-            super(in);
+            super(in, loader);
             if (loader == null) {
                 loader = getClass().getClassLoader();
             }
@@ -1835,7 +1843,7 @@ public class ViewPager extends ViewGroup {
             case MotionEvent.ACTION_MOVE: {
                 /*
                  * mIsBeingDragged == false, otherwise the shortcut would have caught it. Check
-                 * whether the user has moved far enough from his original down touch.
+                 * whether the user has moved far enough from their original down touch.
                  */
 
                 /*
@@ -1883,7 +1891,7 @@ public class ViewPager extends ViewGroup {
                 }
                 if (mIsBeingDragged) {
                     // Scroll to follow the motion event
-                    if (performDrag(x)) {
+                    if (performDrag(x, y)) {
                         postInvalidateOnAnimation();
                     }
                 }
@@ -1910,6 +1918,17 @@ public class ViewPager extends ViewGroup {
                     mIsBeingDragged = true;
                     requestParentDisallowInterceptTouchEvent(true);
                     setScrollState(SCROLL_STATE_DRAGGING);
+                } else if (mLeftEdge.getDistance() != 0
+                        || mRightEdge.getDistance() != 0) {
+                    // Caught the edge glow animation
+                    mIsBeingDragged = true;
+                    setScrollState(SCROLL_STATE_DRAGGING);
+                    if (mLeftEdge.getDistance() != 0) {
+                        mLeftEdge.onPullDistance(0f, 1 - mLastMotionY / getHeight());
+                    }
+                    if (mRightEdge.getDistance() != 0) {
+                        mRightEdge.onPullDistance(0f, mLastMotionY / getHeight());
+                    }
                 } else {
                     completeScroll(false);
                     mIsBeingDragged = false;
@@ -2001,7 +2020,7 @@ public class ViewPager extends ViewGroup {
                     // Scroll to follow the motion event
                     final int activePointerIndex = ev.findPointerIndex(mActivePointerId);
                     final float x = ev.getX(activePointerIndex);
-                    needsInvalidate |= performDrag(x);
+                    needsInvalidate |= performDrag(x, ev.getY(activePointerIndex));
                 }
                 break;
             case MotionEvent.ACTION_UP:
@@ -2072,12 +2091,43 @@ public class ViewPager extends ViewGroup {
         }
     }
 
-    private boolean performDrag(float x) {
+    /**
+     * If either of the horizontal edge glows are currently active, this consumes part or all of
+     * deltaX on the edge glow.
+     *
+     * @param deltaX The pointer motion, in pixels, in the horizontal direction, positive
+     *                         for moving down and negative for moving up.
+     * @param y The vertical position of the pointer.
+     * @return The amount of <code>deltaX</code> that has been consumed by the
+     * edge glow.
+     */
+    private float releaseHorizontalGlow(float deltaX, float y) {
+        // First allow releasing existing overscroll effect:
+        float consumed = 0;
+        float displacement = y / getHeight();
+        float pullDistance = (float) deltaX / getWidth();
+        if (mLeftEdge.getDistance() != 0) {
+            consumed = -mLeftEdge.onPullDistance(-pullDistance, 1 - displacement);
+        } else if (mRightEdge.getDistance() != 0) {
+            consumed = mRightEdge.onPullDistance(pullDistance, displacement);
+        }
+        return consumed * getWidth();
+    }
+
+    private boolean performDrag(float x, float y) {
         boolean needsInvalidate = false;
 
+        final float dX = mLastMotionX - x;
         final int width = getPaddedWidth();
-        final float deltaX = mLastMotionX - x;
         mLastMotionX = x;
+        final float releaseConsumed = releaseHorizontalGlow(dX, y);
+        final float deltaX = dX - releaseConsumed;
+        if (releaseConsumed != 0) {
+            needsInvalidate = true;
+        }
+        if (Math.abs(deltaX) < 0.0001f) { // ignore rounding errors from releaseHorizontalGlow()
+            return needsInvalidate;
+        }
 
         final EdgeEffect startEdge;
         final EdgeEffect endEdge;
@@ -2120,14 +2170,14 @@ public class ViewPager extends ViewGroup {
         if (scrollStart < startBound) {
             if (startAbsolute) {
                 final float over = startBound - scrollStart;
-                startEdge.onPull(Math.abs(over) / width);
+                startEdge.onPullDistance(over / width, 1 - y / getHeight());
                 needsInvalidate = true;
             }
             clampedScrollStart = startBound;
         } else if (scrollStart > endBound) {
             if (endAbsolute) {
                 final float over = scrollStart - endBound;
-                endEdge.onPull(Math.abs(over) / width);
+                endEdge.onPullDistance(over / width, y / getHeight());
                 needsInvalidate = true;
             }
             clampedScrollStart = endBound;
@@ -2220,7 +2270,9 @@ public class ViewPager extends ViewGroup {
      */
     private int determineTargetPage(int currentPage, float pageOffset, int velocity, int deltaX) {
         int targetPage;
-        if (Math.abs(deltaX) > mFlingDistance && Math.abs(velocity) > mMinimumVelocity) {
+        if (Math.abs(deltaX) > mFlingDistance && Math.abs(velocity) > mMinimumVelocity
+                && mLeftEdge.getDistance() == 0 // don't fling while stretched
+                && mRightEdge.getDistance() == 0) {
             targetPage = currentPage - (velocity < 0 ? mLeftIncr : 0);
         } else {
             final float truncator = currentPage >= mCurItem ? 0.4f : 0.6f;
@@ -2777,6 +2829,9 @@ public class ViewPager extends ViewGroup {
          * Where to position the view page within the overall ViewPager
          * container; constants are defined in {@link android.view.Gravity}.
          */
+        @InspectableProperty(
+                name = "layout_gravity",
+                valueType = InspectableProperty.ValueType.GRAVITY)
         public int gravity;
 
         /**

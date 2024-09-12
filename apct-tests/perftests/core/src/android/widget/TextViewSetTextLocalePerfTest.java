@@ -16,27 +16,22 @@
 
 package android.widget;
 
-import android.app.Activity;
-import android.os.Bundle;
-import android.perftests.utils.PerfStatusReporter;
-import android.util.Log;
-
 import android.perftests.utils.BenchmarkState;
-import android.perftests.utils.StubActivity;
-import android.support.test.filters.LargeTest;
-import android.support.test.runner.AndroidJUnit4;
-import android.support.test.rule.ActivityTestRule;
-import android.support.test.InstrumentationRegistry;
+import android.perftests.utils.PerfStatusReporter;
+import android.perftests.utils.PerfTestActivity;
 
-import java.util.Locale;
-import java.util.Collection;
-import java.util.Arrays;
+import androidx.test.filters.LargeTest;
+import androidx.test.rule.ActivityTestRule;
 
-import org.junit.Test;
 import org.junit.Rule;
+import org.junit.Test;
+import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
-import org.junit.runner.RunWith;
+
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Locale;
 
 @LargeTest
 @RunWith(Parameterized.class)
@@ -61,7 +56,8 @@ public class TextViewSetTextLocalePerfTest {
     }
 
     @Rule
-    public ActivityTestRule<StubActivity> mActivityRule = new ActivityTestRule(StubActivity.class);
+    public ActivityTestRule<PerfTestActivity> mActivityRule =
+            new ActivityTestRule<>(PerfTestActivity.class);
 
     @Rule
     public PerfStatusReporter mPerfStatusReporter = new PerfStatusReporter();

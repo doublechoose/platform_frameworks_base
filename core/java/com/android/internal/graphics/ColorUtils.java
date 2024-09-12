@@ -22,6 +22,8 @@ import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.graphics.Color;
 
+import com.android.internal.graphics.cam.Cam;
+
 /**
  * Copied from: frameworks/support/core-utils/java/android/support/v4/graphics/ColorUtils.java
  *
@@ -60,7 +62,10 @@ public final class ColorUtils {
         return Color.argb(a, r, g, b);
     }
 
-    private static int compositeAlpha(int foregroundAlpha, int backgroundAlpha) {
+    /**
+     * Returns the composite alpha of the given foreground and background alpha.
+     */
+    public static int compositeAlpha(int foregroundAlpha, int backgroundAlpha) {
         return 0xFF - (((0xFF - backgroundAlpha) * (0xFF - foregroundAlpha)) / 0xFF);
     }
 
@@ -106,6 +111,31 @@ public final class ColorUtils {
     }
 
     /**
+     * Calculates the minimum alpha value which can be applied to {@code background} so that would
+     * have a contrast value of at least {@code minContrastRatio} when alpha blended to
+     * {@code foreground}.
+     *
+     * @param foreground       the foreground color
+     * @param background       the background color, opacity will be ignored
+     * @param minContrastRatio the minimum contrast ratio
+     * @return the alpha value in the range 0-255, or -1 if no value could be calculated
+     */
+    public static int calculateMinimumBackgroundAlpha(@ColorInt int foreground,
+            @ColorInt int background, float minContrastRatio) {
+        // Ignore initial alpha that the background might have since this is
+        // what we're trying to calculate.
+        background = setAlphaComponent(background, 255);
+        final int leastContrastyColor = setAlphaComponent(foreground, 255);
+        return binaryAlphaSearch(foreground, background, minContrastRatio, (fg, bg, alpha) -> {
+            int testBackground = blendARGB(leastContrastyColor, bg, alpha/255f);
+            // Float rounding might set this alpha to something other that 255,
+            // raising an exception in calculateContrast.
+            testBackground = setAlphaComponent(testBackground, 255);
+            return calculateContrast(fg, testBackground);
+        });
+    }
+
+    /**
      * Calculates the minimum alpha value which can be applied to {@code foreground} so that would
      * have a contrast value of at least {@code minContrastRatio} when compared to
      * {@code background}.
@@ -122,14 +152,33 @@ public final class ColorUtils {
                     + Integer.toHexString(background));
         }
 
+        ContrastCalculator contrastCalculator = (fg, bg, alpha) -> {
+            int testForeground = setAlphaComponent(fg, alpha);
+            return calculateContrast(testForeground, bg);
+        };
+
         // First lets check that a fully opaque foreground has sufficient contrast
-        int testForeground = setAlphaComponent(foreground, 255);
-        double testRatio = calculateContrast(testForeground, background);
+        double testRatio = contrastCalculator.calculateContrast(foreground, background, 255);
         if (testRatio < minContrastRatio) {
             // Fully opaque foreground does not have sufficient contrast, return error
             return -1;
         }
+        foreground = setAlphaComponent(foreground, 255);
+        return binaryAlphaSearch(foreground, background, minContrastRatio, contrastCalculator);
+    }
 
+    /**
+     * Calculates the alpha value using binary search based on a given contrast evaluation function
+     * and target contrast that needs to be satisfied.
+     *
+     * @param foreground         the foreground color
+     * @param background         the opaque background color
+     * @param minContrastRatio   the minimum contrast ratio
+     * @param calculator function that calculates contrast
+     * @return the alpha value in the range 0-255, or -1 if no value could be calculated
+     */
+    private static int binaryAlphaSearch(@ColorInt int foreground, @ColorInt int background,
+            float minContrastRatio, ContrastCalculator calculator) {
         // Binary search to find a value with the minimum value which provides sufficient contrast
         int numIterations = 0;
         int minAlpha = 0;
@@ -139,9 +188,8 @@ public final class ColorUtils {
                 (maxAlpha - minAlpha) > MIN_ALPHA_SEARCH_PRECISION) {
             final int testAlpha = (minAlpha + maxAlpha) / 2;
 
-            testForeground = setAlphaComponent(foreground, testAlpha);
-            testRatio = calculateContrast(testForeground, background);
-
+            final double testRatio = calculator.calculateContrast(foreground, background,
+                    testAlpha);
             if (testRatio < minContrastRatio) {
                 minAlpha = testAlpha;
             } else {
@@ -290,6 +338,35 @@ public final class ColorUtils {
     }
 
     /**
+     * Convert the ARGB color to a color appearance model.
+     *
+     * The color appearance model is based on CAM16 hue and chroma, using L*a*b*'s L* as the
+     * third dimension.
+     *
+     * @param color the ARGB color to convert. The alpha component is ignored.
+     */
+    public static Cam colorToCAM(@ColorInt int color) {
+        return Cam.fromInt(color);
+    }
+
+    /**
+     * Convert a color appearance model representation to an ARGB color.
+     *
+     * Note: the returned color may have a lower chroma than requested. Whether a chroma is
+     * available depends on luminance. For example, there's no such thing as a high chroma light
+     * red, due to the limitations of our eyes and/or physics. If the requested chroma is
+     * unavailable, the highest possible chroma at the requested luminance is returned.
+     *
+     * @param hue hue, in degrees, in CAM coordinates
+     * @param chroma chroma in CAM coordinates.
+     * @param lstar perceptual luminance, L* in L*a*b*
+     */
+    @ColorInt
+    public static int CAMToColor(float hue, float chroma, float lstar) {
+        return Cam.getInt(hue, chroma, lstar);
+    }
+
+    /**
      * Set the alpha component of {@code color} to be {@code alpha}.
      */
     @ColorInt
@@ -315,7 +392,7 @@ public final class ColorUtils {
      * Convert RGB components to its CIE Lab representative components.
      *
      * <ul>
-     * <li>outLab[0] is L [0 ...1)</li>
+     * <li>outLab[0] is L [0 ...100)</li>
      * <li>outLab[1] is a [-128...127)</li>
      * <li>outLab[2] is b [-128...127)</li>
      * </ul>
@@ -397,7 +474,7 @@ public final class ColorUtils {
      * 2° Standard Observer (1931).</p>
      *
      * <ul>
-     * <li>outLab[0] is L [0 ...1)</li>
+     * <li>outLab[0] is L [0 ...100)</li>
      * <li>outLab[1] is a [-128...127)</li>
      * <li>outLab[2] is b [-128...127)</li>
      * </ul>
@@ -613,6 +690,10 @@ public final class ColorUtils {
             TEMP_ARRAY.set(result);
         }
         return result;
+    }
+
+    private interface ContrastCalculator {
+        double calculateContrast(int foreground, int background, int alpha);
     }
 
 }

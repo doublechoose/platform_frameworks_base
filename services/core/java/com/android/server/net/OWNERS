@@ -1,10 +1,8 @@
 set noparent
+file:platform/packages/modules/Connectivity:main:/OWNERS_core_networking
+per-file NetworkPolicyManagerService.java=jackyu@google.com, sarahchin@google.com
 
-ek@google.com
-hugobenichi@google.com
-jsharkey@google.com
-lorenzo@google.com
-satk@google.com
-silberst@google.com
+jsharkey@android.com
 sudheersai@google.com
 yamasani@google.com
+suprabh@google.com

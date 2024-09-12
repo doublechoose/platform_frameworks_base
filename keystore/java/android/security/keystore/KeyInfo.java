@@ -16,6 +16,7 @@
 
 package android.security.keystore;
 
+import android.annotation.FlaggedApi;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 
@@ -78,9 +79,15 @@ public class KeyInfo implements KeySpec {
     private final @KeyProperties.BlockModeEnum String[] mBlockModes;
     private final boolean mUserAuthenticationRequired;
     private final int mUserAuthenticationValidityDurationSeconds;
+    private final @KeyProperties.AuthEnum int mUserAuthenticationType;
     private final boolean mUserAuthenticationRequirementEnforcedBySecureHardware;
     private final boolean mUserAuthenticationValidWhileOnBody;
+    private final boolean mUnlockedDeviceRequired;
+    private final boolean mTrustedUserPresenceRequired;
     private final boolean mInvalidatedByBiometricEnrollment;
+    private final boolean mUserConfirmationRequired;
+    private final @KeyProperties.SecurityLevelEnum int mSecurityLevel;
+    private final int mRemainingUsageCount;
 
     /**
      * @hide
@@ -99,9 +106,15 @@ public class KeyInfo implements KeySpec {
             @KeyProperties.BlockModeEnum String[] blockModes,
             boolean userAuthenticationRequired,
             int userAuthenticationValidityDurationSeconds,
+            @KeyProperties.AuthEnum int userAuthenticationType,
             boolean userAuthenticationRequirementEnforcedBySecureHardware,
             boolean userAuthenticationValidWhileOnBody,
-            boolean invalidatedByBiometricEnrollment) {
+            boolean unlockedDeviceRequired,
+            boolean trustedUserPresenceRequired,
+            boolean invalidatedByBiometricEnrollment,
+            boolean userConfirmationRequired,
+            @KeyProperties.SecurityLevelEnum int securityLevel,
+            int remainingUsageCount) {
         mKeystoreAlias = keystoreKeyAlias;
         mInsideSecureHardware = insideSecureHardware;
         mOrigin = origin;
@@ -118,10 +131,16 @@ public class KeyInfo implements KeySpec {
         mBlockModes = ArrayUtils.cloneIfNotEmpty(ArrayUtils.nullToEmpty(blockModes));
         mUserAuthenticationRequired = userAuthenticationRequired;
         mUserAuthenticationValidityDurationSeconds = userAuthenticationValidityDurationSeconds;
+        mUserAuthenticationType = userAuthenticationType;
         mUserAuthenticationRequirementEnforcedBySecureHardware =
                 userAuthenticationRequirementEnforcedBySecureHardware;
         mUserAuthenticationValidWhileOnBody = userAuthenticationValidWhileOnBody;
+        mUnlockedDeviceRequired = unlockedDeviceRequired;
+        mTrustedUserPresenceRequired = trustedUserPresenceRequired;
         mInvalidatedByBiometricEnrollment = invalidatedByBiometricEnrollment;
+        mUserConfirmationRequired = userConfirmationRequired;
+        mSecurityLevel = securityLevel;
+        mRemainingUsageCount = remainingUsageCount;
     }
 
     /**
@@ -135,7 +154,10 @@ public class KeyInfo implements KeySpec {
      * Returns {@code true} if the key resides inside secure hardware (e.g., Trusted Execution
      * Environment (TEE) or Secure Element (SE)). Key material of such keys is available in
      * plaintext only inside the secure hardware and is not exposed outside of it.
+     *
+     * @deprecated This method is superseded by @see getSecurityLevel.
      */
+    @Deprecated
     public boolean isInsideSecureHardware() {
         return mInsideSecureHardware;
     }
@@ -257,6 +279,41 @@ public class KeyInfo implements KeySpec {
     }
 
     /**
+     * Returns {@code true} if the key is authorized to be used only while the device is unlocked.
+     *
+     * <p>This authorization applies only to secret key and private key operations. Public key
+     * operations are not restricted.
+     *
+     * @see KeyGenParameterSpec.Builder#setUnlockedDeviceRequired(boolean)
+     * @see KeyProtection.Builder#setUnlockedDeviceRequired(boolean)
+     */
+    @FlaggedApi(android.security.Flags.FLAG_KEYINFO_UNLOCKED_DEVICE_REQUIRED)
+    public boolean isUnlockedDeviceRequired() {
+        return mUnlockedDeviceRequired;
+    }
+
+    /**
+     * Returns {@code true} if the key is authorized to be used only for messages confirmed by the
+     * user.
+     *
+     * Confirmation is separate from user authentication (see
+     * {@link #isUserAuthenticationRequired()}). Keys can be created that require confirmation but
+     * not user authentication, or user authentication but not confirmation, or both. Confirmation
+     * verifies that some user with physical possession of the device has approved a displayed
+     * message. User authentication verifies that the correct user is present and has
+     * authenticated.
+     *
+     * <p>This authorization applies only to secret key and private key operations. Public key
+     * operations are not restricted.
+     *
+     * @see KeyGenParameterSpec.Builder#setUserConfirmationRequired(boolean)
+     * @see KeyProtection.Builder#setUserConfirmationRequired(boolean)
+     */
+    public boolean isUserConfirmationRequired() {
+        return mUserConfirmationRequired;
+    }
+
+    /**
      * Gets the duration of time (seconds) for which this key is authorized to be used after the
      * user is successfully authenticated. This has effect only if user authentication is required
      * (see {@link #isUserAuthenticationRequired()}).
@@ -271,6 +328,22 @@ public class KeyInfo implements KeySpec {
      */
     public int getUserAuthenticationValidityDurationSeconds() {
         return mUserAuthenticationValidityDurationSeconds;
+    }
+
+    /**
+     * Gets the acceptable user authentication types for which this key can be authorized to be
+     * used. This has effect only if user authentication is required (see
+     * {@link #isUserAuthenticationRequired()}).
+     *
+     * <p>This authorization applies only to secret key and private key operations. Public key
+     * operations are not restricted.
+     *
+     * @return integer representing the accepted forms of user authentication for this key
+     *
+     * @see #isUserAuthenticationRequired()
+     */
+    public @KeyProperties.AuthEnum int getUserAuthenticationType() {
+        return mUserAuthenticationType;
     }
 
     /**
@@ -300,5 +373,37 @@ public class KeyInfo implements KeySpec {
      */
     public boolean isInvalidatedByBiometricEnrollment() {
         return mInvalidatedByBiometricEnrollment;
+    }
+
+    /**
+     * Returns {@code true} if the key can only be only be used if a test for user presence has
+     * succeeded since Signature.initSign() has been called.
+     */
+    public boolean isTrustedUserPresenceRequired() {
+        return mTrustedUserPresenceRequired;
+    }
+
+    /**
+     * Returns the security level that the key is protected by.
+     * {@code KeyProperties.SecurityLevelEnum.TRUSTED_ENVIRONMENT} and
+     * {@code KeyProperties.SecurityLevelEnum.STRONGBOX} indicate that the key material resides
+     * in secure hardware. Key material of such keys is available in
+     * plaintext only inside the secure hardware and is not exposed outside of it.
+     *
+     * <p>See {@link KeyProperties}.{@code SecurityLevelEnum} constants.
+     */
+    public @KeyProperties.SecurityLevelEnum int getSecurityLevel() {
+        return mSecurityLevel;
+    }
+
+    /**
+     * Returns the remaining number of times the key is allowed to be used or
+     * {@link KeyProperties#UNRESTRICTED_USAGE_COUNT} if there's no restriction on the number of
+     * times the key can be used. Note that this gives a best effort count and need not be
+     * accurate (as there might be usages happening in parallel and the count maintained here need
+     * not be in sync with the usage).
+     */
+    public int getRemainingUsageCount() {
+        return mRemainingUsageCount;
     }
 }

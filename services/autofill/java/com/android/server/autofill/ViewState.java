@@ -17,9 +17,11 @@
 package com.android.server.autofill;
 
 import static android.service.autofill.FillRequest.FLAG_MANUAL_REQUEST;
-import static com.android.server.autofill.Helper.sDebug;
-import static com.android.server.autofill.Helper.sVerbose;
+import static android.service.autofill.FillRequest.FLAG_VIEW_REQUESTS_CREDMAN_SERVICE;
 
+import static com.android.server.autofill.Helper.sDebug;
+
+import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.graphics.Rect;
 import android.service.autofill.FillResponse;
@@ -41,14 +43,12 @@ final class ViewState {
         /**
          * Called when the fill UI is ready to be shown for this view.
          */
-        void onFillReady(FillResponse fillResponse, AutofillId focusedId,
-                @Nullable AutofillValue value);
+        void onFillReady(@NonNull FillResponse fillResponse, @NonNull AutofillId focusedId,
+                @Nullable AutofillValue value, int flags);
     }
 
     private static final String TAG = "ViewState";
 
-    // NOTE: state constants must be public because of flagstoString().
-    public static final int STATE_UNKNOWN = 0x000;
     /** Initial state. */
     public static final int STATE_INITIAL = 0x001;
     /** View id is present in a dataset returned by the service. */
@@ -67,23 +67,65 @@ final class ViewState {
     public static final int STATE_IGNORED = 0x080;
     /** User manually request autofill in this view, after it was already autofilled. */
     public static final int STATE_RESTARTED_SESSION = 0x100;
+    /** View is the URL bar of a package on compat mode. */
+    public  static final int STATE_URL_BAR = 0x200;
+    /** View was asked to autofill but failed to do so. */
+    public static final int STATE_AUTOFILL_FAILED = 0x400;
+    /** View has been autofilled at least once. */
+    public static final int STATE_AUTOFILLED_ONCE = 0x800;
+    /** View triggered the latest augmented autofill request. */
+    public static final int STATE_TRIGGERED_AUGMENTED_AUTOFILL = 0x1000;
+    /** Inline suggestions were shown for this View. */
+    public static final int STATE_INLINE_SHOWN = 0x2000;
+    /** A character was removed from the View value (not by the service). */
+    public static final int STATE_CHAR_REMOVED = 0x4000;
+    /** Showing inline suggestions is not allowed for this View. */
+    public static final int STATE_INLINE_DISABLED = 0x8000;
+    /** The View is waiting for an inline suggestions request from IME.*/
+    public static final int STATE_PENDING_CREATE_INLINE_REQUEST = 0x10000;
+    /** Fill dialog were shown for this View. */
+    public static final int STATE_FILL_DIALOG_SHOWN = 0x20000;
 
     public final AutofillId id;
 
     private final Listener mListener;
-    private final Session mSession;
 
-    private FillResponse mResponse;
+    private final boolean mIsPrimaryCredential;
+
+    /**
+     * There are two sources of fill response. The fill response from the session's remote fill
+     * service and the fill response from the secondary provider handler. Primary Fill Response
+     * stores the fill response from the session's remote fill service.
+     */
+    private FillResponse mPrimaryFillResponse;
+
+    /**
+     * Secondary fill response stores the fill response from the secondary provider handler. Based
+     * on whether the user focuses on a credential view or an autofill view, the relevant fill
+     * response will be used to show the autofill suggestions.
+     */
+    private FillResponse mSecondaryFillResponse;
     private AutofillValue mCurrentValue;
+
+    /**
+     * Some apps clear the form before navigating to another activity. The mCandidateSaveValue
+     * caches the value when a field with string longer than 2 characters are cleared.
+     *
+     * When showing save UI, if mCurrentValue of view state is empty, session would use
+     * mCandidateSaveValue to prompt save instead.
+     */
+    private AutofillValue mCandidateSaveValue;
     private AutofillValue mAutofilledValue;
+    private AutofillValue mSanitizedValue;
     private Rect mVirtualBounds;
     private int mState;
+    private String mDatasetId;
 
-    ViewState(Session session, AutofillId id, Listener listener, int state) {
-        mSession = session;
+    ViewState(AutofillId id, Listener listener, int state, boolean isPrimaryCredential) {
         this.id = id;
         mListener = listener;
         mState = state;
+        mIsPrimaryCredential = isPrimaryCredential;
     }
 
     /**
@@ -106,6 +148,18 @@ final class ViewState {
         mCurrentValue = value;
     }
 
+    /**
+     * Gets the candidate save value of the view.
+     */
+    @Nullable
+    AutofillValue getCandidateSaveValue() {
+        return mCandidateSaveValue;
+    }
+
+    void setCandidateSaveValue(AutofillValue value) {
+        mCandidateSaveValue = value;
+    }
+
     @Nullable
     AutofillValue getAutofilledValue() {
         return mAutofilledValue;
@@ -116,16 +170,34 @@ final class ViewState {
     }
 
     @Nullable
+    AutofillValue getSanitizedValue() {
+        return mSanitizedValue;
+    }
+
+    void setSanitizedValue(@Nullable AutofillValue value) {
+        mSanitizedValue = value;
+    }
+
+    @Nullable
     FillResponse getResponse() {
-        return mResponse;
+        return mPrimaryFillResponse;
+    }
+
+    @Nullable
+    FillResponse getSecondaryResponse() {
+        return mSecondaryFillResponse;
     }
 
     void setResponse(FillResponse response) {
-        mResponse = response;
+        setResponse(response, /* isPrimary= */ true);
     }
 
-    CharSequence getServiceName() {
-        return mSession.getServiceName();
+    void setResponse(@Nullable FillResponse response, boolean isPrimary) {
+        if (isPrimary) {
+            mPrimaryFillResponse = response;
+        } else {
+            mSecondaryFillResponse = response;
+        }
     }
 
     int getState() {
@@ -133,7 +205,11 @@ final class ViewState {
     }
 
     String getStateAsString() {
-        return DebugUtils.flagsToString(ViewState.class, "STATE_", mState);
+        return getStateAsString(mState);
+    }
+
+    static String getStateAsString(int state) {
+        return DebugUtils.flagsToString(ViewState.class, "STATE_", state);
     }
 
     void setState(int state) {
@@ -142,10 +218,22 @@ final class ViewState {
         } else {
             mState |= state;
         }
+        if (state == STATE_AUTOFILLED) {
+            mState |= STATE_AUTOFILLED_ONCE;
+        }
     }
 
     void resetState(int state) {
         mState &= ~state;
+    }
+
+    @Nullable
+    String getDatasetId() {
+        return mDatasetId;
+    }
+
+    void setDatasetId(String datasetId) {
+        mDatasetId = datasetId;
     }
 
     // TODO: refactor / rename / document this method (and maybeCallOnFillReady) to make it clear
@@ -164,7 +252,7 @@ final class ViewState {
 
     /**
      * Calls {@link
-     * Listener#onFillReady(FillResponse, AutofillId, AutofillValue)} if the
+     * Listener#onFillReady(FillResponse, AutofillId, AutofillValue, int)} if the
      * fill UI is ready to be displayed (i.e. when response and bounds are set).
      */
     void maybeCallOnFillReady(int flags) {
@@ -173,35 +261,79 @@ final class ViewState {
             return;
         }
         // First try the current response associated with this View.
-        if (mResponse != null) {
-            if (mResponse.getDatasets() != null || mResponse.getAuthentication() != null) {
-                mListener.onFillReady(mResponse, this.id, mCurrentValue);
+        FillResponse requestedResponse = requestingPrimaryResponse(flags)
+                ? mPrimaryFillResponse : mSecondaryFillResponse;
+        if (requestedResponse != null) {
+            if (requestedResponse.getDatasets() != null
+                    || requestedResponse.getAuthentication() != null) {
+                mListener.onFillReady(requestedResponse, this.id, mCurrentValue, flags);
             }
+        }
+    }
+
+    private boolean requestingPrimaryResponse(int flags) {
+        if (mIsPrimaryCredential) {
+            return (flags & FLAG_VIEW_REQUESTS_CREDMAN_SERVICE) != 0;
+        } else {
+            return (flags & FLAG_VIEW_REQUESTS_CREDMAN_SERVICE) == 0;
         }
     }
 
     @Override
     public String toString() {
-        return "ViewState: [id=" + id + ", currentValue=" + mCurrentValue
-                + ", autofilledValue=" + mAutofilledValue
-                + ", bounds=" + mVirtualBounds + ", state=" + getStateAsString() + "]";
+        final StringBuilder builder = new StringBuilder("ViewState: [id=").append(id);
+        if (mDatasetId != null) {
+            builder.append(", datasetId:" ).append(mDatasetId);
+        }
+        builder.append(", state:").append(getStateAsString());
+        if (mCurrentValue != null) {
+            builder.append(", currentValue:" ).append(mCurrentValue);
+        }
+        if (mCandidateSaveValue != null) {
+            builder.append(", candidateSaveValue:").append(mCandidateSaveValue);
+        }
+        if (mAutofilledValue != null) {
+            builder.append(", autofilledValue:" ).append(mAutofilledValue);
+        }
+        if (mSanitizedValue != null) {
+            builder.append(", sanitizedValue:" ).append(mSanitizedValue);
+        }
+        if (mVirtualBounds != null) {
+            builder.append(", virtualBounds:" ).append(mVirtualBounds);
+        }
+        builder.append("]");
+        return builder.toString();
     }
 
     void dump(String prefix, PrintWriter pw) {
-        pw.print(prefix); pw.print("id:" ); pw.println(this.id);
-        pw.print(prefix); pw.print("state:" ); pw.println(getStateAsString());
-        pw.print(prefix); pw.print("response:");
-        if (mResponse == null) {
-            pw.println("N/A");
-        } else {
-            if (sVerbose) {
-                pw.println(mResponse);
-            } else {
-                pw.println(mResponse.getRequestId());
-            }
+        pw.print(prefix); pw.print("id:" ); pw.println(id);
+        if (mDatasetId != null) {
+            pw.print(prefix); pw.print("datasetId:" ); pw.println(mDatasetId);
         }
-        pw.print(prefix); pw.print("currentValue:" ); pw.println(mCurrentValue);
-        pw.print(prefix); pw.print("autofilledValue:" ); pw.println(mAutofilledValue);
-        pw.print(prefix); pw.print("virtualBounds:" ); pw.println(mVirtualBounds);
+        pw.print(prefix); pw.print("state:" ); pw.println(getStateAsString());
+        pw.print(prefix); pw.print("is primary credential:"); pw.println(mIsPrimaryCredential);
+        if (mPrimaryFillResponse != null) {
+            pw.print(prefix); pw.print("primary response id:");
+            pw.println(mPrimaryFillResponse.getRequestId());
+        }
+        if (mSecondaryFillResponse != null) {
+            pw.print(prefix); pw.print("secondary response id:");
+            pw.println(mSecondaryFillResponse.getRequestId());
+        }
+        if (mCurrentValue != null) {
+            pw.print(prefix); pw.print("currentValue:" ); pw.println(mCurrentValue);
+        }
+        if (mAutofilledValue != null) {
+            pw.print(prefix); pw.print("autofilledValue:" ); pw.println(mAutofilledValue);
+        }
+        if (mCandidateSaveValue != null) {
+            pw.print(prefix); pw.print("candidateSaveValue:"); pw.println(mCandidateSaveValue);
+        }
+        if (mSanitizedValue != null) {
+            pw.print(prefix); pw.print("sanitizedValue:" ); pw.println(mSanitizedValue);
+        }
+        if (mVirtualBounds != null) {
+            pw.print(prefix); pw.print("virtualBounds:" ); pw.println(mVirtualBounds);
+        }
     }
 }

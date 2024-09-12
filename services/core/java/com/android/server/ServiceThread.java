@@ -16,10 +16,11 @@
 
 package com.android.server;
 
+import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Looper;
 import android.os.Process;
 import android.os.StrictMode;
-import android.util.Slog;
 
 /**
  * Special handler thread that we create for system services that require their own loopers.
@@ -38,11 +39,14 @@ public class ServiceThread extends HandlerThread {
     public void run() {
         Process.setCanSelfBackground(false);
 
-        // For debug builds, log event loop stalls to dropbox for analysis.
-        if (!mAllowIo && StrictMode.conditionallyEnableDebugLogging()) {
-            Slog.i(TAG, "Enabled StrictMode logging for " + getName() + " looper.");
+        if (!mAllowIo) {
+            StrictMode.initThreadDefaults(null);
         }
 
         super.run();
+    }
+
+    protected static Handler makeSharedHandler(Looper looper) {
+        return new Handler(looper, /*callback=*/ null, /* async=*/ false, /* shared=*/ true);
     }
 }

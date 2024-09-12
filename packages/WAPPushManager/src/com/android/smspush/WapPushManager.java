@@ -22,16 +22,24 @@ import android.content.ComponentName;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.PackageManager.NameNotFoundException;
 import android.database.Cursor;
-import android.database.sqlite.SQLiteOpenHelper;
 import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteOpenHelper;
+import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
 import android.os.RemoteException;
+import android.os.UserManager;
 import android.util.Log;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.IWapPushManager;
 import com.android.internal.telephony.WapPushManagerParams;
+
+import java.io.File;
 
 /**
  * The WapPushManager service is implemented to process incoming
@@ -63,8 +71,13 @@ public class WapPushManager extends Service {
     /**
      * Inner class that deals with application ID table
      */
-    private class WapPushManDBHelper extends SQLiteOpenHelper {
-        WapPushManDBHelper(Context context) {
+    @VisibleForTesting
+    public static class WapPushManDBHelper extends SQLiteOpenHelper {
+        /**
+         * Constructor
+         */
+        @VisibleForTesting
+        public WapPushManDBHelper(Context context) {
             super(context, DATABASE_NAME, null, WAP_PUSH_MANAGER_VERSION);
             if (LOCAL_LOGV) Log.v(LOG_TAG, "helper instance created.");
         }
@@ -216,7 +229,27 @@ public class WapPushManager extends Service {
                 intent.setClassName(mContext, lastapp.className);
                 intent.setComponent(new ComponentName(lastapp.packageName,
                         lastapp.className));
-                if (mContext.startService(intent) == null) {
+                PackageManager pm = mContext.getPackageManager();
+                PowerManager powerManager =
+                        (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
+                try {
+                    ApplicationInfo appInfo = pm.getApplicationInfo(lastapp.packageName, 0);
+                    if (appInfo.targetSdkVersion < Build.VERSION_CODES.O ||
+                            powerManager.isIgnoringBatteryOptimizations(lastapp.packageName)) {
+                        if (mContext.startService(intent) == null) {
+                            Log.w(LOG_TAG, "invalid name " +
+                                    lastapp.packageName + "/" + lastapp.className);
+                            return WapPushManagerParams.INVALID_RECEIVER_NAME;
+                        }
+                    } else {
+                        if (mContext.startForegroundService(intent) == null) {
+                            Log.w(LOG_TAG, "invalid name " +
+                                    lastapp.packageName + "/" + lastapp.className);
+                            return WapPushManagerParams.INVALID_RECEIVER_NAME;
+                        }
+                    }
+
+                } catch (NameNotFoundException e) {
                     Log.w(LOG_TAG, "invalid name " +
                             lastapp.packageName + "/" + lastapp.className);
                     return WapPushManagerParams.INVALID_RECEIVER_NAME;
@@ -245,10 +278,6 @@ public class WapPushManager extends Service {
                 int app_type, boolean need_signature, boolean further_processing) {
             WapPushManDBHelper dbh = getDatabase(mContext);
             SQLiteDatabase db = dbh.getWritableDatabase();
-            WapPushManDBHelper.queryData lastapp = dbh.queryLastApp(db, x_app_id, content_type);
-            boolean ret = false;
-            boolean insert = false;
-            int sq = 0;
 
             if (!appTypeCheck(app_type)) {
                 Log.w(LOG_TAG, "invalid app_type " + app_type + ". app_type must be "
@@ -256,34 +285,8 @@ public class WapPushManager extends Service {
                         + WapPushManagerParams.APP_TYPE_SERVICE);
                 return false;
             }
-
-            if (lastapp == null) {
-                insert = true;
-                sq = 0;
-            } else if (!lastapp.packageName.equals(package_name) ||
-                    !lastapp.className.equals(class_name)) {
-                insert = true;
-                sq = lastapp.installOrder + 1;
-            }
-
-            if (insert) {
-                ContentValues values = new ContentValues();
-
-                values.put("x_wap_application", x_app_id);
-                values.put("content_type", content_type);
-                values.put("package_name", package_name);
-                values.put("class_name", class_name);
-                values.put("app_type", app_type);
-                values.put("need_signature", need_signature ? 1 : 0);
-                values.put("further_processing", further_processing ? 1 : 0);
-                values.put("install_order", sq);
-                db.insert(APPID_TABLE_NAME, null, values);
-                if (LOCAL_LOGV) Log.v(LOG_TAG, "add:" + x_app_id + ":" + content_type
-                        + " " + package_name + "." + class_name
-                        + ", newsq:" + sq);
-                ret = true;
-            }
-
+            boolean ret = insertPackage(dbh, db, x_app_id, content_type, package_name, class_name,
+                    app_type, need_signature, further_processing);
             db.close();
 
             return ret;
@@ -380,11 +383,91 @@ public class WapPushManager extends Service {
     protected WapPushManDBHelper getDatabase(Context context) {
         if (mDbHelper == null) {
             if (LOCAL_LOGV) Log.v(LOG_TAG, "create new db inst.");
-            mDbHelper = new WapPushManDBHelper(context);
+            mDbHelper = new WapPushManDBHelper(context.createDeviceProtectedStorageContext());
         }
+        // Migrate existing legacy database into the device encrypted storage.
+        migrateWapPushManDBIfNeeded(context);
         return mDbHelper;
     }
 
+    /**
+     * Inserts a package information into a database
+     */
+    @VisibleForTesting
+    public boolean insertPackage(WapPushManDBHelper dbh, SQLiteDatabase db, String appId,
+            String contentType, String packageName, String className, int appType,
+            boolean needSignature, boolean furtherProcessing) {
+
+        WapPushManDBHelper.queryData lastapp = dbh.queryLastApp(db, appId, contentType);
+        boolean insert = false;
+        int sq = 0;
+
+        if (lastapp == null) {
+            insert = true;
+            sq = 0;
+        } else if (!lastapp.packageName.equals(packageName)
+                || !lastapp.className.equals(className)) {
+            insert = true;
+            sq = lastapp.installOrder + 1;
+        }
+
+        if (insert) {
+            ContentValues values = new ContentValues();
+
+            values.put("x_wap_application", appId);
+            values.put("content_type", contentType);
+            values.put("package_name", packageName);
+            values.put("class_name", className);
+            values.put("app_type", appType);
+            values.put("need_signature", needSignature ? 1 : 0);
+            values.put("further_processing", furtherProcessing ? 1 : 0);
+            values.put("install_order", sq);
+            db.insert(APPID_TABLE_NAME, null, values);
+            if (LOCAL_LOGV) {
+                Log.v(LOG_TAG, "add:" + appId + ":" + contentType + " " + packageName
+                        + "." + className + ", newsq:" + sq);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Migrates a legacy database into the device encrypted storage
+     */
+    private void migrateWapPushManDBIfNeeded(Context context) {
+        UserManager userManager = (UserManager) context.getSystemService(Context.USER_SERVICE);
+        File file = context.getDatabasePath(DATABASE_NAME);
+        if (!userManager.isUserUnlocked() || !file.exists()) {
+            // Check if the device is unlocked because a legacy database can't access during
+            // DirectBoot.
+            return;
+        }
+
+        // Migration steps below:
+        // 1. Merge the package info to legacy database if there is any package info which is
+        // registered during DirectBoot.
+        // 2. Move the data base to the device encryped storage.
+        WapPushManDBHelper legacyDbHelper = new WapPushManDBHelper(context);
+        SQLiteDatabase legacyDb = legacyDbHelper.getWritableDatabase();
+        SQLiteDatabase db = mDbHelper.getWritableDatabase();
+        Cursor cur = db.query(APPID_TABLE_NAME, null, null, null, null, null, null);
+        while (cur.moveToNext()) {
+            insertPackage(legacyDbHelper, legacyDb,
+                    cur.getString(cur.getColumnIndex("x_wap_application")),
+                    cur.getString(cur.getColumnIndex("content_type")),
+                    cur.getString(cur.getColumnIndex("package_name")),
+                    cur.getString(cur.getColumnIndex("class_name")),
+                    cur.getInt(cur.getColumnIndex("app_type")),
+                    cur.getInt(cur.getColumnIndex("need_signature")) == 1,
+                    cur.getInt(cur.getColumnIndex("further_processing")) == 1);
+        }
+        cur.close();
+        legacyDb.close();
+        db.close();
+        context.createDeviceProtectedStorageContext().moveDatabaseFrom(context, DATABASE_NAME);
+        Log.i(LOG_TAG, "Migrated the legacy database.");
+    }
 
     /**
      * This method is used for testing

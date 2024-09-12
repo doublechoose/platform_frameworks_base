@@ -25,7 +25,6 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.ParceledListSlice;
 import android.media.MediaDescription;
-import android.media.session.MediaController;
 import android.media.session.MediaSession;
 import android.os.Binder;
 import android.os.Bundle;
@@ -185,7 +184,7 @@ public final class MediaBrowser {
                 boolean bound = false;
                 try {
                     bound = mContext.bindService(intent, mServiceConnection,
-                            Context.BIND_AUTO_CREATE);
+                            Context.BIND_AUTO_CREATE | Context.BIND_INCLUDE_CAPABILITIES);
                 } catch (Exception ex) {
                     Log.e(TAG, "Failed binding to service " + mServiceComponent);
                 }
@@ -211,7 +210,7 @@ public final class MediaBrowser {
     public void disconnect() {
         // It's ok to call this any state, because allowing this lets apps not have
         // to check isConnected() unnecessarily. They won't appreciate the extra
-        // assertions for this. We do everything we can here to go back to a sane state.
+        // assertions for this. We do everything we can here to go back to a valid state.
         mState = CONNECT_STATE_DISCONNECTING;
         mHandler.post(new Runnable() {
             @Override
@@ -256,7 +255,13 @@ public final class MediaBrowser {
      */
     private void forceCloseConnection() {
         if (mServiceConnection != null) {
-            mContext.unbindService(mServiceConnection);
+            try {
+                mContext.unbindService(mServiceConnection);
+            } catch (IllegalArgumentException e) {
+                if (DBG) {
+                    Log.d(TAG, "unbindService failed", e);
+                }
+            }
         }
         mState = CONNECT_STATE_DISCONNECTED;
         mServiceConnection = null;
@@ -278,8 +283,8 @@ public final class MediaBrowser {
      */
     public @NonNull ComponentName getServiceComponent() {
         if (!isConnected()) {
-            throw new IllegalStateException("getServiceComponent() called while not connected" +
-                    " (state=" + mState + ")");
+            throw new IllegalStateException("getServiceComponent() called while not connected"
+                    + " (state=" + mState + ")");
         }
         return mServiceComponent;
     }
@@ -325,7 +330,7 @@ public final class MediaBrowser {
      *
      * @throws IllegalStateException if not connected.
      */
-     public @NonNull MediaSession.Token getSessionToken() {
+    public @NonNull MediaSession.Token getSessionToken() {
         if (!isConnected()) {
             throw new IllegalStateException("getSessionToken() called while not connected (state="
                     + mState + ")");
@@ -445,6 +450,9 @@ public final class MediaBrowser {
         ResultReceiver receiver = new ResultReceiver(mHandler) {
             @Override
             protected void onReceiveResult(int resultCode, Bundle resultData) {
+                if (!isConnected()) {
+                    return;
+                }
                 if (resultCode != 0 || resultData == null
                         || !resultData.containsKey(MediaBrowserService.KEY_MEDIA_ITEM)) {
                     cb.onError(mediaId);
@@ -455,7 +463,7 @@ public final class MediaBrowser {
                     cb.onError(mediaId);
                     return;
                 }
-                cb.onItemLoaded((MediaItem)item);
+                cb.onItemLoaded((MediaItem) item);
             }
         };
         try {
@@ -485,7 +493,7 @@ public final class MediaBrowser {
             sub = new Subscription();
             mSubscriptions.put(parentId, sub);
         }
-        sub.putCallback(options, callback);
+        sub.putCallback(mContext, options, callback);
 
         // If we are connected, tell the service that we are watching. If we aren't connected,
         // the service will be told when we connect.
@@ -566,7 +574,7 @@ public final class MediaBrowser {
         }
     }
 
-    private final void onServiceConnected(final IMediaBrowserServiceCallbacks callback,
+    private void onServiceConnected(final IMediaBrowserServiceCallbacks callback,
             final String root, final MediaSession.Token session, final Bundle extra) {
         mHandler.post(new Runnable() {
             @Override
@@ -616,7 +624,7 @@ public final class MediaBrowser {
         });
     }
 
-    private final void onConnectionFailed(final IMediaBrowserServiceCallbacks callback) {
+    private void onConnectionFailed(final IMediaBrowserServiceCallbacks callback) {
         mHandler.post(new Runnable() {
             @Override
             public void run() {
@@ -643,7 +651,7 @@ public final class MediaBrowser {
         });
     }
 
-    private final void onLoadChildren(final IMediaBrowserServiceCallbacks callback,
+    private void onLoadChildren(final IMediaBrowserServiceCallbacks callback,
             final String parentId, final ParceledListSlice list, final Bundle options) {
         mHandler.post(new Runnable() {
             @Override
@@ -662,7 +670,8 @@ public final class MediaBrowser {
                 final Subscription subscription = mSubscriptions.get(parentId);
                 if (subscription != null) {
                     // Tell the app.
-                    SubscriptionCallback subscriptionCallback = subscription.getCallback(options);
+                    SubscriptionCallback subscriptionCallback =
+                            subscription.getCallback(mContext, options);
                     if (subscriptionCallback != null) {
                         List<MediaItem> data = list == null ? null : list.getList();
                         if (options == null) {
@@ -686,6 +695,19 @@ public final class MediaBrowser {
                 }
             }
         });
+    }
+
+    private void onDisconnectRequested(ServiceCallbacks callback) {
+        mHandler.post(
+                () -> {
+                    Log.i(TAG, "onDisconnectRequest for " + mServiceComponent);
+
+                    if (!isCurrent(callback, "onDisconnectRequest")) {
+                        return;
+                    }
+                    forceCloseConnection();
+                    mCallback.onDisconnected();
+                });
     }
 
     /**
@@ -735,7 +757,7 @@ public final class MediaBrowser {
 
         /** @hide */
         @Retention(RetentionPolicy.SOURCE)
-        @IntDef(flag=true, value = { FLAG_BROWSABLE, FLAG_PLAYABLE })
+        @IntDef(flag = true, value = { FLAG_BROWSABLE, FLAG_PLAYABLE })
         public @interface Flags { }
 
         /**
@@ -747,8 +769,8 @@ public final class MediaBrowser {
          * Flag: Indicates that the item is playable.
          * <p>
          * The id of this item may be passed to
-         * {@link MediaController.TransportControls#playFromMediaId(String, Bundle)}
-         * to start playing it.
+         * {@link android.media.session.MediaController.TransportControls
+         * #playFromMediaId(String, Bundle)} to start playing it.
          * </p>
          */
         public static final int FLAG_PLAYABLE = 1 << 1;
@@ -798,7 +820,7 @@ public final class MediaBrowser {
             return sb.toString();
         }
 
-        public static final Parcelable.Creator<MediaItem> CREATOR =
+        public static final @android.annotation.NonNull Parcelable.Creator<MediaItem> CREATOR =
                 new Parcelable.Creator<MediaItem>() {
                     @Override
                     public MediaItem createFromParcel(Parcel in) {
@@ -871,12 +893,25 @@ public final class MediaBrowser {
          */
         public void onConnectionFailed() {
         }
+
+        /**
+         * Invoked after disconnecting by request of the {@link MediaBrowserService}.
+         *
+         * <p>The default implementation of this method calls {@link #onConnectionFailed()}.
+         *
+         * @hide
+         */
+        // TODO: b/185136506 - Consider publishing this API in the next window for API changes, if
+        // the need arises.
+        public void onDisconnected() {
+            onConnectionFailed();
+        }
     }
 
     /**
      * Callbacks for subscription related events.
      */
-    public static abstract class SubscriptionCallback {
+    public abstract static class SubscriptionCallback {
         Binder mToken;
 
         public SubscriptionCallback() {
@@ -937,7 +972,7 @@ public final class MediaBrowser {
     /**
      * Callback for receiving the result of {@link #getItem}.
      */
-    public static abstract class ItemCallback {
+    public abstract static class ItemCallback {
         /**
          * Called when the item has been returned by the connected service.
          *
@@ -1068,7 +1103,7 @@ public final class MediaBrowser {
     private static class ServiceCallbacks extends IMediaBrowserServiceCallbacks.Stub {
         private WeakReference<MediaBrowser> mMediaBrowser;
 
-        public ServiceCallbacks(MediaBrowser mediaBrowser) {
+        ServiceCallbacks(MediaBrowser mediaBrowser) {
             mMediaBrowser = new WeakReference<MediaBrowser>(mediaBrowser);
         }
 
@@ -1097,16 +1132,18 @@ public final class MediaBrowser {
         }
 
         @Override
-        public void onLoadChildren(String parentId, ParceledListSlice list) {
-            onLoadChildrenWithOptions(parentId, list, null);
-        }
-
-        @Override
-        public void onLoadChildrenWithOptions(String parentId, ParceledListSlice list,
-                final Bundle options) {
+        public void onLoadChildren(String parentId, ParceledListSlice list, Bundle options) {
             MediaBrowser mediaBrowser = mMediaBrowser.get();
             if (mediaBrowser != null) {
                 mediaBrowser.onLoadChildren(this, parentId, list, options);
+            }
+        }
+
+        @Override
+        public void onDisconnect() {
+            MediaBrowser mediaBrowser = mMediaBrowser.get();
+            if (mediaBrowser != null) {
+                mediaBrowser.onDisconnectRequested(this);
             }
         }
     }
@@ -1115,7 +1152,7 @@ public final class MediaBrowser {
         private final List<SubscriptionCallback> mCallbacks;
         private final List<Bundle> mOptionsList;
 
-        public Subscription() {
+        Subscription() {
             mCallbacks = new ArrayList<>();
             mOptionsList = new ArrayList<>();
         }
@@ -1132,7 +1169,10 @@ public final class MediaBrowser {
             return mCallbacks;
         }
 
-        public SubscriptionCallback getCallback(Bundle options) {
+        public SubscriptionCallback getCallback(Context context, Bundle options) {
+            if (options != null) {
+                options.setClassLoader(context.getClassLoader());
+            }
             for (int i = 0; i < mOptionsList.size(); ++i) {
                 if (MediaBrowserUtils.areSameOptions(mOptionsList.get(i), options)) {
                     return mCallbacks.get(i);
@@ -1141,7 +1181,10 @@ public final class MediaBrowser {
             return null;
         }
 
-        public void putCallback(Bundle options, SubscriptionCallback callback) {
+        public void putCallback(Context context, Bundle options, SubscriptionCallback callback) {
+            if (options != null) {
+                options.setClassLoader(context.getClassLoader());
+            }
             for (int i = 0; i < mOptionsList.size(); ++i) {
                 if (MediaBrowserUtils.areSameOptions(mOptionsList.get(i), options)) {
                     mCallbacks.set(i, callback);

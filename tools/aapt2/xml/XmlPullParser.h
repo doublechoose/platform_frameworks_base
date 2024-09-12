@@ -27,12 +27,11 @@
 #include <string>
 #include <vector>
 
-#include "android-base/macros.h"
-#include "androidfw/StringPiece.h"
-
 #include "Resource.h"
+#include "android-base/macros.h"
+#include "androidfw/Streams.h"
+#include "androidfw/StringPiece.h"
 #include "process/IResourceTableConsumer.h"
-#include "util/Maybe.h"
 #include "xml/XmlUtil.h"
 
 namespace aapt {
@@ -51,6 +50,8 @@ class XmlPullParser : public IPackageDeclStack {
     kEndElement,
     kText,
     kComment,
+    kCdataStart,
+    kCdataEnd,
   };
 
   /**
@@ -64,7 +65,7 @@ class XmlPullParser : public IPackageDeclStack {
   static bool SkipCurrentElement(XmlPullParser* parser);
   static bool IsGoodEvent(Event event);
 
-  explicit XmlPullParser(std::istream& in);
+  explicit XmlPullParser(android::InputStream* in);
   ~XmlPullParser();
 
   /**
@@ -118,8 +119,14 @@ class XmlPullParser : public IPackageDeclStack {
    * If xmlns:app="http://schemas.android.com/apk/res-auto", then
    * 'package' will be set to 'defaultPackage'.
    */
-  Maybe<ExtractedPackage> TransformPackageAlias(
-      const android::StringPiece& alias, const android::StringPiece& local_package) const override;
+  std::optional<ExtractedPackage> TransformPackageAlias(android::StringPiece alias) const override;
+
+  struct PackageDecl {
+    std::string prefix;
+    ExtractedPackage package;
+  };
+
+  const std::vector<PackageDecl>& package_decls() const;
 
   //
   // Remaining methods are for retrieving information about attributes
@@ -159,6 +166,8 @@ class XmlPullParser : public IPackageDeclStack {
   static void XMLCALL EndElementHandler(void* user_data, const char* name);
   static void XMLCALL EndNamespaceHandler(void* user_data, const char* prefix);
   static void XMLCALL CommentDataHandler(void* user_data, const char* comment);
+  static void XMLCALL StartCdataSectionHandler(void* user_data);
+  static void XMLCALL EndCdataSectionHandler(void* user_data);
 
   struct EventData {
     Event event;
@@ -169,35 +178,29 @@ class XmlPullParser : public IPackageDeclStack {
     std::vector<Attribute> attributes;
   };
 
-  std::istream& in_;
+  android::InputStream* in_;
   XML_Parser parser_;
-  char buffer_[16384];
   std::queue<EventData> event_queue_;
   std::string error_;
   const std::string empty_;
   size_t depth_;
   std::stack<std::string> namespace_uris_;
-
-  struct PackageDecl {
-    std::string prefix;
-    ExtractedPackage package;
-  };
   std::vector<PackageDecl> package_aliases_;
 };
 
 /**
  * Finds the attribute in the current element within the global namespace.
  */
-Maybe<android::StringPiece> FindAttribute(const XmlPullParser* parser,
-                                          const android::StringPiece& name);
+std::optional<android::StringPiece> FindAttribute(const XmlPullParser* parser,
+                                                  android::StringPiece name);
 
 /**
  * Finds the attribute in the current element within the global namespace. The
  * attribute's value
  * must not be the empty string.
  */
-Maybe<android::StringPiece> FindNonEmptyAttribute(const XmlPullParser* parser,
-                                                  const android::StringPiece& name);
+std::optional<android::StringPiece> FindNonEmptyAttribute(const XmlPullParser* parser,
+                                                          android::StringPiece name);
 
 //
 // Implementation
@@ -224,26 +227,29 @@ inline ::std::ostream& operator<<(::std::ostream& out,
       return out << "Text";
     case XmlPullParser::Event::kComment:
       return out << "Comment";
+    case XmlPullParser::Event::kCdataStart:
+      return out << "CdataStart";
+    case XmlPullParser::Event::kCdataEnd:
+      return out << "CdataEnd";
   }
   return out;
 }
 
-inline bool XmlPullParser::NextChildNode(XmlPullParser* parser,
-                                         size_t start_depth) {
+inline bool XmlPullParser::NextChildNode(XmlPullParser* parser, size_t start_depth) {
   Event event;
 
   // First get back to the start depth.
-  while (IsGoodEvent(event = parser->Next()) &&
-         parser->depth() > start_depth + 1) {
+  while (IsGoodEvent(event = parser->Next()) && parser->depth() > start_depth + 1) {
   }
 
   // Now look for the first good node.
-  while ((event != Event::kEndElement || parser->depth() > start_depth) &&
-         IsGoodEvent(event)) {
+  while ((event != Event::kEndElement || parser->depth() > start_depth) && IsGoodEvent(event)) {
     switch (event) {
       case Event::kText:
       case Event::kComment:
       case Event::kStartElement:
+      case Event::kCdataStart:
+      case Event::kCdataEnd:
         return true;
       default:
         break;

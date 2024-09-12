@@ -16,29 +16,44 @@
 
 #include "xml/XmlActionExecutor.h"
 
+using ::android::StringPiece;
+
 namespace aapt {
 namespace xml {
 
-static bool wrapper_one(XmlNodeAction::ActionFunc& f, Element* el, SourcePathDiagnostics*) {
+static bool wrapper_one(const XmlNodeAction::ActionFunc& f, Element* el,
+                        const XmlActionExecutorPolicy& policy, android::SourcePathDiagnostics*) {
   return f(el);
 }
 
-static bool wrapper_two(XmlNodeAction::ActionFuncWithDiag& f, Element* el,
-                        SourcePathDiagnostics* diag) {
+static bool wrapper_two(const XmlNodeAction::ActionFuncWithDiag& f, Element* el,
+                        const XmlActionExecutorPolicy& policy,
+                        android::SourcePathDiagnostics* diag) {
   return f(el, diag);
 }
 
+static bool wrapper_three(const XmlNodeAction::ActionFuncWithPolicyAndDiag& f, Element* el,
+                          const XmlActionExecutorPolicy& policy,
+                          android::SourcePathDiagnostics* diag) {
+  return f(el, policy, diag);
+}
+
 void XmlNodeAction::Action(XmlNodeAction::ActionFunc f) {
-  actions_.emplace_back(std::bind(
-      wrapper_one, std::move(f), std::placeholders::_1, std::placeholders::_2));
+  actions_.emplace_back(std::bind(wrapper_one, std::move(f), std::placeholders::_1,
+                                  std::placeholders::_2, std::placeholders::_3));
 }
 
 void XmlNodeAction::Action(XmlNodeAction::ActionFuncWithDiag f) {
-  actions_.emplace_back(std::bind(
-      wrapper_two, std::move(f), std::placeholders::_1, std::placeholders::_2));
+  actions_.emplace_back(std::bind(wrapper_two, std::move(f), std::placeholders::_1,
+                                  std::placeholders::_2, std::placeholders::_3));
 }
 
-static void PrintElementToDiagMessage(const Element* el, DiagMessage* msg) {
+void XmlNodeAction::Action(XmlNodeAction::ActionFuncWithPolicyAndDiag f) {
+  actions_.emplace_back(std::bind(wrapper_three, std::move(f), std::placeholders::_1,
+                                  std::placeholders::_2, std::placeholders::_3));
+}
+
+static void PrintElementToDiagMessage(const Element* el, android::DiagMessage* msg) {
   *msg << "<";
   if (!el->namespace_uri.empty()) {
     *msg << el->namespace_uri << ":";
@@ -46,42 +61,54 @@ static void PrintElementToDiagMessage(const Element* el, DiagMessage* msg) {
   *msg << el->name << ">";
 }
 
-bool XmlNodeAction::Execute(XmlActionExecutorPolicy policy, SourcePathDiagnostics* diag,
-                            Element* el) const {
+bool XmlNodeAction::Execute(XmlActionExecutorPolicy policy, std::vector<StringPiece>* bread_crumb,
+                            android::SourcePathDiagnostics* diag, Element* el) const {
   bool error = false;
-  for (const ActionFuncWithDiag& action : actions_) {
-    error |= !action(el, diag);
+  for (const ActionFuncWithPolicyAndDiag& action : actions_) {
+    error |= !action(el, policy, diag);
   }
 
   for (Element* child_el : el->GetChildElements()) {
     if (child_el->namespace_uri.empty()) {
       std::map<std::string, XmlNodeAction>::const_iterator iter = map_.find(child_el->name);
       if (iter != map_.end()) {
-        error |= !iter->second.Execute(policy, diag, child_el);
+        // Use the iterator's copy of the element name, because the element may be modified.
+        bread_crumb->push_back(iter->first);
+        error |= !iter->second.Execute(policy, bread_crumb, diag, child_el);
+        bread_crumb->pop_back();
         continue;
       }
 
-      if (policy == XmlActionExecutorPolicy::kWhitelist) {
-        DiagMessage error_msg(child_el->line_number);
-        error_msg << "unknown element ";
+      if (policy != XmlActionExecutorPolicy::kNone) {
+        android::DiagMessage error_msg(child_el->line_number);
+        error_msg << "unexpected element ";
         PrintElementToDiagMessage(child_el, &error_msg);
-        error_msg << " found";
-        diag->Error(error_msg);
-        error = true;
+        error_msg << " found in ";
+        for (StringPiece element : *bread_crumb) {
+          error_msg << "<" << element << ">";
+        }
+        if (policy == XmlActionExecutorPolicy::kAllowListWarning) {
+          // Treat the error only as a warning.
+          diag->Warn(error_msg);
+        } else {
+          // Policy is XmlActionExecutorPolicy::kAllowList, we should fail.
+          diag->Error(error_msg);
+          error = true;
+        }
       }
     }
   }
   return !error;
 }
 
-bool XmlActionExecutor::Execute(XmlActionExecutorPolicy policy, IDiagnostics* diag,
+bool XmlActionExecutor::Execute(XmlActionExecutorPolicy policy, android::IDiagnostics* diag,
                                 XmlResource* doc) const {
-  SourcePathDiagnostics source_diag(doc->file.source, diag);
+  android::SourcePathDiagnostics source_diag(doc->file.source, diag);
 
-  Element* el = FindRootElement(doc);
+  Element* el = doc->root.get();
   if (!el) {
-    if (policy == XmlActionExecutorPolicy::kWhitelist) {
-      source_diag.Error(DiagMessage() << "no root XML tag found");
+    if (policy == XmlActionExecutorPolicy::kAllowList) {
+      source_diag.Error(android::DiagMessage() << "no root XML tag found");
       return false;
     }
     return true;
@@ -90,14 +117,15 @@ bool XmlActionExecutor::Execute(XmlActionExecutorPolicy policy, IDiagnostics* di
   if (el->namespace_uri.empty()) {
     std::map<std::string, XmlNodeAction>::const_iterator iter = map_.find(el->name);
     if (iter != map_.end()) {
-      return iter->second.Execute(policy, &source_diag, el);
+      std::vector<StringPiece> bread_crumb;
+      bread_crumb.push_back(iter->first);
+      return iter->second.Execute(policy, &bread_crumb, &source_diag, el);
     }
 
-    if (policy == XmlActionExecutorPolicy::kWhitelist) {
-      DiagMessage error_msg(el->line_number);
-      error_msg << "unknown element ";
+    if (policy == XmlActionExecutorPolicy::kAllowList) {
+      android::DiagMessage error_msg(el->line_number);
+      error_msg << "unexpected root element ";
       PrintElementToDiagMessage(el, &error_msg);
-      error_msg << " found";
       source_diag.Error(error_msg);
       return false;
     }

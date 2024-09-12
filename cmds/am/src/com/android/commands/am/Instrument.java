@@ -16,6 +16,14 @@
 
 package com.android.commands.am;
 
+import static android.app.ActivityManager.INSTR_FLAG_ALWAYS_CHECK_SIGNATURE;
+import static android.app.ActivityManager.INSTR_FLAG_DISABLE_HIDDEN_API_CHECKS;
+import static android.app.ActivityManager.INSTR_FLAG_DISABLE_ISOLATED_STORAGE;
+import static android.app.ActivityManager.INSTR_FLAG_DISABLE_TEST_API_CHECKS;
+import static android.app.ActivityManager.INSTR_FLAG_INSTRUMENT_SDK_IN_SANDBOX;
+import static android.app.ActivityManager.INSTR_FLAG_INSTRUMENT_SDK_SANDBOX;
+import static android.app.ActivityManager.INSTR_FLAG_NO_RESTART;
+
 import android.app.IActivityManager;
 import android.app.IInstrumentationWatcher;
 import android.app.Instrumentation;
@@ -25,22 +33,50 @@ import android.content.pm.IPackageManager;
 import android.content.pm.InstrumentationInfo;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.RemoteException;
+import android.os.Environment;
 import android.os.ServiceManager;
 import android.os.UserHandle;
 import android.util.AndroidException;
 import android.util.proto.ProtoOutputStream;
 import android.view.IWindowManager;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 
 
 /**
  * Runs the am instrument command
+ *
+ * Test Result Code:
+ * 1 - Test running
+ * 0 - Test passed
+ * -2 - assertion failure
+ * -1 - other exceptions
+ *
+ * Session Result Code:
+ * -1: Success
+ * other: Failure
  */
 public class Instrument {
+    private static final String TAG = "am";
+
+    public static final String DEFAULT_LOG_DIR = "instrument-logs";
+
+    private static final int STATUS_TEST_PASSED = 0;
+    private static final int STATUS_TEST_STARTED = 1;
+    private static final int STATUS_TEST_FAILED_ASSERTION = -1;
+    private static final int STATUS_TEST_FAILED_OTHER = -2;
+
     private final IActivityManager mAm;
     private final IPackageManager mPm;
     private final IWindowManager mWm;
@@ -49,13 +85,23 @@ public class Instrument {
     public String profileFile = null;
     public boolean wait = false;
     public boolean rawMode = false;
-    public boolean proto = false;
+    public boolean captureLogcat = true;
+    boolean protoStd = false;  // write proto to stdout
+    boolean protoFile = false;  // write proto to a file
+    String logPath = null;
     public boolean noWindowAnimation = false;
+    public boolean disableHiddenApiChecks = false;
+    public boolean disableTestApiChecks = true;
+    public boolean disableIsolatedStorage = false;
     public String abi = null;
+    public boolean noRestart = false;
     public int userId = UserHandle.USER_CURRENT;
     public Bundle args = new Bundle();
     // Required
     public String componentNameArg;
+    public boolean alwaysCheckSignature = false;
+    public boolean instrumentSdkSandbox = false;
+    public boolean instrumentSdkInSandbox = false;
 
     /**
      * Construct the instrument command runner.
@@ -95,6 +141,12 @@ public class Instrument {
         public void onError(String errorText, boolean commandError);
     }
 
+    private static Collection<String> sorted(Collection<String> list) {
+        final ArrayList<String> copy = new ArrayList<>(list);
+        Collections.sort(copy);
+        return copy;
+    }
+
     /**
      * Printer for the 'classic' text based status reporting.
      */
@@ -124,7 +176,7 @@ public class Instrument {
                 System.out.print(pretty);
             } else {
                 if (results != null) {
-                    for (String key : results.keySet()) {
+                    for (String key : sorted(results.keySet())) {
                         System.out.println(
                                 "INSTRUMENTATION_STATUS: " + key + "=" + results.get(key));
                     }
@@ -145,7 +197,7 @@ public class Instrument {
                 System.out.println(pretty);
             } else {
                 if (results != null) {
-                    for (String key : results.keySet()) {
+                    for (String key : sorted(results.keySet())) {
                         System.out.println(
                                 "INSTRUMENTATION_RESULT: " + key + "=" + results.get(key));
                     }
@@ -156,6 +208,10 @@ public class Instrument {
 
         @Override
         public void onError(String errorText, boolean commandError) {
+            if (mRawMode) {
+                System.out.println("onError: commandError=" + commandError + " message="
+                        + errorText);
+            }
             // The regular BaseCommand error printing will print the commandErrors.
             if (!commandError) {
                 System.out.println(errorText);
@@ -167,18 +223,65 @@ public class Instrument {
      * Printer for the protobuf based status reporting.
      */
     private class ProtoStatusReporter implements StatusReporter {
+
+        private File mLog;
+
+        private long mTestStartMs;
+
+        ProtoStatusReporter() {
+            if (protoFile) {
+                if (logPath == null) {
+                    File logDir = new File(Environment.getLegacyExternalStorageDirectory(),
+                            DEFAULT_LOG_DIR);
+                    if (!logDir.exists() && !logDir.mkdirs()) {
+                        System.err.format("Unable to create log directory: %s\n",
+                                logDir.getAbsolutePath());
+                        protoFile = false;
+                        return;
+                    }
+                    SimpleDateFormat format = new SimpleDateFormat("yyyyMMdd-hhmmss-SSS", Locale.US);
+                    String fileName = String.format("log-%s.instrumentation_data_proto",
+                            format.format(new Date()));
+                    mLog = new File(logDir, fileName);
+                } else {
+                    mLog = new File(Environment.getLegacyExternalStorageDirectory(), logPath);
+                    File logDir = mLog.getParentFile();
+                    if (!logDir.exists() && !logDir.mkdirs()) {
+                        System.err.format("Unable to create log directory: %s\n",
+                                logDir.getAbsolutePath());
+                        protoFile = false;
+                        return;
+                    }
+                }
+                if (mLog.exists()) mLog.delete();
+            }
+        }
+
         @Override
         public void onInstrumentationStatusLocked(ComponentName name, int resultCode,
                 Bundle results) {
             final ProtoOutputStream proto = new ProtoOutputStream();
 
-            final long token = proto.startRepeatedObject(InstrumentationData.Session.TEST_STATUS);
+            final long testStatusToken = proto.start(InstrumentationData.Session.TEST_STATUS);
 
-            proto.writeSInt32(InstrumentationData.TestStatus.RESULT_CODE, resultCode);
+            proto.write(InstrumentationData.TestStatus.RESULT_CODE, resultCode);
             writeBundle(proto, InstrumentationData.TestStatus.RESULTS, results);
 
-            proto.endRepeatedObject(token);
-            writeProtoToStdout(proto);
+            if (captureLogcat) {
+                if (resultCode == STATUS_TEST_STARTED) {
+                    // Logcat -T takes wall clock time (!?)
+                    mTestStartMs = System.currentTimeMillis();
+                } else {
+                    if (mTestStartMs > 0) {
+                        proto.write(InstrumentationData.TestStatus.LOGCAT,
+                                readLogcat(mTestStartMs));
+                    }
+                    mTestStartMs = 0;
+                }
+            }
+            proto.end(testStatusToken);
+
+            outputProto(proto);
         }
 
         @Override
@@ -186,80 +289,87 @@ public class Instrument {
                 Bundle results) {
             final ProtoOutputStream proto = new ProtoOutputStream();
 
-            final long token = proto.startObject(InstrumentationData.Session.SESSION_STATUS);
-
-            proto.writeEnum(InstrumentationData.SessionStatus.STATUS_CODE,
+            final long sessionStatusToken = proto.start(InstrumentationData.Session.SESSION_STATUS);
+            proto.write(InstrumentationData.SessionStatus.STATUS_CODE,
                     InstrumentationData.SESSION_FINISHED);
-            proto.writeSInt32(InstrumentationData.SessionStatus.RESULT_CODE, resultCode);
+            proto.write(InstrumentationData.SessionStatus.RESULT_CODE, resultCode);
             writeBundle(proto, InstrumentationData.SessionStatus.RESULTS, results);
+            proto.end(sessionStatusToken);
 
-            proto.endObject(token);
-            writeProtoToStdout(proto);
+            outputProto(proto);
         }
 
         @Override
         public void onError(String errorText, boolean commandError) {
             final ProtoOutputStream proto = new ProtoOutputStream();
 
-            final long token = proto.startObject(InstrumentationData.Session.SESSION_STATUS);
-
-            proto.writeEnum(InstrumentationData.SessionStatus.STATUS_CODE,
+            final long sessionStatusToken = proto.start(InstrumentationData.Session.SESSION_STATUS);
+            proto.write(InstrumentationData.SessionStatus.STATUS_CODE,
                     InstrumentationData.SESSION_ABORTED);
-            proto.writeString(InstrumentationData.SessionStatus.ERROR_TEXT, errorText);
+            proto.write(InstrumentationData.SessionStatus.ERROR_TEXT, errorText);
+            proto.end(sessionStatusToken);
 
-            proto.endObject(token);
-            writeProtoToStdout(proto);
+            outputProto(proto);
         }
 
         private void writeBundle(ProtoOutputStream proto, long fieldId, Bundle bundle) {
-            final long bundleToken = proto.startObject(fieldId);
+            final long bundleToken = proto.start(fieldId);
 
-            for (final String key: bundle.keySet()) {
+            for (final String key: sorted(bundle.keySet())) {
                 final long entryToken = proto.startRepeatedObject(
                         InstrumentationData.ResultsBundle.ENTRIES);
 
-                proto.writeString(InstrumentationData.ResultsBundleEntry.KEY, key);
+                proto.write(InstrumentationData.ResultsBundleEntry.KEY, key);
 
                 final Object val = bundle.get(key);
                 if (val instanceof String) {
-                    proto.writeString(InstrumentationData.ResultsBundleEntry.VALUE_STRING,
+                    proto.write(InstrumentationData.ResultsBundleEntry.VALUE_STRING,
                             (String)val);
                 } else if (val instanceof Byte) {
-                    proto.writeSInt32(InstrumentationData.ResultsBundleEntry.VALUE_INT,
+                    proto.write(InstrumentationData.ResultsBundleEntry.VALUE_INT,
                             ((Byte)val).intValue());
                 } else if (val instanceof Double) {
-                    proto.writeDouble(InstrumentationData.ResultsBundleEntry.VALUE_DOUBLE,
-                            ((Double)val).doubleValue());
+                    proto.write(InstrumentationData.ResultsBundleEntry.VALUE_DOUBLE, (double)val);
                 } else if (val instanceof Float) {
-                    proto.writeFloat(InstrumentationData.ResultsBundleEntry.VALUE_FLOAT,
-                            ((Float)val).floatValue());
+                    proto.write(InstrumentationData.ResultsBundleEntry.VALUE_FLOAT, (float)val);
                 } else if (val instanceof Integer) {
-                    proto.writeSInt32(InstrumentationData.ResultsBundleEntry.VALUE_INT,
-                            ((Integer)val).intValue());
+                    proto.write(InstrumentationData.ResultsBundleEntry.VALUE_INT, (int)val);
                 } else if (val instanceof Long) {
-                    proto.writeSInt64(InstrumentationData.ResultsBundleEntry.VALUE_LONG,
-                            ((Long)val).longValue());
+                    proto.write(InstrumentationData.ResultsBundleEntry.VALUE_LONG, (long)val);
                 } else if (val instanceof Short) {
-                    proto.writeSInt32(InstrumentationData.ResultsBundleEntry.VALUE_INT,
-                            ((Short)val).intValue());
+                    proto.write(InstrumentationData.ResultsBundleEntry.VALUE_INT, (short)val);
                 } else if (val instanceof Bundle) {
                     writeBundle(proto, InstrumentationData.ResultsBundleEntry.VALUE_BUNDLE,
                             (Bundle)val);
+                } else if (val instanceof byte[]) {
+                    proto.write(InstrumentationData.ResultsBundleEntry.VALUE_BYTES, (byte[])val);
                 }
 
-                proto.endRepeatedObject(entryToken);
+                proto.end(entryToken);
             }
 
-            proto.endObject(bundleToken);
+            proto.end(bundleToken);
         }
 
-        private void writeProtoToStdout(ProtoOutputStream proto) {
-            try {
-                System.out.write(proto.getBytes());
-                System.out.flush();
-            } catch (IOException ex) {
-                System.err.println("Error writing finished response: ");
-                ex.printStackTrace(System.err);
+        private void outputProto(ProtoOutputStream proto) {
+            byte[] out = proto.getBytes();
+            if (protoStd) {
+                try {
+                    System.out.write(out);
+                    System.out.flush();
+                } catch (IOException ex) {
+                    System.err.println("Error writing finished response: ");
+                    ex.printStackTrace(System.err);
+                }
+            }
+            if (protoFile) {
+                try (OutputStream os = new FileOutputStream(mLog, true)) {
+                    os.write(proto.getBytes());
+                    os.flush();
+                } catch (IOException ex) {
+                    System.err.format("Cannot write to %s:\n", mLog.getAbsolutePath());
+                    ex.printStackTrace();
+                }
             }
         }
     }
@@ -320,7 +430,8 @@ public class Instrument {
             if (cn == null) throw new IllegalArgumentException("Bad component name: " + cnArg);
             return cn;
         } else {
-            List<InstrumentationInfo> infos = mPm.queryInstrumentation(null, 0).getList();
+            List<InstrumentationInfo> infos = mPm.queryInstrumentationAsUser(
+                    null, 0, userId).getList();
 
             final int numInfos = infos == null ? 0: infos.size();
             ArrayList<ComponentName> cns = new ArrayList<>();
@@ -363,7 +474,7 @@ public class Instrument {
 
         try {
             // Choose which output we will do.
-            if (proto) {
+            if (protoFile || protoStd) {
                 reporter = new ProtoStatusReporter();
             } else if (wait) {
                 reporter = new TextStatusReporter(rawMode);
@@ -385,7 +496,7 @@ public class Instrument {
                 mWm.setAnimationScale(2, 0.0f);
             }
 
-            // Figure out which component we are tring to do.
+            // Figure out which component we are trying to do.
             final ComponentName cn = parseComponentName(componentNameArg);
 
             // Choose an ABI if necessary
@@ -405,7 +516,29 @@ public class Instrument {
             }
 
             // Start the instrumentation
-            if (!mAm.startInstrumentation(cn, profileFile, 0, args, watcher, connection, userId,
+            int flags = 0;
+            if (disableHiddenApiChecks) {
+                flags |= INSTR_FLAG_DISABLE_HIDDEN_API_CHECKS;
+            }
+            if (disableTestApiChecks) {
+                flags |= INSTR_FLAG_DISABLE_TEST_API_CHECKS;
+            }
+            if (disableIsolatedStorage) {
+                flags |= INSTR_FLAG_DISABLE_ISOLATED_STORAGE;
+            }
+            if (noRestart) {
+                flags |= INSTR_FLAG_NO_RESTART;
+            }
+            if (alwaysCheckSignature) {
+                flags |= INSTR_FLAG_ALWAYS_CHECK_SIGNATURE;
+            }
+            if (instrumentSdkSandbox) {
+                flags |= INSTR_FLAG_INSTRUMENT_SDK_SANDBOX;
+            }
+            if (instrumentSdkInSandbox) {
+                flags |= INSTR_FLAG_INSTRUMENT_SDK_IN_SANDBOX;
+            }
+            if (!mAm.startInstrumentation(cn, profileFile, flags, args, watcher, connection, userId,
                         abi)) {
                 throw new AndroidException("INSTRUMENTATION_FAILED: " + cn.flattenToString());
             }
@@ -430,6 +563,46 @@ public class Instrument {
             if (oldAnims != null) {
                 mWm.setAnimationScales(oldAnims);
             }
+        }
+        // Exit from here instead of going down the path of normal shutdown which is slow.
+        System.exit(0);
+    }
+
+    private static String readLogcat(long startTimeMs) {
+        try {
+            // Figure out the timestamp arg for logcat.
+            final SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
+            final String timestamp = format.format(new Date(startTimeMs));
+
+            // Start the process
+            final Process process = new ProcessBuilder()
+                    .command("logcat", "-d", "-v", "threadtime,uid", "-T", timestamp)
+                    .start();
+
+            // Nothing to write. Don't let the command accidentally block.
+            process.getOutputStream().close();
+
+            // Read the output
+            final StringBuilder str = new StringBuilder();
+            final InputStreamReader reader = new InputStreamReader(process.getInputStream());
+            char[] buffer = new char[4096];
+            int amt;
+            while ((amt = reader.read(buffer, 0, buffer.length)) >= 0) {
+                if (amt > 0) {
+                    str.append(buffer, 0, amt);
+                }
+            }
+
+            try {
+                process.waitFor();
+            } catch (InterruptedException ex) {
+                // We already have the text, drop the exception.
+            }
+
+            return str.toString();
+
+        } catch (IOException ex) {
+            return "Error reading logcat command:\n" + ex.toString();
         }
     }
 }

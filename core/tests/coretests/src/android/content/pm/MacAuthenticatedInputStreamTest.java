@@ -16,7 +16,12 @@
 
 package android.content.pm;
 
+import android.platform.test.annotations.Presubmit;
 import android.test.AndroidTestCase;
+
+import androidx.test.filters.LargeTest;
+
+import libcore.io.Streams;
 
 import java.io.ByteArrayInputStream;
 import java.util.Arrays;
@@ -25,8 +30,8 @@ import javax.crypto.Mac;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 
-import libcore.io.Streams;
-
+@Presubmit
+@LargeTest
 public class MacAuthenticatedInputStreamTest extends AndroidTestCase {
 
     private static final SecretKey HMAC_KEY_1 = new SecretKeySpec("test_key_1".getBytes(), "HMAC");

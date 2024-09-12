@@ -281,15 +281,19 @@ loadNativeCode_native(JNIEnv* env, jobject clazz, jstring path, jstring funcName
     std::unique_ptr<NativeCode> code;
     bool needs_native_bridge = false;
 
+    char* nativeloader_error_msg = nullptr;
     void* handle = OpenNativeLibrary(env,
                                      sdkVersion,
                                      pathStr.c_str(),
                                      classLoader,
+                                     nullptr,
                                      libraryPath,
                                      &needs_native_bridge,
-                                     &g_error_msg);
+                                     &nativeloader_error_msg);
 
     if (handle == nullptr) {
+        g_error_msg = nativeloader_error_msg;
+        NativeLoaderFreeErrorMessage(nativeloader_error_msg);
         ALOGW("NativeActivity LoadNativeLibrary(\"%s\") failed: %s",
               pathStr.c_str(),
               g_error_msg.c_str());
@@ -348,7 +352,7 @@ loadNativeCode_native(JNIEnv* env, jobject clazz, jstring path, jstring funcName
 
     const char* dirStr = env->GetStringUTFChars(internalDataDir, NULL);
     code->internalDataPathObj = dirStr;
-    code->internalDataPath = code->internalDataPathObj.string();
+    code->internalDataPath = code->internalDataPathObj.c_str();
     env->ReleaseStringUTFChars(internalDataDir, dirStr);
 
     if (externalDataDir != NULL) {
@@ -356,19 +360,19 @@ loadNativeCode_native(JNIEnv* env, jobject clazz, jstring path, jstring funcName
         code->externalDataPathObj = dirStr;
         env->ReleaseStringUTFChars(externalDataDir, dirStr);
     }
-    code->externalDataPath = code->externalDataPathObj.string();
+    code->externalDataPath = code->externalDataPathObj.c_str();
 
     code->sdkVersion = sdkVersion;
 
     code->javaAssetManager = env->NewGlobalRef(jAssetMgr);
-    code->assetManager = assetManagerForJavaObject(env, jAssetMgr);
+    code->assetManager = NdkAssetManagerForJavaObject(env, jAssetMgr);
 
     if (obbDir != NULL) {
         dirStr = env->GetStringUTFChars(obbDir, NULL);
         code->obbPathObj = dirStr;
         env->ReleaseStringUTFChars(obbDir, dirStr);
     }
-    code->obbPath = code->obbPathObj.string();
+    code->obbPath = code->obbPathObj.c_str();
 
     jbyte* rawSavedState = NULL;
     jsize rawSavedSize = 0;

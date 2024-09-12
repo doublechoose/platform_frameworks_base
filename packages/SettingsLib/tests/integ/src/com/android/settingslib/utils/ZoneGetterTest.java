@@ -15,27 +15,31 @@
  */
 package com.android.settingslib.utils;
 
+import static junit.framework.Assert.assertTrue;
+
 import android.content.Context;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.runner.AndroidJUnit4;
-import android.support.test.filters.SmallTest;
 import android.text.Spanned;
 import android.text.style.TtsSpan;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
+
+import com.android.settingslib.datetime.ZoneGetter;
 
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import java.util.*;
-import com.android.settingslib.datetime.ZoneGetter;
-
-import static junit.framework.Assert.assertTrue;
 
 @RunWith(AndroidJUnit4.class)
 @SmallTest
 public class ZoneGetterTest {
     private static final String TIME_ZONE_LONDON_ID = "Europe/London";
     private static final String TIME_ZONE_LA_ID = "America/Los_Angeles";
+    private static final String TIME_ZONE_ALGIERS_ID = "Africa/Algiers";
+    private static final String TIME_ZONE_CEUTA_ID = "Africa/Ceuta";
     private Locale mLocaleEnUs;
     private Calendar mCalendar;
 
@@ -56,6 +60,16 @@ public class ZoneGetterTest {
     public void getTimeZoneOffsetAndName_setLosAngeles_returnPacificDaylightTime() {
         // Check it will ends with 'Pacific Daylight Time', not 'Los_Angeles'
         testTimeZoneOffsetAndNameInner(TIME_ZONE_LA_ID, "Pacific Daylight Time");
+    }
+
+    @Test
+    public void getTimeZoneOffsetAndName_setAlgiers_returnCentralEuropeanStandardTime() {
+        testTimeZoneOffsetAndNameInner(TIME_ZONE_ALGIERS_ID, "Central European Standard Time");
+    }
+
+    @Test
+    public void getTimeZoneOffsetAndName_setCeuta_returnCentralEuropeanSummerTime() {
+        testTimeZoneOffsetAndNameInner(TIME_ZONE_CEUTA_ID, "Central European Summer Time");
     }
 
     @Test

@@ -15,31 +15,48 @@
  */
 package com.android.server.devicepolicy;
 
+import android.app.ActivityManagerInternal;
+import android.app.AlarmManager;
 import android.app.IActivityManager;
+import android.app.IActivityTaskManager;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.app.admin.DevicePolicyManagerInternal;
+import android.app.admin.DevicePolicyManagerLiteInternal;
 import android.app.backup.IBackupManager;
+import android.app.usage.UsageStatsManagerInternal;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.IPackageManager;
 import android.content.pm.PackageManagerInternal;
 import android.database.ContentObserver;
-import android.media.IAudioService;
 import android.net.IIpConnectivityMetrics;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Looper;
 import android.os.PowerManagerInternal;
 import android.os.UserHandle;
 import android.os.UserManager;
-import android.os.UserManagerInternal;
+import android.permission.IPermissionManager;
 import android.security.KeyChain;
 import android.telephony.TelephonyManager;
 import android.util.ArrayMap;
 import android.util.Pair;
 import android.view.IWindowManager;
 
+import androidx.annotation.NonNull;
+
+import com.android.internal.util.FunctionalUtils.ThrowingRunnable;
 import com.android.internal.widget.LockPatternUtils;
+import com.android.internal.widget.LockSettingsInternal;
+import com.android.server.AlarmManagerInternal;
+import com.android.server.LocalServices;
+import com.android.server.net.NetworkPolicyManagerInternal;
+import com.android.server.pdb.PersistentDataBlockManagerInternal;
+import com.android.server.pm.PackageManagerLocal;
+import com.android.server.pm.UserManagerInternal;
+import com.android.server.wm.ActivityTaskManagerInternal;
 
 import java.io.File;
 import java.io.IOException;
@@ -49,145 +66,156 @@ import java.util.Map;
  * Overrides {@link #DevicePolicyManagerService} for dependency injection.
  */
 public class DevicePolicyManagerServiceTestable extends DevicePolicyManagerService {
-    /**
-     * Overrides {@link #Owners} for dependency injection.
-     */
-    public static class OwnersTestable extends Owners {
-        public static final String LEGACY_FILE = "legacy.xml";
-        public static final String DEVICE_OWNER_FILE = "device_owner2.xml";
-        public static final String PROFILE_OWNER_FILE = "profile_owner.xml";
-
-        private final File mLegacyFile;
-        private final File mDeviceOwnerFile;
-        private final File mUsersDataDir;
-
-        public OwnersTestable(DpmMockContext context) {
-            super(context.userManager, context.userManagerInternal, context.packageManagerInternal);
-            mLegacyFile = new File(context.dataDir, LEGACY_FILE);
-            mDeviceOwnerFile = new File(context.dataDir, DEVICE_OWNER_FILE);
-            mUsersDataDir = new File(context.dataDir, "users");
-        }
-
-        @Override
-        File getLegacyConfigFileWithTestOverride() {
-            return mLegacyFile;
-        }
-
-        @Override
-        File getDeviceOwnerFileWithTestOverride() {
-            return mDeviceOwnerFile;
-        }
-
-        @Override
-        File getProfileOwnerFileWithTestOverride(int userId) {
-            final File userDir = new File(mUsersDataDir, String.valueOf(userId));
-            return new File(userDir, PROFILE_OWNER_FILE);
-        }
-    }
-
     public final DpmMockContext context;
-    private final MockInjector mMockInjector;
+    public final MockInjector mMockInjector;
 
-    public DevicePolicyManagerServiceTestable(DpmMockContext context, File dataDir) {
-        this(new MockInjector(context, dataDir));
+    public DevicePolicyManagerServiceTestable(MockSystemServices services, DpmMockContext context) {
+        this(new MockInjector(services, context), services.pathProvider);
     }
 
-    private DevicePolicyManagerServiceTestable(MockInjector injector) {
-        super(injector);
+    private DevicePolicyManagerServiceTestable(
+            MockInjector injector, PolicyPathProvider pathProvider) {
+        super(unregisterLocalServices(injector), pathProvider);
         mMockInjector = injector;
         this.context = injector.context;
     }
 
+    /**
+     * Unregisters local services to avoid IllegalStateException when DPMS ctor re-registers them.
+     * This is made into a static method to circumvent the requirement to call super() first.
+     * Returns its parameter as is.
+     */
+    private static MockInjector unregisterLocalServices(MockInjector injector) {
+        LocalServices.removeServiceForTest(DevicePolicyManagerLiteInternal.class);
+        LocalServices.removeServiceForTest(DevicePolicyManagerInternal.class);
+        return injector;
+    }
 
     public void notifyChangeToContentObserver(Uri uri, int userHandle) {
-        ContentObserver co = mMockInjector.mContentObservers
-                .get(new Pair<Uri, Integer>(uri, userHandle));
+        ContentObserver co = mMockInjector.mContentObservers.get(new Pair<>(uri, userHandle));
         if (co != null) {
             co.onChange(false, uri, userHandle); // notify synchronously
         }
 
         // Notify USER_ALL observer too.
-        co = mMockInjector.mContentObservers
-                .get(new Pair<Uri, Integer>(uri, UserHandle.USER_ALL));
+        co = mMockInjector.mContentObservers.get(new Pair<>(uri, UserHandle.USER_ALL));
         if (co != null) {
             co.onChange(false, uri, userHandle); // notify synchronously
         }
     }
 
-
-    private static class MockInjector extends Injector {
+    static class MockInjector extends Injector {
 
         public final DpmMockContext context;
-
-        public final File dataDir;
+        private final MockSystemServices services;
 
         // Key is a pair of uri and userId
         private final Map<Pair<Uri, Integer>, ContentObserver> mContentObservers = new ArrayMap<>();
 
-        private MockInjector(DpmMockContext context, File dataDir) {
-            super(context);
-            this.context = context;
-            this.dataDir = dataDir;
-        }
+        // Used as an override when set to nonzero.
+        private long mCurrentTimeMillis = 0;
 
-        @Override
-        Owners newOwners() {
-            return new OwnersTestable(context);
+        private final Map<Long, Pair<String, Integer>> mEnabledChanges = new ArrayMap<>();
+
+        public MockInjector(MockSystemServices services, DpmMockContext context) {
+            super(context);
+            this.services = services;
+            this.context = context;
         }
 
         @Override
         UserManager getUserManager() {
-            return context.userManager;
+            return services.userManager;
         }
 
         @Override
         UserManagerInternal getUserManagerInternal() {
-            return context.userManagerInternal;
+            return services.userManagerInternal;
+        }
+
+        @Override
+        UsageStatsManagerInternal getUsageStatsManagerInternal() {
+            return services.usageStatsManagerInternal;
+        }
+
+        @Override
+        NetworkPolicyManagerInternal getNetworkPolicyManagerInternal() {
+            return services.networkPolicyManagerInternal;
         }
 
         @Override
         PackageManagerInternal getPackageManagerInternal() {
-            return context.packageManagerInternal;
+            return services.packageManagerInternal;
+        }
+
+        @Override
+        PackageManagerLocal getPackageManagerLocal() {
+            return services.packageManagerLocal;
         }
 
         @Override
         PowerManagerInternal getPowerManagerInternal() {
-            return context.powerManagerInternal;
+            return services.powerManagerInternal;
         }
 
         @Override
         NotificationManager getNotificationManager() {
-            return context.notificationManager;
+            return services.notificationManager;
         }
 
         @Override
         IIpConnectivityMetrics getIIpConnectivityMetrics() {
-            return context.iipConnectivityMetrics;
+            return services.iipConnectivityMetrics;
         }
 
         @Override
         IWindowManager getIWindowManager() {
-            return context.iwindowManager;
+            return services.iwindowManager;
         }
 
         @Override
         IActivityManager getIActivityManager() {
-            return context.iactivityManager;
+            return services.iactivityManager;
+        }
+
+        @Override
+        IActivityTaskManager getIActivityTaskManager() {
+            return services.iactivityTaskManager;
+        }
+
+        @Override
+        ActivityManagerInternal getActivityManagerInternal() {
+            return services.activityManagerInternal;
+        }
+
+        @Override
+        ActivityTaskManagerInternal getActivityTaskManagerInternal() {
+            return services.activityTaskManagerInternal;
         }
 
         @Override
         IPackageManager getIPackageManager() {
-            return context.ipackageManager;
+            return services.ipackageManager;
+        }
+
+        @Override
+        IPermissionManager getIPermissionManager() {
+            return services.ipermissionManager;
         }
 
         @Override
         IBackupManager getIBackupManager() {
-            return context.ibackupManager;
+            return services.ibackupManager;
         }
 
         @Override
-        IAudioService getIAudioService() {
-            return context.iaudioService;
+        LockSettingsInternal getLockSettingsInternal() {
+            return services.lockSettingsInternal;
+        }
+
+        @Override
+        PersistentDataBlockManagerInternal getPersistentDataBlockManagerInternal() {
+            return services.persistentDataBlockManagerInternal;
         }
 
         @Override
@@ -196,33 +224,21 @@ public class DevicePolicyManagerServiceTestable extends DevicePolicyManagerServi
         }
 
         @Override
+        AlarmManager getAlarmManager() {return services.alarmManager;}
+
+        @Override
+        AlarmManagerInternal getAlarmManagerInternal() {
+            return services.alarmManagerInternal;
+        }
+
+        @Override
         LockPatternUtils newLockPatternUtils() {
-            return context.lockPatternUtils;
+            return services.lockPatternUtils;
         }
 
         @Override
         boolean storageManagerIsFileBasedEncryptionEnabled() {
-            return context.storageManager.isFileBasedEncryptionEnabled();
-        }
-
-        @Override
-        boolean storageManagerIsNonDefaultBlockEncrypted() {
-            return context.storageManager.isNonDefaultBlockEncrypted();
-        }
-
-        @Override
-        boolean storageManagerIsEncrypted() {
-            return context.storageManager.isEncrypted();
-        }
-
-        @Override
-        boolean storageManagerIsEncryptable() {
-            return context.storageManager.isEncryptable();
-        }
-
-        @Override
-        String getDevicePolicyFilePathForSystemUser() {
-            return context.systemUserDataDir.getAbsolutePath() + "/";
+            return services.storageManager.isFileBasedEncryptionEnabled();
         }
 
         @Override
@@ -233,6 +249,11 @@ public class DevicePolicyManagerServiceTestable extends DevicePolicyManagerServi
         @Override
         void binderRestoreCallingIdentity(long token) {
             context.binder.restoreCallingIdentity(token);
+        }
+
+        @Override
+        void binderWithCleanCallingIdentity(@NonNull ThrowingRunnable action) {
+            context.binder.withCleanCallingIdentity(action);
         }
 
         @Override
@@ -256,59 +277,62 @@ public class DevicePolicyManagerServiceTestable extends DevicePolicyManagerServi
         }
 
         @Override
-        File environmentGetUserSystemDirectory(int userId) {
-            return context.environment.getUserSystemDirectory(userId);
-        }
-
-        @Override
         void powerManagerGoToSleep(long time, int reason, int flags) {
-            context.powerManager.goToSleep(time, reason, flags);
+            services.powerManager.goToSleep(time, reason, flags);
         }
 
         @Override
         void powerManagerReboot(String reason) {
-            context.powerManager.reboot(reason);
+            services.powerManager.reboot(reason);
         }
 
         @Override
-        void recoverySystemRebootWipeUserData(boolean shutdown, String reason, boolean force)
-                throws IOException {
-            context.recoverySystem.rebootWipeUserData(shutdown, reason, force);
+        boolean recoverySystemRebootWipeUserData(boolean shutdown, String reason, boolean force,
+                boolean wipeEuicc, boolean wipeExtRequested, boolean wipeResetProtectionData)
+                        throws IOException {
+            return services.recoverySystem.rebootWipeUserData(shutdown, reason, force, wipeEuicc,
+                    wipeExtRequested, wipeResetProtectionData);
         }
 
         @Override
         boolean systemPropertiesGetBoolean(String key, boolean def) {
-            return context.systemProperties.getBoolean(key, def);
+            return services.systemProperties.getBoolean(key, def);
         }
 
         @Override
         long systemPropertiesGetLong(String key, long def) {
-            return context.systemProperties.getLong(key, def);
+            return services.systemProperties.getLong(key, def);
         }
 
         @Override
         String systemPropertiesGet(String key, String def) {
-            return context.systemProperties.get(key, def);
+            return services.systemProperties.get(key, def);
         }
 
         @Override
         String systemPropertiesGet(String key) {
-            return context.systemProperties.get(key);
+            return services.systemProperties.get(key);
         }
 
         @Override
         void systemPropertiesSet(String key, String value) {
-            context.systemProperties.set(key, value);
+            services.systemProperties.set(key, value);
         }
 
         @Override
-        boolean userManagerIsSplitSystemUser() {
-            return context.userManagerForMock.isSplitSystemUser();
+        boolean userManagerIsHeadlessSystemUserMode() {
+            return services.userManagerForMock.isHeadlessSystemUserMode();
         }
 
         @Override
         PendingIntent pendingIntentGetActivityAsUser(Context context, int requestCode,
                 Intent intent, int flags, Bundle options, UserHandle user) {
+            return null;
+        }
+
+        @Override
+        PendingIntent pendingIntentGetBroadcast(Context context, int requestCode,
+                Intent intent, int flags) {
             return null;
         }
 
@@ -320,87 +344,151 @@ public class DevicePolicyManagerServiceTestable extends DevicePolicyManagerServi
 
         @Override
         int settingsSecureGetIntForUser(String name, int def, int userHandle) {
-            return context.settings.settingsSecureGetIntForUser(name, def, userHandle);
+            return services.settings.settingsSecureGetIntForUser(name, def, userHandle);
         }
 
         @Override
         String settingsSecureGetStringForUser(String name, int userHandle) {
-            return context.settings.settingsSecureGetStringForUser(name, userHandle);
+            return services.settings.settingsSecureGetStringForUser(name, userHandle);
         }
 
         @Override
         void settingsSecurePutIntForUser(String name, int value, int userHandle) {
-            context.settings.settingsSecurePutIntForUser(name, value, userHandle);
+            services.settings.settingsSecurePutIntForUser(name, value, userHandle);
         }
 
         @Override
         void settingsSecurePutStringForUser(String name, String value, int userHandle) {
-            context.settings.settingsSecurePutStringForUser(name, value, userHandle);
+            services.settings.settingsSecurePutStringForUser(name, value, userHandle);
         }
 
         @Override
         void settingsGlobalPutStringForUser(String name, String value, int userHandle) {
-            context.settings.settingsGlobalPutStringForUser(name, value, userHandle);
-        }
-
-        @Override
-        void settingsSecurePutInt(String name, int value) {
-            context.settings.settingsSecurePutInt(name, value);
+            services.settings.settingsGlobalPutStringForUser(name, value, userHandle);
         }
 
         @Override
         void settingsGlobalPutInt(String name, int value) {
-            context.settings.settingsGlobalPutInt(name, value);
-        }
-
-        @Override
-        void settingsSecurePutString(String name, String value) {
-            context.settings.settingsSecurePutString(name, value);
+            services.settings.settingsGlobalPutInt(name, value);
         }
 
         @Override
         void settingsGlobalPutString(String name, String value) {
-            context.settings.settingsGlobalPutString(name, value);
+            services.settings.settingsGlobalPutString(name, value);
+        }
+
+        @Override
+        void settingsSystemPutStringForUser(String name, String value, int userId) {
+            services.settings.settingsSystemPutStringForUser(name, value, userId);
         }
 
         @Override
         int settingsGlobalGetInt(String name, int def) {
-            return context.settings.settingsGlobalGetInt(name, def);
+            return services.settings.settingsGlobalGetInt(name, def);
         }
 
         @Override
         String settingsGlobalGetString(String name) {
-            return context.settings.settingsGlobalGetString(name);
+            return services.settings.settingsGlobalGetString(name);
         }
 
         @Override
         void securityLogSetLoggingEnabledProperty(boolean enabled) {
-            context.settings.securityLogSetLoggingEnabledProperty(enabled);
+            services.settings.securityLogSetLoggingEnabledProperty(enabled);
         }
 
         @Override
         boolean securityLogGetLoggingEnabledProperty() {
-            return context.settings.securityLogGetLoggingEnabledProperty();
+            return services.settings.securityLogGetLoggingEnabledProperty();
         }
 
         @Override
         boolean securityLogIsLoggingEnabled() {
-            return context.settings.securityLogIsLoggingEnabled();
+            return services.settings.securityLogIsLoggingEnabled();
         }
 
         @Override
         TelephonyManager getTelephonyManager() {
-            return context.telephonyManager;
+            return services.telephonyManager;
         }
 
         @Override
         boolean isBuildDebuggable() {
-            return context.buildMock.isDebuggable;
+            return services.buildMock.isDebuggable;
+        }
+
+        @Override
+        KeyChain.KeyChainConnection keyChainBind() {
+            return services.keyChainConnection;
         }
 
         @Override
         KeyChain.KeyChainConnection keyChainBindAsUser(UserHandle user) {
-            return context.keyChainConnection;
+            return services.keyChainConnection;
+        }
+
+        @Override
+        void postOnSystemServerInitThreadPool(Runnable runnable) {
+            runnable.run();
+        }
+
+        @Override
+        public TransferOwnershipMetadataManager newTransferOwnershipMetadataManager() {
+            return new TransferOwnershipMetadataManager(
+                    new TransferOwnershipMetadataManagerMockInjector());
+        }
+
+        @Override
+        public void runCryptoSelfTest() {}
+
+        public void setSystemCurrentTimeMillis(long value) {
+            mCurrentTimeMillis = value;
+        }
+
+        @Override
+        public long systemCurrentTimeMillis() {
+            return mCurrentTimeMillis != 0 ? mCurrentTimeMillis : System.currentTimeMillis();
+        }
+
+        public void setChangeEnabledForPackage(
+                long changeId, boolean enabled, String packageName, int userId) {
+            if (enabled) {
+                mEnabledChanges.put(changeId, Pair.create(packageName, userId));
+            } else {
+                mEnabledChanges.remove(changeId);
+            }
+        }
+
+        public void clearEnabledChanges() {
+            mEnabledChanges.clear();
+        }
+
+        @Override
+        public boolean isChangeEnabled(long changeId, String packageName, int userId) {
+            Pair<String, Integer> packageAndUser = mEnabledChanges.get(changeId);
+            if (packageAndUser == null) {
+                return false;
+            }
+
+            if (!packageAndUser.first.equals(packageName)
+                    || !packageAndUser.second.equals(userId)) {
+                return false;
+            }
+
+            return true;
+        }
+
+        @Override
+        public Context createContextAsUser(UserHandle user) {
+            return context;
+        }
+    }
+
+    static class TransferOwnershipMetadataManagerMockInjector extends
+            TransferOwnershipMetadataManager.Injector {
+        @Override
+        public File getOwnerTransferMetadataDir() {
+            return Environment.getExternalStorageDirectory();
         }
     }
 }

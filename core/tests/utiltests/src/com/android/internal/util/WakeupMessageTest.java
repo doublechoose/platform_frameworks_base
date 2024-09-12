@@ -24,11 +24,17 @@ import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
-import android.test.suitebuilder.annotation.SmallTest;
+import android.platform.test.annotations.IgnoreUnderRavenwood;
+import android.platform.test.ravenwood.RavenwoodRule;
+
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
@@ -40,6 +46,8 @@ import org.mockito.stubbing.Answer;
  * Unit tests for {@link com.android.internal.util.WakeupMessage}.
  */
 @SmallTest
+@RunWith(AndroidJUnit4.class)
+@IgnoreUnderRavenwood(blockedBy = WakeupMessage.class)
 public class WakeupMessageTest {
     private static final String TEST_CMD_NAME = "TEST cmd Name";
     private static final int TEST_CMD = 18;
@@ -47,10 +55,16 @@ public class WakeupMessageTest {
     private static final int TEST_ARG2 = 182;
     private static final Object TEST_OBJ = "hello";
 
+    @Rule
+    public final RavenwoodRule mRavenwood = new RavenwoodRule.Builder()
+            .setProvideMainThread(true)
+            .build();
+
+    @Mock Context mContext;
     @Mock AlarmManager mAlarmManager;
     WakeupMessage mMessage;
     // Make a spy so that we can verify calls to it
-    @Spy MessageCapturingHandler mHandler = new MessageCapturingHandler();
+    @Spy MessageCapturingHandler mHandler;
 
     ArgumentCaptor<AlarmManager.OnAlarmListener> mListenerCaptor =
             ArgumentCaptor.forClass(AlarmManager.OnAlarmListener.class);
@@ -84,15 +98,16 @@ public class WakeupMessageTest {
      */
     @Before
     public void setUp() {
+        mHandler = new MessageCapturingHandler();
+
         MockitoAnnotations.initMocks(this);
 
-        Context context = mock(Context.class);
-        when(context.getSystemService(Context.ALARM_SERVICE)).thenReturn(mAlarmManager);
+        when(mContext.getSystemService(Context.ALARM_SERVICE)).thenReturn(mAlarmManager);
         // capture the listener for each AlarmManager.setExact call
         doNothing().when(mAlarmManager).setExact(anyInt(), anyLong(), any(String.class),
                 mListenerCaptor.capture(), any(Handler.class));
 
-        mMessage = new WakeupMessage(context, mHandler, TEST_CMD_NAME, TEST_CMD, TEST_ARG1,
+        mMessage = new WakeupMessage(mContext, mHandler, TEST_CMD_NAME, TEST_CMD, TEST_ARG1,
                 TEST_ARG2, TEST_OBJ);
     }
 
@@ -166,6 +181,21 @@ public class WakeupMessageTest {
         scheduleAndVerifyAlarm(when2);
         mListenerCaptor.getValue().onAlarm();
         verifyMessageDispatchedOnce();
+    }
+
+    /**
+     * Verify that a Runnable is scheduled and dispatched.
+     */
+    @Test
+    public void scheduleRunnable() {
+        final long when = 1011;
+        final Runnable runnable = mock(Runnable.class);
+        WakeupMessage dut = new WakeupMessage(mContext, mHandler, TEST_CMD_NAME, runnable);
+        dut.schedule(when);
+        verify(mAlarmManager).setExact(eq(AlarmManager.ELAPSED_REALTIME_WAKEUP), eq(when),
+                eq(TEST_CMD_NAME), any(AlarmManager.OnAlarmListener.class), eq(mHandler));
+        mListenerCaptor.getValue().onAlarm();
+        verify(runnable, times(1)).run();
     }
 
 }

@@ -17,12 +17,15 @@
 package android.widget;
 
 import android.content.Context;
+import android.os.LocaleList;
 import android.text.Editable;
 import android.text.InputFilter;
+import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.util.AttributeSet;
 import android.util.MathUtils;
 import android.view.View;
+import android.view.accessibility.AccessibilityManager;
 
 import com.android.internal.R;
 
@@ -53,6 +56,7 @@ public class TextInputTimePickerView extends RelativeLayout {
     private OnValueTypedListener mListener;
 
     private boolean mErrorShowing;
+    private boolean mTimeSet;
 
     interface OnValueTypedListener {
         void onValueChanged(int inputType, int newValue);
@@ -92,7 +96,13 @@ public class TextInputTimePickerView extends RelativeLayout {
 
             @Override
             public void afterTextChanged(Editable editable) {
-                parseAndSetHourInternal(editable.toString());
+                if (parseAndSetHourInternal(editable.toString()) && editable.length() > 1) {
+                    AccessibilityManager am = (AccessibilityManager) context.getSystemService(
+                            context.ACCESSIBILITY_SERVICE);
+                    if (!am.isEnabled()) {
+                        mMinuteEditText.requestFocus();
+                    }
+                }
             }
         });
 
@@ -141,11 +151,21 @@ public class TextInputTimePickerView extends RelativeLayout {
                 new InputFilter.LengthFilter(maxCharLength)});
         mMinuteEditText.setFilters(new InputFilter[] {
                 new InputFilter.LengthFilter(maxCharLength)});
+        final LocaleList locales = mContext.getResources().getConfiguration().getLocales();
+        mHourEditText.setImeHintLocales(locales);
+        mMinuteEditText.setImeHintLocales(locales);
     }
 
     boolean validateInput() {
-        final boolean inputValid = parseAndSetHourInternal(mHourEditText.getText().toString())
-                && parseAndSetMinuteInternal(mMinuteEditText.getText().toString());
+        final String hourText = TextUtils.isEmpty(mHourEditText.getText())
+                ? mHourEditText.getHint().toString()
+                : mHourEditText.getText().toString();
+        final String minuteText = TextUtils.isEmpty(mMinuteEditText.getText())
+                ? mMinuteEditText.getHint().toString()
+                : mMinuteEditText.getText().toString();
+
+        final boolean inputValid = parseAndSetHourInternal(hourText)
+                && parseAndSetMinuteInternal(minuteText);
         setError(!inputValid);
         return inputValid;
     }
@@ -162,6 +182,14 @@ public class TextInputTimePickerView extends RelativeLayout {
         mMinuteLabel.setVisibility(enabled ? View.INVISIBLE : View.VISIBLE);
     }
 
+    private void setTimeSet(boolean timeSet) {
+        mTimeSet = mTimeSet || timeSet;
+    }
+
+    private boolean isTimeSet() {
+        return mTimeSet;
+    }
+
     /**
      * Computes the display value and updates the text of the view.
      * <p>
@@ -170,7 +198,8 @@ public class TextInputTimePickerView extends RelativeLayout {
      */
     void updateTextInputValues(int localizedHour, int minute, int amOrPm, boolean is24Hour,
             boolean hourFormatStartsAtZero) {
-        final String format = "%d";
+        final String hourFormat = "%d";
+        final String minuteFormat = "%02d";
 
         mIs24Hour = is24Hour;
         mHourFormatStartsAtZero = hourFormatStartsAtZero;
@@ -183,8 +212,14 @@ public class TextInputTimePickerView extends RelativeLayout {
             mAmPmSpinner.setSelection(1);
         }
 
-        mHourEditText.setText(String.format(format, localizedHour));
-        mMinuteEditText.setText(String.format(format, minute));
+        if (isTimeSet()) {
+            mHourEditText.setText(String.format(hourFormat, localizedHour));
+            mMinuteEditText.setText(String.format(minuteFormat, minute));
+        } else {
+            mHourEditText.setHint(String.format(hourFormat, localizedHour));
+            mMinuteEditText.setHint(String.format(minuteFormat, minute));
+        }
+
 
         if (mErrorShowing) {
             validateInput();
@@ -202,6 +237,7 @@ public class TextInputTimePickerView extends RelativeLayout {
                 return false;
             }
             mListener.onValueChanged(HOURS, getHourOfDayFromLocalizedHour(hour));
+            setTimeSet(true);
             return true;
         } catch (NumberFormatException e) {
             // Do nothing since we cannot parse the input.
@@ -217,6 +253,7 @@ public class TextInputTimePickerView extends RelativeLayout {
                 return false;
             }
             mListener.onValueChanged(MINUTES, minutes);
+            setTimeSet(true);
             return true;
         } catch (NumberFormatException e) {
             // Do nothing since we cannot parse the input.

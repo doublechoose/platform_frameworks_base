@@ -4,14 +4,14 @@
 #include <vector>
 
 namespace android {
-namespace javastream_proto {
+namespace stream_proto {
 
 using namespace std;
 
 struct Error
 {
     Error();
-    explicit Error(const Error& that);
+    Error(const Error& that);
     Error(const string& filename, int lineno, const char* message);
 
     string filename;
@@ -44,5 +44,5 @@ extern const string UNKNOWN_FILE;
 extern const int UNKNOWN_LINE;
 
 
-} // namespace javastream_proto
+} // namespace stream_proto
 } // namespace android

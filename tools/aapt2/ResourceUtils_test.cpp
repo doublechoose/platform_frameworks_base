@@ -16,110 +16,118 @@
 
 #include "ResourceUtils.h"
 
+#include "SdkConstants.h"
 #include "Resource.h"
 #include "test/Test.h"
 
 using ::aapt::test::ValueEq;
+using ::android::Res_value;
+using ::android::ResTable_map;
+using ::testing::Eq;
+using ::testing::NotNull;
 using ::testing::Pointee;
 
 namespace aapt {
 
 TEST(ResourceUtilsTest, ParseBool) {
-  EXPECT_EQ(Maybe<bool>(true), ResourceUtils::ParseBool("true"));
-  EXPECT_EQ(Maybe<bool>(true), ResourceUtils::ParseBool("TRUE"));
-  EXPECT_EQ(Maybe<bool>(true), ResourceUtils::ParseBool("True"));
-  EXPECT_EQ(Maybe<bool>(false), ResourceUtils::ParseBool("false"));
-  EXPECT_EQ(Maybe<bool>(false), ResourceUtils::ParseBool("FALSE"));
-  EXPECT_EQ(Maybe<bool>(false), ResourceUtils::ParseBool("False"));
+  EXPECT_THAT(ResourceUtils::ParseBool("true"), Eq(std::optional<bool>(true)));
+  EXPECT_THAT(ResourceUtils::ParseBool("TRUE"), Eq(std::optional<bool>(true)));
+  EXPECT_THAT(ResourceUtils::ParseBool("True"), Eq(std::optional<bool>(true)));
+
+  EXPECT_THAT(ResourceUtils::ParseBool("false"), Eq(std::optional<bool>(false)));
+  EXPECT_THAT(ResourceUtils::ParseBool("FALSE"), Eq(std::optional<bool>(false)));
+  EXPECT_THAT(ResourceUtils::ParseBool("False"), Eq(std::optional<bool>(false)));
+
+  EXPECT_THAT(ResourceUtils::ParseBool(" False\n "), Eq(std::optional<bool>(false)));
 }
 
 TEST(ResourceUtilsTest, ParseResourceName) {
   ResourceNameRef actual;
   bool actual_priv = false;
-  EXPECT_TRUE(ResourceUtils::ParseResourceName("android:color/foo", &actual,
-                                               &actual_priv));
-  EXPECT_EQ(ResourceNameRef("android", ResourceType::kColor, "foo"), actual);
+  EXPECT_TRUE(ResourceUtils::ParseResourceName("android:color/foo", &actual, &actual_priv));
+  EXPECT_THAT(actual, Eq(ResourceNameRef("android", ResourceType::kColor, "foo")));
   EXPECT_FALSE(actual_priv);
 
-  EXPECT_TRUE(
-      ResourceUtils::ParseResourceName("color/foo", &actual, &actual_priv));
-  EXPECT_EQ(ResourceNameRef({}, ResourceType::kColor, "foo"), actual);
+  EXPECT_TRUE(ResourceUtils::ParseResourceName("color/foo", &actual, &actual_priv));
+  EXPECT_THAT(actual, Eq(ResourceNameRef({}, ResourceType::kColor, "foo")));
   EXPECT_FALSE(actual_priv);
 
-  EXPECT_TRUE(ResourceUtils::ParseResourceName("*android:color/foo", &actual,
-                                               &actual_priv));
-  EXPECT_EQ(ResourceNameRef("android", ResourceType::kColor, "foo"), actual);
+  EXPECT_TRUE(ResourceUtils::ParseResourceName("*android:color/foo", &actual, &actual_priv));
+  EXPECT_THAT(actual, Eq(ResourceNameRef("android", ResourceType::kColor, "foo")));
   EXPECT_TRUE(actual_priv);
 
   EXPECT_FALSE(ResourceUtils::ParseResourceName(android::StringPiece(), &actual, &actual_priv));
 }
 
 TEST(ResourceUtilsTest, ParseReferenceWithNoPackage) {
-  ResourceNameRef expected({}, ResourceType::kColor, "foo");
   ResourceNameRef actual;
   bool create = false;
   bool private_ref = false;
-  EXPECT_TRUE(ResourceUtils::ParseReference("@color/foo", &actual, &create,
-                                            &private_ref));
-  EXPECT_EQ(expected, actual);
+  EXPECT_TRUE(ResourceUtils::ParseReference("@color/foo", &actual, &create, &private_ref));
+  EXPECT_THAT(actual, Eq(ResourceNameRef({}, ResourceType::kColor, "foo")));
   EXPECT_FALSE(create);
   EXPECT_FALSE(private_ref);
 }
 
 TEST(ResourceUtilsTest, ParseReferenceWithPackage) {
-  ResourceNameRef expected("android", ResourceType::kColor, "foo");
   ResourceNameRef actual;
   bool create = false;
   bool private_ref = false;
-  EXPECT_TRUE(ResourceUtils::ParseReference("@android:color/foo", &actual,
-                                            &create, &private_ref));
-  EXPECT_EQ(expected, actual);
+  EXPECT_TRUE(ResourceUtils::ParseReference("@android:color/foo", &actual, &create, &private_ref));
+  EXPECT_THAT(actual, Eq(ResourceNameRef("android", ResourceType::kColor, "foo")));
   EXPECT_FALSE(create);
   EXPECT_FALSE(private_ref);
 }
 
 TEST(ResourceUtilsTest, ParseReferenceWithSurroundingWhitespace) {
-  ResourceNameRef expected("android", ResourceType::kColor, "foo");
   ResourceNameRef actual;
   bool create = false;
   bool private_ref = false;
-  EXPECT_TRUE(ResourceUtils::ParseReference("\t @android:color/foo\n \n\t",
-                                            &actual, &create, &private_ref));
-  EXPECT_EQ(expected, actual);
+  EXPECT_TRUE(ResourceUtils::ParseReference("\t @android:color/foo\n \n\t", &actual, &create, &private_ref));
+  EXPECT_THAT(actual, Eq(ResourceNameRef("android", ResourceType::kColor, "foo")));
   EXPECT_FALSE(create);
   EXPECT_FALSE(private_ref);
 }
 
 TEST(ResourceUtilsTest, ParseAutoCreateIdReference) {
-  ResourceNameRef expected("android", ResourceType::kId, "foo");
   ResourceNameRef actual;
   bool create = false;
   bool private_ref = false;
-  EXPECT_TRUE(ResourceUtils::ParseReference("@+android:id/foo", &actual,
-                                            &create, &private_ref));
-  EXPECT_EQ(expected, actual);
+  EXPECT_TRUE(ResourceUtils::ParseReference("@+android:id/foo", &actual, &create, &private_ref));
+  EXPECT_THAT(actual, Eq(ResourceNameRef("android", ResourceType::kId, "foo")));
   EXPECT_TRUE(create);
   EXPECT_FALSE(private_ref);
 }
 
 TEST(ResourceUtilsTest, ParsePrivateReference) {
-  ResourceNameRef expected("android", ResourceType::kId, "foo");
   ResourceNameRef actual;
   bool create = false;
   bool private_ref = false;
-  EXPECT_TRUE(ResourceUtils::ParseReference("@*android:id/foo", &actual,
-                                            &create, &private_ref));
-  EXPECT_EQ(expected, actual);
+  EXPECT_TRUE(ResourceUtils::ParseReference("@*android:id/foo", &actual, &create, &private_ref));
+  EXPECT_THAT(actual, Eq(ResourceNameRef("android", ResourceType::kId, "foo")));
   EXPECT_FALSE(create);
   EXPECT_TRUE(private_ref);
+}
+
+TEST(ResourceUtilsTest, ParseBinaryDynamicReference) {
+  android::Res_value value = {};
+  value.data = android::util::HostToDevice32(0x01);
+  value.dataType = android::Res_value::TYPE_DYNAMIC_REFERENCE;
+  std::unique_ptr<Item> item = ResourceUtils::ParseBinaryResValue(ResourceType::kId,
+                                                                  android::ConfigDescription(),
+                                                                  android::ResStringPool(), value,
+                                                                  nullptr);
+
+  Reference* ref = ValueCast<Reference>(item.get());
+  EXPECT_TRUE(ref->is_dynamic);
+  EXPECT_EQ(ref->id.value().id, 0x01);
 }
 
 TEST(ResourceUtilsTest, FailToParseAutoCreateNonIdReference) {
   bool create = false;
   bool private_ref = false;
   ResourceNameRef actual;
-  EXPECT_FALSE(ResourceUtils::ParseReference("@+android:color/foo", &actual,
-                                             &create, &private_ref));
+  EXPECT_FALSE(ResourceUtils::ParseReference("@+android:color/foo", &actual, &create, &private_ref));
 }
 
 TEST(ResourceUtilsTest, ParseAttributeReferences) {
@@ -143,82 +151,162 @@ TEST(ResourceUtilsTest, FailParseIncompleteReference) {
 }
 
 TEST(ResourceUtilsTest, ParseStyleParentReference) {
-  const ResourceName kAndroidStyleFooName("android", ResourceType::kStyle,
-                                          "foo");
+  const ResourceName kAndroidStyleFooName("android", ResourceType::kStyle, "foo");
   const ResourceName kStyleFooName({}, ResourceType::kStyle, "foo");
 
   std::string err_str;
-  Maybe<Reference> ref =
+  std::optional<Reference> ref =
       ResourceUtils::ParseStyleParentReference("@android:style/foo", &err_str);
-  AAPT_ASSERT_TRUE(ref);
-  EXPECT_EQ(ref.value().name.value(), kAndroidStyleFooName);
+  ASSERT_TRUE(ref);
+  EXPECT_THAT(ref.value().name, Eq(kAndroidStyleFooName));
 
   ref = ResourceUtils::ParseStyleParentReference("@style/foo", &err_str);
-  AAPT_ASSERT_TRUE(ref);
-  EXPECT_EQ(ref.value().name.value(), kStyleFooName);
+  ASSERT_TRUE(ref);
+  EXPECT_THAT(ref.value().name, Eq(kStyleFooName));
 
-  ref =
-      ResourceUtils::ParseStyleParentReference("?android:style/foo", &err_str);
-  AAPT_ASSERT_TRUE(ref);
-  EXPECT_EQ(ref.value().name.value(), kAndroidStyleFooName);
+  ref = ResourceUtils::ParseStyleParentReference("?android:style/foo", &err_str);
+  ASSERT_TRUE(ref);
+  EXPECT_THAT(ref.value().name, Eq(kAndroidStyleFooName));
 
   ref = ResourceUtils::ParseStyleParentReference("?style/foo", &err_str);
-  AAPT_ASSERT_TRUE(ref);
-  EXPECT_EQ(ref.value().name.value(), kStyleFooName);
+  ASSERT_TRUE(ref);
+  EXPECT_THAT(ref.value().name, Eq(kStyleFooName));
 
   ref = ResourceUtils::ParseStyleParentReference("android:style/foo", &err_str);
-  AAPT_ASSERT_TRUE(ref);
-  EXPECT_EQ(ref.value().name.value(), kAndroidStyleFooName);
+  ASSERT_TRUE(ref);
+  EXPECT_THAT(ref.value().name, Eq(kAndroidStyleFooName));
 
   ref = ResourceUtils::ParseStyleParentReference("android:foo", &err_str);
-  AAPT_ASSERT_TRUE(ref);
-  EXPECT_EQ(ref.value().name.value(), kAndroidStyleFooName);
+  ASSERT_TRUE(ref);
+  EXPECT_THAT(ref.value().name, Eq(kAndroidStyleFooName));
 
   ref = ResourceUtils::ParseStyleParentReference("@android:foo", &err_str);
-  AAPT_ASSERT_TRUE(ref);
-  EXPECT_EQ(ref.value().name.value(), kAndroidStyleFooName);
+  ASSERT_TRUE(ref);
+  EXPECT_THAT(ref.value().name, Eq(kAndroidStyleFooName));
 
   ref = ResourceUtils::ParseStyleParentReference("foo", &err_str);
-  AAPT_ASSERT_TRUE(ref);
-  EXPECT_EQ(ref.value().name.value(), kStyleFooName);
+  ASSERT_TRUE(ref);
+  EXPECT_THAT(ref.value().name, Eq(kStyleFooName));
 
-  ref =
-      ResourceUtils::ParseStyleParentReference("*android:style/foo", &err_str);
-  AAPT_ASSERT_TRUE(ref);
-  EXPECT_EQ(ref.value().name.value(), kAndroidStyleFooName);
+  ref = ResourceUtils::ParseStyleParentReference("*android:style/foo", &err_str);
+  ASSERT_TRUE(ref);
+  EXPECT_THAT(ref.value().name, Eq(kAndroidStyleFooName));
   EXPECT_TRUE(ref.value().private_reference);
 }
 
 TEST(ResourceUtilsTest, ParseEmptyFlag) {
-  std::unique_ptr<Attribute> attr =
-      test::AttributeBuilder(false)
-          .SetTypeMask(android::ResTable_map::TYPE_FLAGS)
-          .AddItem("one", 0x01)
-          .AddItem("two", 0x02)
-          .Build();
+  std::unique_ptr<Attribute> attr = test::AttributeBuilder()
+                                        .SetTypeMask(ResTable_map::TYPE_FLAGS)
+                                        .AddItem("one", 0x01)
+                                        .AddItem("two", 0x02)
+                                        .Build();
 
-  std::unique_ptr<BinaryPrimitive> result =
-      ResourceUtils::TryParseFlagSymbol(attr.get(), "");
-  ASSERT_NE(nullptr, result);
-  EXPECT_EQ(0u, result->value.data);
+  std::unique_ptr<BinaryPrimitive> result = ResourceUtils::TryParseFlagSymbol(attr.get(), "");
+  ASSERT_THAT(result, NotNull());
+  EXPECT_THAT(result->value.data, Eq(0u));
 }
 
 TEST(ResourceUtilsTest, NullIsEmptyReference) {
-  auto null_value = ResourceUtils::MakeNull();
-  ASSERT_THAT(null_value, Pointee(ValueEq(Reference())));
-
-  auto value = ResourceUtils::TryParseNullOrEmpty("@null");
-  ASSERT_THAT(value, Pointee(ValueEq(Reference())));
+  ASSERT_THAT(ResourceUtils::MakeNull(), Pointee(ValueEq(Reference())));
+  ASSERT_THAT(ResourceUtils::TryParseNullOrEmpty("@null"), Pointee(ValueEq(Reference())));
 }
 
 TEST(ResourceUtilsTest, EmptyIsBinaryPrimitive) {
-  auto empty_value = ResourceUtils::MakeEmpty();
-  ASSERT_THAT(empty_value, Pointee(ValueEq(BinaryPrimitive(android::Res_value::TYPE_NULL,
-                                                           android::Res_value::DATA_NULL_EMPTY))));
+  ASSERT_THAT(ResourceUtils::MakeEmpty(), Pointee(ValueEq(BinaryPrimitive(Res_value::TYPE_NULL, Res_value::DATA_NULL_EMPTY))));
+  ASSERT_THAT(ResourceUtils::TryParseNullOrEmpty("@empty"), Pointee(ValueEq(BinaryPrimitive(Res_value::TYPE_NULL, Res_value::DATA_NULL_EMPTY))));
+}
 
-  auto value = ResourceUtils::TryParseNullOrEmpty("@empty");
-  ASSERT_THAT(value, Pointee(ValueEq(BinaryPrimitive(android::Res_value::TYPE_NULL,
-                                                     android::Res_value::DATA_NULL_EMPTY))));
+TEST(ResourceUtilsTest, ItemsWithWhitespaceAreParsedCorrectly) {
+  std::unique_ptr<IAaptContext> context = test::ContextBuilder().Build();
+  EXPECT_THAT(ResourceUtils::TryParseItemForAttribute(context->GetDiagnostics(), " 12\n   ",
+                                                      ResTable_map::TYPE_INTEGER),
+              Pointee(ValueEq(BinaryPrimitive(Res_value::TYPE_INT_DEC, 12u))));
+  EXPECT_THAT(ResourceUtils::TryParseItemForAttribute(context->GetDiagnostics(), " true\n   ",
+                                                      ResTable_map::TYPE_BOOLEAN),
+              Pointee(ValueEq(BinaryPrimitive(Res_value::TYPE_INT_BOOLEAN, 0xffffffffu))));
+
+  const float expected_float = 12.0f;
+  const uint32_t expected_float_flattened = *(uint32_t*)&expected_float;
+  EXPECT_THAT(ResourceUtils::TryParseItemForAttribute(context->GetDiagnostics(), " 12.0\n   ",
+                                                      ResTable_map::TYPE_FLOAT),
+              Pointee(ValueEq(BinaryPrimitive(Res_value::TYPE_FLOAT, expected_float_flattened))));
+}
+
+TEST(ResourceUtilsTest, FloatAndBigIntegerParsedCorrectly) {
+  std::unique_ptr<IAaptContext> context = test::ContextBuilder().Build();
+  const float expected_float = 0.125f;
+  const uint32_t expected_float_flattened = *(uint32_t*)&expected_float;
+  EXPECT_THAT(ResourceUtils::TryParseItemForAttribute(context->GetDiagnostics(), "0.125",
+                                                      ResTable_map::TYPE_FLOAT),
+              Pointee(ValueEq(BinaryPrimitive(Res_value::TYPE_FLOAT, expected_float_flattened))));
+
+  const float special_float = 1.0f;
+  const uint32_t special_float_flattened = *(uint32_t*)&special_float;
+  EXPECT_THAT(ResourceUtils::TryParseItemForAttribute(context->GetDiagnostics(), "1.0",
+                                                      ResTable_map::TYPE_FLOAT),
+              Pointee(ValueEq(BinaryPrimitive(Res_value::TYPE_FLOAT, special_float_flattened))));
+
+  EXPECT_EQ(ResourceUtils::TryParseItemForAttribute(context->GetDiagnostics(), "1099511627776",
+                                                    ResTable_map::TYPE_INTEGER),
+            std::unique_ptr<Item>(nullptr));
+
+  const float big_float = 1099511627776.0f;
+  const uint32_t big_flattened = *(uint32_t*)&big_float;
+  EXPECT_THAT(ResourceUtils::TryParseItemForAttribute(context->GetDiagnostics(), "1099511627776",
+                                                      ResTable_map::TYPE_FLOAT),
+              Pointee(ValueEq(BinaryPrimitive(Res_value::TYPE_FLOAT, big_flattened))));
+}
+
+TEST(ResourceUtilsTest, ParseSdkVersionWithCodename) {
+  EXPECT_THAT(ResourceUtils::ParseSdkVersion("Q"), Eq(std::optional<int>(10000)));
+  EXPECT_THAT(ResourceUtils::ParseSdkVersion("Q.fingerprint"), Eq(std::optional<int>(10000)));
+
+  EXPECT_THAT(ResourceUtils::ParseSdkVersion("R"), Eq(std::optional<int>(10000)));
+  EXPECT_THAT(ResourceUtils::ParseSdkVersion("R.fingerprint"), Eq(std::optional<int>(10000)));
+}
+
+TEST(ResourceUtilsTest, StringBuilderWhitespaceRemoval) {
+  EXPECT_THAT(ResourceUtils::StringBuilder()
+                  .AppendText("    hey guys ")
+                  .AppendText(" this is so cool ")
+                  .to_string(),
+              Eq(" hey guys this is so cool "));
+  EXPECT_THAT(ResourceUtils::StringBuilder()
+                  .AppendText(" \" wow,  so many \t ")
+                  .AppendText("spaces. \"what? ")
+                  .to_string(),
+              Eq("  wow,  so many \t spaces. what? "));
+  EXPECT_THAT(ResourceUtils::StringBuilder()
+                  .AppendText("  where \t ")
+                  .AppendText(" \nis the pie?")
+                  .to_string(),
+              Eq(" where is the pie?"));
+}
+
+TEST(ResourceUtilsTest, StringBuilderEscaping) {
+  EXPECT_THAT(ResourceUtils::StringBuilder()
+                  .AppendText("hey guys\\n ")
+                  .AppendText(" this \\t is so\\\\ cool")
+                  .to_string(),
+              Eq("hey guys\n this \t is so\\ cool"));
+  EXPECT_THAT(ResourceUtils::StringBuilder().AppendText("\\@\\?\\#\\\\\\'").to_string(),
+              Eq("@?#\\\'"));
+}
+
+TEST(ResourceUtilsTest, StringBuilderMisplacedQuote) {
+  ResourceUtils::StringBuilder builder;
+  EXPECT_FALSE(builder.AppendText("they're coming!"));
+}
+
+TEST(ResourceUtilsTest, StringBuilderUnicodeCodes) {
+  EXPECT_THAT(ResourceUtils::StringBuilder().AppendText("\\u00AF\\u0AF0 woah").to_string(),
+              Eq("\u00AF\u0AF0 woah"));
+  EXPECT_FALSE(ResourceUtils::StringBuilder().AppendText("\\u00 yo"));
+}
+
+TEST(ResourceUtilsTest, StringBuilderPreserveSpaces) {
+  EXPECT_THAT(ResourceUtils::StringBuilder(true /*preserve_spaces*/).AppendText("\"").to_string(),
+              Eq("\""));
 }
 
 }  // namespace aapt

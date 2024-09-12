@@ -17,15 +17,15 @@
 #ifndef AAPT_JAVA_CLASS_GENERATOR_H
 #define AAPT_JAVA_CLASS_GENERATOR_H
 
-#include <ostream>
 #include <string>
-
-#include "androidfw/StringPiece.h"
 
 #include "ResourceTable.h"
 #include "ResourceValues.h"
+#include "androidfw/Streams.h"
+#include "androidfw/StringPiece.h"
 #include "process/IResourceTableConsumer.h"
 #include "process/SymbolTable.h"
+#include "text/Printer.h"
 
 namespace aapt {
 
@@ -45,7 +45,7 @@ struct JavaClassGeneratorOptions {
 
   // If set, generates code to rewrite the package ID of resources.
   // Implies use_final == true. Default is unset.
-  Maybe<OnResourcesLoadedCallbackOptions> rewrite_callback_options;
+  std::optional<OnResourcesLoadedCallbackOptions> rewrite_callback_options;
 
   enum class SymbolTypes {
     kAll,
@@ -69,44 +69,45 @@ class JavaClassGenerator {
   // All symbols technically belong to a single package, but linked libraries will
   // have their names mangled, denoting that they came from a different package.
   // We need to generate these symbols in a separate file. Returns true on success.
-  bool Generate(const android::StringPiece& package_name_to_generate, std::ostream* out,
-                std::ostream* out_r_txt = nullptr);
+  bool Generate(android::StringPiece package_name_to_generate, android::OutputStream* out,
+                android::OutputStream* out_r_txt = nullptr);
 
-  bool Generate(const android::StringPiece& package_name_to_generate,
-                const android::StringPiece& output_package_name, std::ostream* out,
-                std::ostream* out_r_txt = nullptr);
+  bool Generate(android::StringPiece package_name_to_generate,
+                android::StringPiece output_package_name, android::OutputStream* out,
+                android::OutputStream* out_r_txt = nullptr);
 
-  const std::string& getError() const;
+  const std::string& GetError() const;
+
+  static std::string TransformToFieldName(android::StringPiece symbol);
 
  private:
-  bool SkipSymbol(SymbolState state);
-  bool SkipSymbol(const Maybe<SymbolTable::Symbol>& symbol);
+  bool SkipSymbol(Visibility::Level state);
+  bool SkipSymbol(const std::optional<SymbolTable::Symbol>& symbol);
 
   // Returns the unmangled resource entry name if the unmangled package is the same as
   // package_name_to_generate. Returns nothing if the resource should be skipped.
-  Maybe<std::string> UnmangleResource(const android::StringPiece& package_name,
-                                      const android::StringPiece& package_name_to_generate,
-                                      const ResourceEntry& entry);
+  std::optional<std::string> UnmangleResource(android::StringPiece package_name,
+                                              android::StringPiece package_name_to_generate,
+                                              const ResourceEntry& entry);
 
-  bool ProcessType(const android::StringPiece& package_name_to_generate,
+  bool ProcessType(android::StringPiece package_name_to_generate,
                    const ResourceTablePackage& package, const ResourceTableType& type,
                    ClassDefinition* out_type_class_def, MethodDefinition* out_rewrite_method_def,
-                   std::ostream* out_r_txt);
+                   text::Printer* r_txt_printer);
 
   // Writes a resource to the R.java file, optionally writing out a rewrite rule for its package
   // ID if `out_rewrite_method` is not nullptr.
   void ProcessResource(const ResourceNameRef& name, const ResourceId& id,
                        const ResourceEntry& entry, ClassDefinition* out_class_def,
-                       MethodDefinition* out_rewrite_method, std::ostream* out_r_txt);
+                       MethodDefinition* out_rewrite_method, text::Printer* r_txt_printer);
 
   // Writes a styleable resource to the R.java file, optionally writing out a rewrite rule for
   // its package ID if `out_rewrite_method` is not nullptr.
   // `package_name_to_generate` is the package
-  void ProcessStyleable(const ResourceNameRef& name, const ResourceId& id,
-                        const Styleable& styleable,
-                        const android::StringPiece& package_name_to_generate,
+  bool ProcessStyleable(const ResourceNameRef& name, const ResourceId& id,
+                        const Styleable& styleable, android::StringPiece package_name_to_generate,
                         ClassDefinition* out_class_def, MethodDefinition* out_rewrite_method,
-                        std::ostream* out_r_txt);
+                        text::Printer* r_txt_printer);
 
   IAaptContext* context_;
   ResourceTable* table_;
@@ -114,7 +115,7 @@ class JavaClassGenerator {
   std::string error_;
 };
 
-inline const std::string& JavaClassGenerator::getError() const {
+inline const std::string& JavaClassGenerator::GetError() const {
   return error_;
 }
 

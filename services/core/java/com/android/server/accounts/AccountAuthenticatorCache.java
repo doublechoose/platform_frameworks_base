@@ -28,9 +28,10 @@ import android.content.res.TypedArray;
 import android.text.TextUtils;
 import android.util.AttributeSet;
 
-import org.xmlpull.v1.XmlPullParser;
+import com.android.modules.utils.TypedXmlPullParser;
+import com.android.modules.utils.TypedXmlSerializer;
+
 import org.xmlpull.v1.XmlPullParserException;
-import org.xmlpull.v1.XmlSerializer;
 
 import java.io.IOException;
 
@@ -53,6 +54,7 @@ import java.io.IOException;
                 AccountManager.AUTHENTICATOR_ATTRIBUTES_NAME, sSerializer);
     }
 
+    @Override
     public AuthenticatorDescription parseServiceAttributes(Resources res,
             String packageName, AttributeSet attrs) {
         TypedArray sa = res.obtainAttributes(attrs,
@@ -81,12 +83,14 @@ import java.io.IOException;
     }
 
     private static class MySerializer implements XmlSerializerAndParser<AuthenticatorDescription> {
-        public void writeAsXml(AuthenticatorDescription item, XmlSerializer out)
+        @Override
+        public void writeAsXml(AuthenticatorDescription item, TypedXmlSerializer out)
                 throws IOException {
             out.attribute(null, "type", item.type);
         }
 
-        public AuthenticatorDescription createFromXml(XmlPullParser parser)
+        @Override
+        public AuthenticatorDescription createFromXml(TypedXmlPullParser parser)
                 throws IOException, XmlPullParserException {
             return AuthenticatorDescription.newKey(parser.getAttributeValue(null, "type"));
         }

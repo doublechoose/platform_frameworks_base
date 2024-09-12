@@ -16,32 +16,43 @@
 
 package android.app.admin;
 
-import org.xmlpull.v1.XmlPullParser;
-import org.xmlpull.v1.XmlPullParserException;
-import org.xmlpull.v1.XmlSerializer;
+import static android.app.admin.flags.Flags.FLAG_HEADLESS_DEVICE_OWNER_SINGLE_USER_ENABLED;
 
+import android.annotation.FlaggedApi;
+import android.annotation.IntDef;
 import android.annotation.NonNull;
+import android.app.admin.flags.Flags;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
-import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
 import android.content.pm.PackageManager.NameNotFoundException;
+import android.content.pm.ResolveInfo;
 import android.content.res.Resources;
+import android.content.res.Resources.NotFoundException;
 import android.content.res.TypedArray;
 import android.content.res.XmlResourceParser;
-import android.content.res.Resources.NotFoundException;
 import android.graphics.drawable.Drawable;
+import android.os.Build;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.os.PersistableBundle;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.util.Printer;
 import android.util.SparseArray;
 import android.util.Xml;
 
+import com.android.modules.utils.TypedXmlPullParser;
+import com.android.modules.utils.TypedXmlSerializer;
+
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
+
 import java.io.IOException;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 import java.util.ArrayList;
 import java.util.HashMap;
 
@@ -53,28 +64,14 @@ public final class DeviceAdminInfo implements Parcelable {
     static final String TAG = "DeviceAdminInfo";
 
     /**
-     * A type of policy that this device admin can use: device owner meta-policy
-     * for an admin that is designated as owner of the device.
-     *
-     * @hide
-     */
-    public static final int USES_POLICY_DEVICE_OWNER = -2;
-
-    /**
-     * A type of policy that this device admin can use: profile owner meta-policy
-     * for admins that have been installed as owner of some user profile.
-     *
-     * @hide
-     */
-    public static final int USES_POLICY_PROFILE_OWNER = -1;
-
-    /**
      * A type of policy that this device admin can use: limit the passwords
      * that the user can select, via {@link DevicePolicyManager#setPasswordQuality}
      * and {@link DevicePolicyManager#setPasswordMinimumLength}.
      *
-     * <p>To control this policy, the device admin must have a "limit-password"
-     * tag in the "uses-policies" section of its meta-data.
+     * <p>To control this policy, the device admin must be a device owner or profile owner,
+     * and must have a "limit-password" tag in the "uses-policies" section of its meta-data.
+     * If used by a device owner, the policy only affects the primary user and its profiles,
+     * but not any secondary users on the device.
      */
     public static final int USES_POLICY_LIMIT_PASSWORD = 0;
 
@@ -134,8 +131,10 @@ public final class DeviceAdminInfo implements Parcelable {
      * A type of policy that this device admin can use: force the user to
      * change their password after an administrator-defined time limit.
      *
-     * <p>To control this policy, the device admin must have an "expire-password"
-     * tag in the "uses-policies" section of its meta-data.
+     * <p>To control this policy, the device admin must be a device owner or profile owner,
+     * and must have an "expire-password" tag in the "uses-policies" section of its meta-data.
+     * If used by a device owner, the policy only affects the primary user and its profiles,
+     * but not any secondary users on the device.
      */
     public static final int USES_POLICY_EXPIRE_PASSWORD = 6;
 
@@ -150,22 +149,67 @@ public final class DeviceAdminInfo implements Parcelable {
     /**
      * A type of policy that this device admin can use: disables use of all device cameras.
      *
-     * <p>To control this policy, the device admin must have a "disable-camera"
-     * tag in the "uses-policies" section of its meta-data.
+     * <p>To control this policy, the device admin must be a device owner or profile owner,
+     * and must have a "disable-camera" tag in the "uses-policies" section of its meta-data.
+     * If used by a device owner, the policy affects all users on the device.
      */
     public static final int USES_POLICY_DISABLE_CAMERA = 8;
 
     /**
      * A type of policy that this device admin can use: disables use of keyguard features.
      *
-     * <p>To control this policy, the device admin must have a "disable-keyguard-features"
-     * tag in the "uses-policies" section of its meta-data.
+     * <p>To control this policy, the device admin must be a device owner or profile owner,
+     * and must have a "disable-keyguard-features" tag in the "uses-policies" section of its
+     * meta-data.  If used by a device owner, the policy only affects the primary user and
+     * its profiles, but not any secondary users on the device.
      */
     public static final int USES_POLICY_DISABLE_KEYGUARD_FEATURES = 9;
+
+
+    /**
+     * Value for {@link #getHeadlessDeviceOwnerMode} which indicates that this DPC should not
+     * be provisioned into Device Owner mode on a Headless System User Mode device.
+     */
+    public static final int HEADLESS_DEVICE_OWNER_MODE_UNSUPPORTED = 0;
+
+    /**
+     * Value for {@link #getHeadlessDeviceOwnerMode} which indicates that this DPC should be
+     * provisioned into "affiliated" mode when on a Headless System User Mode device.
+     *
+     * <p>This mode adds a Profile Owner to all users other than the user the Device Owner is on.
+     *
+     * <p>Starting from Android version {@link android.os.Build.VERSION_CODES#VANILLA_ICE_CREAM},
+     * DPCs should set the value of attribute "headless-device-owner-mode" inside the
+     * "headless-system-user" tag as "affiliated".
+     */
+    public static final int HEADLESS_DEVICE_OWNER_MODE_AFFILIATED = 1;
+
+    /**
+     * Value for {@link #getHeadlessDeviceOwnerMode} which indicates that this DPC should be
+     * provisioned into the first secondary user when on a Headless System User Mode device.
+     *
+     * <p>This mode only allows a single secondary user on the device blocking the creation of
+     * additional secondary users.
+     *
+     * <p>Starting from Android version {@link android.os.Build.VERSION_CODES#VANILLA_ICE_CREAM},
+     * DPCs should set the value of attribute "headless-device-owner-mode" inside the
+     * "headless-system-user" tag as "single_user".
+     */
+    @FlaggedApi(FLAG_HEADLESS_DEVICE_OWNER_SINGLE_USER_ENABLED)
+    public static final int HEADLESS_DEVICE_OWNER_MODE_SINGLE_USER = 2;
+
+    /**
+     * @hide
+     */
+    @IntDef({HEADLESS_DEVICE_OWNER_MODE_UNSUPPORTED, HEADLESS_DEVICE_OWNER_MODE_AFFILIATED,
+            HEADLESS_DEVICE_OWNER_MODE_SINGLE_USER})
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface HeadlessDeviceOwnerMode {}
 
     /** @hide */
     public static class PolicyInfo {
         public final int ident;
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
         public final String tag;
         public final int label;
         public final int description;
@@ -252,6 +296,14 @@ public final class DeviceAdminInfo implements Parcelable {
      */
     int mUsesPolicies;
 
+    /**
+     * Whether this administrator can be a target in an ownership transfer.
+     *
+     * @see DevicePolicyManager#transferOwnership(ComponentName, ComponentName, PersistableBundle)
+     */
+    boolean mSupportsTransferOwnership;
+
+    @HeadlessDeviceOwnerMode int mHeadlessDeviceOwnerMode = HEADLESS_DEVICE_OWNER_MODE_UNSUPPORTED;
 
     /**
      * Constructor.
@@ -333,6 +385,38 @@ public final class DeviceAdminInfo implements Parcelable {
                                     + getComponent() + ": " + policyName);
                         }
                     }
+                } else if (tagName.equals("support-transfer-ownership")) {
+                    if (parser.next() != XmlPullParser.END_TAG) {
+                        throw new XmlPullParserException(
+                                "support-transfer-ownership tag must be empty.");
+                    }
+                    mSupportsTransferOwnership = true;
+                } else if (tagName.equals("headless-system-user")) {
+                    String deviceOwnerModeStringValue = null;
+                    if (Flags.headlessSingleUserCompatibilityFix()) {
+                        deviceOwnerModeStringValue = parser.getAttributeValue(
+                                 null, "headless-device-owner-mode");
+                    }
+                    if (deviceOwnerModeStringValue == null) {
+                        deviceOwnerModeStringValue =
+                                parser.getAttributeValue(null, "device-owner-mode");
+                    }
+
+                    if ("unsupported".equalsIgnoreCase(deviceOwnerModeStringValue)) {
+                        mHeadlessDeviceOwnerMode = HEADLESS_DEVICE_OWNER_MODE_UNSUPPORTED;
+                    } else if ("affiliated".equalsIgnoreCase(deviceOwnerModeStringValue)) {
+                        mHeadlessDeviceOwnerMode = HEADLESS_DEVICE_OWNER_MODE_AFFILIATED;
+                    } else if ("single_user".equalsIgnoreCase(deviceOwnerModeStringValue)) {
+                        mHeadlessDeviceOwnerMode = HEADLESS_DEVICE_OWNER_MODE_SINGLE_USER;
+                    } else {
+                        if (Flags.headlessSingleUserCompatibilityFix()) {
+                            Log.e(TAG, "Unknown headless-system-user mode: "
+                                    + deviceOwnerModeStringValue);
+                        } else {
+                            throw new XmlPullParserException(
+                                    "headless-system-user mode must be valid");
+                        }
+                    }
                 }
             }
         } catch (NameNotFoundException e) {
@@ -346,6 +430,8 @@ public final class DeviceAdminInfo implements Parcelable {
     DeviceAdminInfo(Parcel source) {
         mActivityInfo = ActivityInfo.CREATOR.createFromParcel(source);
         mUsesPolicies = source.readInt();
+        mSupportsTransferOwnership = source.readBoolean();
+        mHeadlessDeviceOwnerMode = source.readInt();
     }
 
     /**
@@ -444,7 +530,23 @@ public final class DeviceAdminInfo implements Parcelable {
         return sRevKnownPolicies.get(policyIdent).tag;
     }
 
+    /**
+     * Return true if this administrator can be a target in an ownership transfer.
+     */
+    public boolean supportsTransferOwnership() {
+        return mSupportsTransferOwnership;
+    }
+
+    /**
+     * Returns the mode this DeviceAdmin wishes to use if provisioned as a Device Owner on a
+     * headless system user mode device.
+     */
+    public @HeadlessDeviceOwnerMode int getHeadlessDeviceOwnerMode() {
+        return mHeadlessDeviceOwnerMode;
+    }
+
     /** @hide */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public ArrayList<PolicyInfo> getUsedPolicies() {
         ArrayList<PolicyInfo> res = new ArrayList<PolicyInfo>();
         for (int i=0; i<sPoliciesDisplayOrder.size(); i++) {
@@ -457,16 +559,15 @@ public final class DeviceAdminInfo implements Parcelable {
     }
 
     /** @hide */
-    public void writePoliciesToXml(XmlSerializer out)
+    public void writePoliciesToXml(TypedXmlSerializer out)
             throws IllegalArgumentException, IllegalStateException, IOException {
-        out.attribute(null, "flags", Integer.toString(mUsesPolicies));
+        out.attributeInt(null, "flags", mUsesPolicies);
     }
 
     /** @hide */
-    public void readPoliciesFromXml(XmlPullParser parser)
+    public void readPoliciesFromXml(TypedXmlPullParser parser)
             throws XmlPullParserException, IOException {
-        mUsesPolicies = Integer.parseInt(
-                parser.getAttributeValue(null, "flags"));
+        mUsesPolicies = parser.getAttributeInt(null, "flags");
     }
 
     public void dump(Printer pw, String prefix) {
@@ -488,12 +589,14 @@ public final class DeviceAdminInfo implements Parcelable {
     public void writeToParcel(Parcel dest, int flags) {
         mActivityInfo.writeToParcel(dest, flags);
         dest.writeInt(mUsesPolicies);
+        dest.writeBoolean(mSupportsTransferOwnership);
+        dest.writeInt(mHeadlessDeviceOwnerMode);
     }
 
     /**
      * Used to make this class parcelable.
      */
-    public static final Parcelable.Creator<DeviceAdminInfo> CREATOR =
+    public static final @android.annotation.NonNull Parcelable.Creator<DeviceAdminInfo> CREATOR =
             new Parcelable.Creator<DeviceAdminInfo>() {
         public DeviceAdminInfo createFromParcel(Parcel source) {
             return new DeviceAdminInfo(source);

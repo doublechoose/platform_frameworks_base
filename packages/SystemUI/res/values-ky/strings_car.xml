@@ -19,6 +19,10 @@
 
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="car_lockscreen_disclaimer_title" msgid="7997539137376896441">"Коопсуздук эрежелерин сактаңыз"</string>
-    <string name="car_lockscreen_disclaimer_text" msgid="3061224684092952864">"Унаа айдап бара жатканда жолдогу шарттар менен эрежелерге ар дайым көңүл буруңуз. Багыттар так же толук эмес берилип, кесип өтүү үчүн опурталдуу же ылайыксыз болгон административдик аймактар аркылуу өтүшү мүмкүн. Ишканалар тууралуу маалымат да так же толук эмес болушу мүмкүн. Дайындар тез-тез жаңыртылып турбагандыктан, жайгашкан жердин так аныкталгандыгына кепилдик жок. Андыктан унаа айдап бара жатканда, мобилдик түзмөгүңүздү же Android Auto\'го арналбаган колдонмолорду пайдаланбаңыз."</string>
+    <string name="car_guest" msgid="3738772168718508650">"Конок"</string>
+    <string name="start_guest_session" msgid="7055742120180595689">"Конок"</string>
+    <string name="car_add_user" msgid="5245196248349230898">"Колдонуучу кошуу"</string>
+    <string name="car_new_user" msgid="8142927244990323906">"Жаңы колдонуучу"</string>
+    <string name="user_add_user_message_setup" msgid="1791011504259527329">"Жаңы колдонуучу кошулганда, ал өзүнүн профилин жөндөп алышы керек."</string>
+    <string name="user_add_user_message_update" msgid="3383320289232716179">"Колдонмолорду бир колдонуучу калган бардык колдонуучулар үчүн да жаңырта алат."</string>
 </resources>

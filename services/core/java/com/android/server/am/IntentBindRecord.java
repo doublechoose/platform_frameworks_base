@@ -21,6 +21,7 @@ import android.content.Intent;
 import android.os.IBinder;
 import android.util.ArrayMap;
 import android.util.ArraySet;
+import android.util.proto.ProtoOutputStream;
 
 import java.io.PrintWriter;
 
@@ -45,9 +46,9 @@ final class IntentBindRecord {
     boolean hasBound;
     /** Set when the service's onUnbind() has asked to be told about new clients. */
     boolean doRebind;
-    
+
     String stringName;      // caching of toString
-    
+
     void dump(PrintWriter pw, String prefix) {
         pw.print(prefix); pw.print("service="); pw.println(service);
         dumpInService(pw, prefix);
@@ -76,12 +77,12 @@ final class IntentBindRecord {
         intent = _intent;
     }
 
-    int collectFlags() {
-        int flags = 0;
+    long collectFlags() {
+        long flags = 0;
         for (int i=apps.size()-1; i>=0; i--) {
             final ArraySet<ConnectionRecord> connections = apps.valueAt(i).connections;
             for (int j=connections.size()-1; j>=0; j--) {
-                flags |= connections.valueAt(j).flags;
+                flags |= connections.valueAt(j).getFlags();
             }
         }
         return flags;
@@ -98,12 +99,38 @@ final class IntentBindRecord {
         if ((collectFlags()&Context.BIND_AUTO_CREATE) != 0) {
             sb.append("CR ");
         }
-        sb.append(service.shortName);
+        sb.append(service.shortInstanceName);
         sb.append(':');
         if (intent != null) {
             intent.getIntent().toShortString(sb, false, false, false, false);
         }
         sb.append('}');
         return stringName = sb.toString();
+    }
+
+    public void dumpDebug(ProtoOutputStream proto, long fieldId) {
+        long token = proto.start(fieldId);
+        if (intent != null) {
+            intent.getIntent().dumpDebug(proto,
+                    IntentBindRecordProto.INTENT, false, true, false, false);
+        }
+        if (binder != null) {
+            proto.write(IntentBindRecordProto.BINDER, binder.toString());
+        }
+        proto.write(IntentBindRecordProto.AUTO_CREATE,
+                (collectFlags()&Context.BIND_AUTO_CREATE) != 0);
+        proto.write(IntentBindRecordProto.REQUESTED, requested);
+        proto.write(IntentBindRecordProto.RECEIVED, received);
+        proto.write(IntentBindRecordProto.HAS_BOUND, hasBound);
+        proto.write(IntentBindRecordProto.DO_REBIND, doRebind);
+
+        final int N = apps.size();
+        for (int i=0; i<N; i++) {
+            AppBindRecord a = apps.valueAt(i);
+            if (a != null) {
+                a.dumpDebug(proto, IntentBindRecordProto.APPS);
+            }
+        }
+        proto.end(token);
     }
 }

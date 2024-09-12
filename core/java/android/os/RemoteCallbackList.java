@@ -16,9 +16,12 @@
 
 package android.os;
 
+import android.compat.annotation.UnsupportedAppUsage;
 import android.util.ArrayMap;
 import android.util.Slog;
 
+import java.io.PrintWriter;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -49,9 +52,11 @@ import java.util.function.Consumer;
  * additional work in this situation, you can create a subclass that
  * implements the {@link #onCallbackDied} method.
  */
+@android.ravenwood.annotation.RavenwoodKeepWholeClass
 public class RemoteCallbackList<E extends IInterface> {
     private static final String TAG = "RemoteCallbackList";
 
+    @UnsupportedAppUsage
     /*package*/ ArrayMap<IBinder, Callback> mCallbacks
             = new ArrayMap<IBinder, Callback>();
     private Object[] mActiveBroadcast;
@@ -120,6 +125,7 @@ public class RemoteCallbackList<E extends IInterface> {
             IBinder binder = callback.asBinder();
             try {
                 Callback cb = new Callback(callback, cookie);
+                unregister(callback);
                 binder.linkToDeath(cb, 0);
                 mCallbacks.put(binder, cb);
                 return true;
@@ -268,7 +274,7 @@ public class RemoteCallbackList<E extends IInterface> {
      * handle such an exception by simply ignoring it.
      *
      * @param index Which of the registered callbacks you would like to
-     * retrieve.  Ranges from 0 to 1-{@link #beginBroadcast}.
+     * retrieve.  Ranges from 0 to {@link #beginBroadcast}-1, inclusive.
      *
      * @return Returns the callback interface that you can call.  This will
      * always be non-null.
@@ -326,6 +332,40 @@ public class RemoteCallbackList<E extends IInterface> {
         try {
             for (int i = 0; i < itemCount; i++) {
                 action.accept(getBroadcastItem(i));
+            }
+        } finally {
+            finishBroadcast();
+        }
+    }
+
+    /**
+     * Performs {@code action} for each cookie associated with a callback, calling
+     * {@link #beginBroadcast()}/{@link #finishBroadcast()} before/after looping
+     *
+     * @hide
+     */
+    public <C> void broadcastForEachCookie(Consumer<C> action) {
+        int itemCount = beginBroadcast();
+        try {
+            for (int i = 0; i < itemCount; i++) {
+                action.accept((C) getBroadcastCookie(i));
+            }
+        } finally {
+            finishBroadcast();
+        }
+    }
+
+    /**
+     * Performs {@code action} on each callback and associated cookie, calling {@link
+     * #beginBroadcast()}/{@link #finishBroadcast()} before/after looping.
+     *
+     * @hide
+     */
+    public <C> void broadcast(BiConsumer<E, C> action) {
+        int itemCount = beginBroadcast();
+        try {
+            for (int i = 0; i < itemCount; i++) {
+                action.accept(getBroadcastItem(i), (C) getBroadcastCookie(i));
             }
         } finally {
             finishBroadcast();
@@ -396,6 +436,15 @@ public class RemoteCallbackList<E extends IInterface> {
                 return null;
             }
             return mCallbacks.valueAt(index).mCookie;
+        }
+    }
+
+    /** @hide */
+    public void dump(PrintWriter pw, String prefix) {
+        synchronized (mCallbacks) {
+            pw.print(prefix); pw.print("callbacks: "); pw.println(mCallbacks.size());
+            pw.print(prefix); pw.print("killed: "); pw.println(mKilled);
+            pw.print(prefix); pw.print("broadcasts count: "); pw.println(mBroadcastCount);
         }
     }
 

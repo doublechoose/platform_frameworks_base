@@ -18,6 +18,8 @@
 
 #include "test/Test.h"
 
+using ::testing::NotNull;
+
 namespace aapt {
 namespace xml {
 
@@ -42,12 +44,11 @@ TEST(XmlActionExecutorTest, BuildsAccessibleNestedPattern) {
       test::BuildXmlDom("<manifest><application /></manifest>");
 
   StdErrDiagnostics diag;
-  ASSERT_TRUE(
-      executor.Execute(XmlActionExecutorPolicy::kNone, &diag, doc.get()));
-  ASSERT_NE(nullptr, manifest_el);
+  ASSERT_TRUE(executor.Execute(XmlActionExecutorPolicy::kNone, &diag, doc.get()));
+  ASSERT_THAT(manifest_el, NotNull());
   EXPECT_EQ(std::string("manifest"), manifest_el->name);
 
-  ASSERT_NE(nullptr, application_el);
+  ASSERT_THAT(application_el, NotNull());
   EXPECT_EQ(std::string("application"), application_el->name);
 }
 
@@ -55,11 +56,14 @@ TEST(XmlActionExecutorTest, FailsWhenUndefinedHierarchyExists) {
   XmlActionExecutor executor;
   executor["manifest"]["application"];
 
-  std::unique_ptr<XmlResource> doc =
-      test::BuildXmlDom("<manifest><application /><activity /></manifest>");
+  std::unique_ptr<XmlResource> doc;
   StdErrDiagnostics diag;
-  ASSERT_FALSE(
-      executor.Execute(XmlActionExecutorPolicy::kWhitelist, &diag, doc.get()));
+
+  doc = test::BuildXmlDom("<manifest><application /><activity /></manifest>");
+  ASSERT_FALSE(executor.Execute(XmlActionExecutorPolicy::kAllowList, &diag, doc.get()));
+
+  doc = test::BuildXmlDom("<manifest><application><activity /></application></manifest>");
+  ASSERT_FALSE(executor.Execute(XmlActionExecutorPolicy::kAllowList, &diag, doc.get()));
 }
 
 }  // namespace xml

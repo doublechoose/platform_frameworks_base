@@ -27,6 +27,11 @@
 namespace android {
 
 struct JHwBlob : public RefBase {
+    enum class BlobType {
+        GENERIC,
+        NATIVE_HANDLE,
+    };
+
     static void InitClass(JNIEnv *env);
 
     static sp<JHwBlob> SetNativeContext(
@@ -50,7 +55,12 @@ struct JHwBlob : public RefBase {
             size_t offset, const android::hardware::hidl_string **s) const;
 
     const void *data() const;
+    void *data();
+
     size_t size() const;
+
+    void specializeBlobTo(BlobType type);
+    BlobType type() const;
 
     status_t putBlob(size_t offset, const sp<JHwBlob> &blob);
 
@@ -72,11 +82,14 @@ private:
 
     void *mBuffer;
     size_t mSize;
+    BlobType mType;
     bool mOwnsBuffer;
 
     size_t mHandle;
 
     Vector<BlobInfo> mSubBlobs;
+
+    status_t writeSubBlobsToParcel(hardware::Parcel *parcel, size_t parentHandle) const;
 
     DISALLOW_COPY_AND_ASSIGN(JHwBlob);
 };

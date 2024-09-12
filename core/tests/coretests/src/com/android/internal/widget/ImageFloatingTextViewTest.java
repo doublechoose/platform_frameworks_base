@@ -19,11 +19,14 @@ package com.android.internal.widget;
 import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
+import android.text.Layout;
 import android.view.View.MeasureSpec;
 import android.widget.TextView;
 
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -100,6 +103,16 @@ public class ImageFloatingTextViewTest {
                 + "Yada yada, yada yada. Lorem ipsum dolor sit amet."
                 + "Yada yada, yada yada. Lorem ipsum dolor sit amet."
                 + "Yada yada, yada yada. Lorem ipsum dolor sit amet.");
+    }
+
+    @Test
+    public void usesTransformationMethod() {
+        mView.setSingleLine();
+        String text = "Test \n Test";
+        parametrizedTest(text);
+        Layout layout = mView.getLayout();
+        Assert.assertFalse("The transformation method wasn't used, string is still the same",
+                text.equals(layout.getText()));
     }
 
     private void parametrizedTest(CharSequence text) {

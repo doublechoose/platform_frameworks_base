@@ -13,19 +13,20 @@
  */
 package lockedregioncodeinjection;
 
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassWriter;
+
 import java.io.BufferedInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
-import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.ClassWriter;
 
 public class Main {
     public static void main(String[] args) throws IOException {
@@ -35,6 +36,7 @@ public class Main {
         String legacyTargets = null;
         String legacyPreMethods = null;
         String legacyPostMethods = null;
+        List<LockTarget> targets = new ArrayList<>();
         for (int i = 0; i < args.length; i++) {
             if ("-i".equals(args[i].trim())) {
                 i++;
@@ -51,29 +53,32 @@ public class Main {
             } else if ("--post".equals(args[i].trim())) {
                 i++;
                 legacyPostMethods = args[i].trim();
+            } else if ("--scoped".equals(args[i].trim())) {
+                i++;
+                targets.add(Utils.getScopedTarget(args[i].trim()));
             }
-
         }
 
-        // TODO(acleung): Better help message than asserts.
-        assert inJar != null;
-        assert outJar != null;
+        if (inJar == null) {
+            throw new RuntimeException("missing input jar path");
+        }
+        if (outJar == null) {
+            throw new RuntimeException("missing output jar path");
+        }
         assert legacyTargets == null || (legacyPreMethods != null && legacyPostMethods != null);
 
         ZipFile zipSrc = new ZipFile(inJar);
         ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(outJar));
-        List<LockTarget> targets = null;
         if (legacyTargets != null) {
-            targets = Utils.getTargetsFromLegacyJackConfig(legacyTargets, legacyPreMethods,
-                    legacyPostMethods);
-        } else {
-            targets = Collections.emptyList();
+            targets.addAll(Utils.getTargetsFromLegacyJackConfig(legacyTargets, legacyPreMethods,
+                                                                legacyPostMethods));
         }
 
         Enumeration<? extends ZipEntry> srcEntries = zipSrc.entries();
         while (srcEntries.hasMoreElements()) {
             ZipEntry entry = srcEntries.nextElement();
             ZipEntry newEntry = new ZipEntry(entry.getName());
+            newEntry.setTime(entry.getTime());
             zos.putNextEntry(newEntry);
             BufferedInputStream bis = new BufferedInputStream(zipSrc.getInputStream(entry));
 

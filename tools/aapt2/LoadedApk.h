@@ -20,27 +20,75 @@
 #include "androidfw/StringPiece.h"
 
 #include "ResourceTable.h"
-#include "flatten/Archive.h"
-#include "flatten/TableFlattener.h"
+#include "filter/Filter.h"
+#include "format/Archive.h"
+#include "format/binary/BinaryResourceParser.h"
+#include "format/binary/TableFlattener.h"
 #include "io/ZipArchive.h"
-#include "unflatten/BinaryResourceParser.h"
+#include "xml/XmlDom.h"
 
 namespace aapt {
 
-/** Info about an APK loaded in memory. */
-class LoadedApk {
+constexpr static const char kApkResourceTablePath[] = "resources.arsc";
+constexpr static const char kProtoResourceTablePath[] = "resources.pb";
+constexpr static const char kAndroidManifestPath[] = "AndroidManifest.xml";
+
+enum ApkFormat {
+  kUnknown,
+  kBinary,
+  kProto,
+};
+
+// Info about an APK loaded in memory.
+class LoadedApk final {
  public:
-  LoadedApk(
-      const Source& source,
-      std::unique_ptr<io::IFileCollection> apk,
-      std::unique_ptr<ResourceTable> table)
-      : source_(source), apk_(std::move(apk)), table_(std::move(table)) {}
+  // Loads both binary and proto APKs from disk.
+  static std::unique_ptr<LoadedApk> LoadApkFromPath(android::StringPiece path,
+                                                    android::IDiagnostics* diag);
 
-  io::IFileCollection* GetFileCollection() { return apk_.get(); }
+  // Loads a proto APK from the given file collection.
+  static std::unique_ptr<LoadedApk> LoadProtoApkFromFileCollection(
+      const android::Source& source, std::unique_ptr<io::IFileCollection> collection,
+      android::IDiagnostics* diag);
 
-  ResourceTable* GetResourceTable() { return table_.get(); }
+  // Loads a binary APK from the given file collection.
+  static std::unique_ptr<LoadedApk> LoadBinaryApkFromFileCollection(
+      const android::Source& source, std::unique_ptr<io::IFileCollection> collection,
+      android::IDiagnostics* diag);
 
-  const Source& GetSource() { return source_; }
+  LoadedApk(const android::Source& source, std::unique_ptr<io::IFileCollection> apk,
+            std::unique_ptr<ResourceTable> table, std::unique_ptr<xml::XmlResource> manifest,
+            const ApkFormat& format)
+      : source_(source),
+        apk_(std::move(apk)),
+        table_(std::move(table)),
+        manifest_(std::move(manifest)),
+        format_(format) {
+  }
+
+  io::IFileCollection* GetFileCollection() {
+    return apk_.get();
+  }
+
+  ApkFormat GetApkFormat() {
+    return format_;
+  }
+
+  const ResourceTable* GetResourceTable() const {
+    return table_.get();
+  }
+
+  ResourceTable* GetResourceTable() {
+    return table_.get();
+  }
+
+  const android::Source& GetSource() {
+    return source_;
+  }
+
+  const xml::XmlResource* GetManifest() const {
+    return manifest_.get();
+  }
 
   /**
    * Writes the APK on disk at the given path, while also removing the resource
@@ -49,15 +97,31 @@ class LoadedApk {
   bool WriteToArchive(IAaptContext* context, const TableFlattenerOptions& options,
                       IArchiveWriter* writer);
 
-  static std::unique_ptr<LoadedApk> LoadApkFromPath(IAaptContext* context,
-                                                    const android::StringPiece& path);
+  /**
+   * Writes the APK on disk at the given path, while also removing the resource files that are not
+   * referenced in the resource table. The provided filter chain is applied to each entry in the APK
+   * file.
+   *
+   * If the manifest is also provided, it will be written to the new APK file, otherwise the
+   * original manifest will be written. The manifest is only required if the contents of the new APK
+   * have been modified in a way that require the AndroidManifest.xml to also be modified.
+   */
+  bool WriteToArchive(IAaptContext* context, ResourceTable* split_table,
+                      const TableFlattenerOptions& options, FilterChain* filters,
+                      IArchiveWriter* writer, xml::XmlResource* manifest = nullptr);
+
+  /** Loads the file as an xml document. */
+  std::unique_ptr<xml::XmlResource> LoadXml(const std::string& file_path,
+                                            android::IDiagnostics* diag) const;
 
  private:
-  Source source_;
+  DISALLOW_COPY_AND_ASSIGN(LoadedApk);
+
+  android::Source source_;
   std::unique_ptr<io::IFileCollection> apk_;
   std::unique_ptr<ResourceTable> table_;
-
-  DISALLOW_COPY_AND_ASSIGN(LoadedApk);
+  std::unique_ptr<xml::XmlResource> manifest_;
+  ApkFormat format_;
 };
 
 }  // namespace aapt

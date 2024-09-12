@@ -114,7 +114,7 @@ public class BurnInProtectionHelper implements DisplayManager.DisplayListener,
         intent.setPackage(context.getPackageName());
         intent.setFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY);
         mBurnInProtectionIntent = PendingIntent.getBroadcast(context, 0,
-                intent, PendingIntent.FLAG_UPDATE_CURRENT);
+                intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE_UNAUDITED);
         DisplayManager displayManager =
                 (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
         mDisplay = displayManager.getDisplay(Display.DEFAULT_DISPLAY);
@@ -253,7 +253,8 @@ public class BurnInProtectionHelper implements DisplayManager.DisplayListener,
     public void onDisplayChanged(int displayId) {
         if (displayId == mDisplay.getDisplayId()) {
             if (mDisplay.getState() == Display.STATE_DOZE
-                    || mDisplay.getState() == Display.STATE_DOZE_SUSPEND) {
+                    || mDisplay.getState() == Display.STATE_DOZE_SUSPEND
+                    || mDisplay.getState() == Display.STATE_ON_SUSPEND) {
                 startBurnInProtection();
             } else {
                 cancelBurnInProtection();

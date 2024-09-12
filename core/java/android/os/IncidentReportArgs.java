@@ -16,9 +16,8 @@
 
 package android.os;
 
+import android.annotation.NonNull;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
-import android.content.Intent;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.util.IntArray;
@@ -30,17 +29,20 @@ import java.util.ArrayList;
  * {@hide}
  */
 @SystemApi
-@TestApi
 public final class IncidentReportArgs implements Parcelable {
 
     private final IntArray mSections = new IntArray();
     private final ArrayList<byte[]> mHeaders = new ArrayList<byte[]>();
     private boolean mAll;
+    private int mPrivacyPolicy;
+    private String mReceiverPkg;
+    private String mReceiverCls;
 
     /**
      * Construct an incident report args with no fields.
      */
     public IncidentReportArgs() {
+        mPrivacyPolicy = IncidentManager.PRIVACY_POLICY_AUTO;
     }
 
     /**
@@ -50,10 +52,12 @@ public final class IncidentReportArgs implements Parcelable {
         readFromParcel(in);
     }
 
+    @Override
     public int describeContents() {
         return 0;
     }
 
+    @Override
     public void writeToParcel(Parcel out, int flags) {
         out.writeInt(mAll ? 1 : 0);
 
@@ -68,6 +72,12 @@ public final class IncidentReportArgs implements Parcelable {
         for (int i=0; i<N; i++) {
             out.writeByteArray(mHeaders.get(i));
         }
+
+        out.writeInt(mPrivacyPolicy);
+
+        out.writeString(mReceiverPkg);
+
+        out.writeString(mReceiverCls);
     }
 
     public void readFromParcel(Parcel in) {
@@ -84,9 +94,15 @@ public final class IncidentReportArgs implements Parcelable {
         for (int i=0; i<N; i++) {
             mHeaders.add(in.createByteArray());
         }
+
+        mPrivacyPolicy = in.readInt();
+
+        mReceiverPkg = in.readString();
+
+        mReceiverCls = in.readString();
     }
 
-    public static final Parcelable.Creator<IncidentReportArgs> CREATOR
+    public static final @android.annotation.NonNull Parcelable.Creator<IncidentReportArgs> CREATOR
             = new Parcelable.Creator<IncidentReportArgs>() {
         public IncidentReportArgs createFromParcel(Parcel in) {
             return new IncidentReportArgs(in);
@@ -100,6 +116,8 @@ public final class IncidentReportArgs implements Parcelable {
     /**
      * Print this report as a string.
      */
+    @NonNull
+    @Override
     public String toString() {
         final StringBuilder sb = new StringBuilder("Incident(");
         if (mAll) {
@@ -116,7 +134,10 @@ public final class IncidentReportArgs implements Parcelable {
         }
         sb.append(", ");
         sb.append(mHeaders.size());
-        sb.append(" headers)");
+        sb.append(" headers), ");
+        sb.append("privacy: ").append(mPrivacyPolicy);
+        sb.append("receiver pkg: ").append(mReceiverPkg);
+        sb.append("receiver cls: ").append(mReceiverCls);
         return sb.toString();
     }
 
@@ -131,10 +152,26 @@ public final class IncidentReportArgs implements Parcelable {
     }
 
     /**
-     * Add this section to the incident report.
+     * Set this incident report privacy policy spec.
+     */
+    public void setPrivacyPolicy(int privacyPolicy) {
+        switch (privacyPolicy) {
+            case IncidentManager.PRIVACY_POLICY_LOCAL:
+            case IncidentManager.PRIVACY_POLICY_EXPLICIT:
+            case IncidentManager.PRIVACY_POLICY_AUTO:
+                mPrivacyPolicy = privacyPolicy;
+                break;
+            default:
+                mPrivacyPolicy = IncidentManager.PRIVACY_POLICY_AUTO;
+        }
+    }
+
+    /**
+     * Add this section to the incident report. Skip if the input is smaller than 2 since section
+     * id are only valid for positive integer as Protobuf field id. Here 1 is reserved for Header.
      */
     public void addSection(int section) {
-        if (!mAll) {
+        if (!mAll && section > 1) {
             mSections.add(section);
         }
     }
@@ -159,54 +196,6 @@ public final class IncidentReportArgs implements Parcelable {
 
     public void addHeader(byte[] header) {
         mHeaders.add(header);
-    }
-
-    /**
-     * Parses an incident report config as described in the system setting.
-     *
-     * @see IncidentManager#reportIncident
-     */
-    public static IncidentReportArgs parseSetting(String setting)
-            throws IllegalArgumentException {
-        if (setting == null || setting.length() == 0) {
-            return null;
-        }
-        setting = setting.trim();
-        if (setting.length() == 0 || "disabled".equals(setting)) {
-            return null;
-        }
-
-        final IncidentReportArgs args = new IncidentReportArgs();
-
-        if ("all".equals(setting)) {
-            args.setAll(true);
-            return args;
-        } else if ("none".equals(setting)) {
-            return args;
-        }
-
-        final String[] splits = setting.split(",");
-        final int N = splits.length;
-        for (int i=0; i<N; i++) {
-            final String str = splits[i].trim();
-            if (str.length() == 0) {
-                continue;
-            }
-            int section;
-            try {
-                section = Integer.parseInt(str);
-            } catch (NumberFormatException ex) {
-                throw new IllegalArgumentException("Malformed setting. Bad integer at section"
-                        + " index " + i + ": section='" + str + "' setting='" + setting + "'");
-            }
-            if (section < 1) {
-                throw new IllegalArgumentException("Malformed setting. Illegal section at"
-                        + " index " + i + ": section='" + str + "' setting='" + setting + "'");
-            }
-            args.addSection(section);
-        }
-
-        return args;
     }
 }
 

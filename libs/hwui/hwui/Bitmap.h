@@ -16,25 +16,44 @@
 #pragma once
 
 #include <SkBitmap.h>
+#include <SkColorFilter.h>
 #include <SkColorSpace.h>
-#include <SkColorTable.h>
+#include <SkImage.h>
 #include <SkImageInfo.h>
 #include <SkPixelRef.h>
+#include <SkRefCnt.h>
 #include <cutils/compiler.h>
-#include <ui/GraphicBuffer.h>
+#include <utils/StrongPointer.h>
+
+#include <optional>
+
+#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
+#include <android/hardware_buffer.h>
+#endif
+
+class SkWStream;
 
 namespace android {
 
 enum class PixelStorageType {
-    External,
+    WrappedPixelRef,
     Heap,
     Ashmem,
     Hardware,
 };
 
+// TODO: Find a better home for this. It's here because hwui/Bitmap is exported and CanvasTransform
+// isn't, but cleanup should be done
+enum class BitmapPalette {
+    Unknown,
+    Light,
+    Dark,
+};
+
 namespace uirenderer {
+class Gainmap;
 namespace renderthread {
-    class RenderThread;
+class RenderThread;
 }
 }
 
@@ -42,55 +61,55 @@ class PixelStorage;
 
 typedef void (*FreeFunc)(void* addr, void* context);
 
-class ANDROID_API Bitmap : public SkPixelRef {
+class Bitmap : public SkPixelRef {
 public:
-    static sk_sp<Bitmap> allocateHeapBitmap(SkBitmap* bitmap, SkColorTable* ctable);
+    /* The allocate factories not only construct the Bitmap object but also allocate the
+     * backing store whose type is determined by the specific method that is called.
+     *
+     * The factories that accept SkBitmap* as a param will modify those params by
+     * installing the returned bitmap as their SkPixelRef.
+     *
+     * The factories that accept const SkBitmap& as a param will copy the contents of the
+     * provided bitmap into the newly allocated buffer.
+     */
+    static sk_sp<Bitmap> allocateAshmemBitmap(SkBitmap* bitmap);
+    static sk_sp<Bitmap> allocateHardwareBitmap(const SkBitmap& bitmap);
+    static sk_sp<Bitmap> allocateHeapBitmap(SkBitmap* bitmap);
     static sk_sp<Bitmap> allocateHeapBitmap(const SkImageInfo& info);
+    static sk_sp<Bitmap> allocateHeapBitmap(size_t size, const SkImageInfo& i, size_t rowBytes);
 
-    static sk_sp<Bitmap> allocateHardwareBitmap(SkBitmap& bitmap);
+    /* The createFrom factories construct a new Bitmap object by wrapping the already allocated
+     * memory that is provided as an input param.
+     */
+#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
+    static sk_sp<Bitmap> createFrom(AHardwareBuffer* hardwareBuffer,
+                                    sk_sp<SkColorSpace> colorSpace,
+                                    BitmapPalette palette = BitmapPalette::Unknown);
 
-    static sk_sp<Bitmap> allocateAshmemBitmap(SkBitmap* bitmap, SkColorTable* ctable);
-    static sk_sp<Bitmap> allocateAshmemBitmap(size_t allocSize, const SkImageInfo& info,
-        size_t rowBytes, SkColorTable* ctable);
-
-    static sk_sp<Bitmap> createFrom(sp<GraphicBuffer> graphicBuffer);
-
+    static sk_sp<Bitmap> createFrom(AHardwareBuffer* hardwareBuffer,
+                                    SkColorType colorType,
+                                    sk_sp<SkColorSpace> colorSpace,
+                                    SkAlphaType alphaType,
+                                    BitmapPalette palette);
+#endif
+    static sk_sp<Bitmap> createFrom(const SkImageInfo& info, size_t rowBytes, int fd, void* addr,
+                                    size_t size, bool readOnly);
     static sk_sp<Bitmap> createFrom(const SkImageInfo&, SkPixelRef&);
 
-    static sk_sp<Bitmap> allocateHardwareBitmap(uirenderer::renderthread::RenderThread&,
-            SkBitmap& bitmap);
+    int rowBytesAsPixels() const { return rowBytes() >> mInfo.shiftPerPixel(); }
 
-    Bitmap(void* address, size_t allocSize, const SkImageInfo& info, size_t rowBytes,
-            SkColorTable* ctable);
-    Bitmap(void* address, void* context, FreeFunc freeFunc,
-            const SkImageInfo& info, size_t rowBytes, SkColorTable* ctable);
-    Bitmap(void* address, int fd, size_t mappedSize, const SkImageInfo& info,
-            size_t rowBytes, SkColorTable* ctable);
-
-    int width() const { return info().width(); }
-    int height() const { return info().height(); }
-
-    // Can't mark as override since SkPixelRef::rowBytes isn't virtual
-    // but that's OK since we just want Bitmap to be able to rely
-    // on calling rowBytes() on an unlocked pixelref, which it will be
-    // doing on a Bitmap type, not a SkPixelRef, so static
-    // dispatching will do what we want.
-    size_t rowBytes() const { return mRowBytes; }
-
-    int rowBytesAsPixels() const {
-        return mRowBytes >> info().shiftPerPixel();
-    }
-
-    void reconfigure(const SkImageInfo& info, size_t rowBytes, SkColorTable* ctable);
+    void reconfigure(const SkImageInfo& info, size_t rowBytes);
     void reconfigure(const SkImageInfo& info);
     void setColorSpace(sk_sp<SkColorSpace> colorSpace);
     void setAlphaType(SkAlphaType alphaType);
 
     void getSkBitmap(SkBitmap* outBitmap);
 
-    // Ugly hack: in case of hardware bitmaps, it sets nullptr as pixels pointer
-    // so it would crash if anyone tries to render this bitmap.
-    void getSkBitmapForShaders(SkBitmap* outBitmap);
+    SkBitmap getSkBitmap() {
+        SkBitmap ret;
+        getSkBitmap(&ret);
+        return ret;
+    }
 
     int getAshmemFd() const;
     size_t getAllocationByteCount() const;
@@ -98,40 +117,98 @@ public:
     void setHasHardwareMipMap(bool hasMipMap);
     bool hasHardwareMipMap() const;
 
-    bool isOpaque() const {return info().isOpaque(); }
-    SkColorType colorType() const { return info().colorType(); }
+    bool isOpaque() const { return mInfo.isOpaque(); }
+    SkColorType colorType() const { return mInfo.colorType(); }
+    const SkImageInfo& info() const { return mInfo; }
+
     void getBounds(SkRect* bounds) const;
 
-    bool readyToDraw() const {
-        return this->colorType() != kIndex_8_SkColorType || mColorTable;
+    bool isHardware() const { return mPixelStorageType == PixelStorageType::Hardware; }
+    bool hasGainmap() const { return mGainmap.get() != nullptr; }
+
+    sp<uirenderer::Gainmap> gainmap() const;
+
+    void setGainmap(sp<uirenderer::Gainmap>&& gainmap);
+
+    PixelStorageType pixelStorageType() const { return mPixelStorageType; }
+
+#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
+     AHardwareBuffer* hardwareBuffer();
+#endif
+
+    /**
+     * Creates or returns a cached SkImage and is safe to be invoked from either
+     * the UI or RenderThread.
+     *
+     */
+    sk_sp<SkImage> makeImage();
+
+    static BitmapPalette computePalette(const SkImageInfo& info, const void* addr, size_t rowBytes);
+
+    static BitmapPalette computePalette(const SkBitmap& bitmap) {
+        return computePalette(bitmap.info(), bitmap.getPixels(), bitmap.rowBytes());
     }
 
-    bool isHardware() const {
-        return mPixelStorageType == PixelStorageType::Hardware;
+    BitmapPalette palette() {
+        if (!isHardware() && mPaletteGenerationId != getGenerationID()) {
+            mPalette = computePalette(info(), pixels(), rowBytes());
+            mPaletteGenerationId = getGenerationID();
+        }
+        return mPalette;
     }
 
-    GraphicBuffer* graphicBuffer();
-protected:
-    virtual bool onNewLockPixels(LockRec* rec) override;
-    virtual void onUnlockPixels() override { };
-    virtual size_t getAllocatedSizeInBytes() const override;
+  // returns true if rowBytes * height can be represented by a positive int32_t value
+  // and places that value in size.
+  static bool computeAllocationSize(size_t rowBytes, int height, size_t* size);
+
+  // These must match the int values of CompressFormat in Bitmap.java, as well as
+  // AndroidBitmapCompressFormat.
+  enum class JavaCompressFormat {
+    Jpeg = 0,
+    Png = 1,
+    Webp = 2,
+    WebpLossy = 3,
+    WebpLossless = 4,
+  };
+
+  bool compress(JavaCompressFormat format, int32_t quality, SkWStream* stream);
+
+  static bool compress(const SkBitmap& bitmap, JavaCompressFormat format,
+                       int32_t quality, SkWStream* stream);
 private:
-    Bitmap(GraphicBuffer* buffer, const SkImageInfo& info);
+    static sk_sp<Bitmap> allocateAshmemBitmap(size_t size, const SkImageInfo& i, size_t rowBytes);
+
+    Bitmap(void* address, size_t allocSize, const SkImageInfo& info, size_t rowBytes);
+    Bitmap(SkPixelRef& pixelRef, const SkImageInfo& info);
+    Bitmap(void* address, int fd, size_t mappedSize, const SkImageInfo& info, size_t rowBytes);
+#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
+    Bitmap(AHardwareBuffer* buffer, const SkImageInfo& info, size_t rowBytes,
+           BitmapPalette palette);
+
+    // Common code for the two public facing createFrom(AHardwareBuffer*, ...)
+    // methods.
+    // bufferDesc is only used to compute rowBytes.
+    static sk_sp<Bitmap> createFrom(AHardwareBuffer* hardwareBuffer, const SkImageInfo& info,
+                                    const AHardwareBuffer_Desc& bufferDesc, BitmapPalette palette);
+#endif
+
     virtual ~Bitmap();
-    void* getStorage() const;
 
-    PixelStorageType mPixelStorageType;
+    SkImageInfo mInfo;
 
-    size_t mRowBytes = 0;
-    sk_sp<SkColorTable> mColorTable;
+    const PixelStorageType mPixelStorageType;
+
+    BitmapPalette mPalette = BitmapPalette::Unknown;
+    uint32_t mPaletteGenerationId = -1;
+
     bool mHasHardwareMipMap = false;
+
+    sp<uirenderer::Gainmap> mGainmap;
 
     union {
         struct {
-            void* address;
-            void* context;
-            FreeFunc freeFunc;
-        } external;
+            SkPixelRef* pixelRef;
+        } wrapped;
         struct {
             void* address;
             int fd;
@@ -141,10 +218,15 @@ private:
             void* address;
             size_t size;
         } heap;
+#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
         struct {
-            GraphicBuffer* buffer;
+            AHardwareBuffer* buffer;
+            uint64_t size;
         } hardware;
+#endif
     } mPixelStorage;
+
+    sk_sp<SkImage> mImage;  // Cache is used only for HW Bitmaps with Skia pipeline.
 };
 
-} //namespace android
+}  // namespace android

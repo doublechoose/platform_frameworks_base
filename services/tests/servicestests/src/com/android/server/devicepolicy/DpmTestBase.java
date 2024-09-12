@@ -16,6 +16,16 @@
 
 package com.android.server.devicepolicy;
 
+import static com.google.common.truth.Truth.assertThat;
+
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Matchers.eq;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.when;
+
+import android.annotation.RawRes;
 import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.content.Context;
@@ -26,37 +36,40 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.os.UserHandle;
-import android.test.AndroidTestCase;
 
-import java.io.File;
+import androidx.test.InstrumentationRegistry;
+
+import org.junit.Before;
+
+import java.io.InputStream;
 import java.util.List;
 
-import static org.mockito.Matchers.anyInt;
-import static org.mockito.Matchers.eq;
-import static org.mockito.Mockito.doReturn;
+/**
+ * Temporary copy of DpmTestBase using JUnit 4 - once all tests extend it, it should be renamed
+ * back to DpmTestBase (with the temporary methods removed.
+ *
+ */
+public abstract class DpmTestBase {
 
-public abstract class DpmTestBase extends AndroidTestCase {
     public static final String TAG = "DpmTest";
 
-    protected Context mRealTestContext;
+    protected final Context mRealTestContext = InstrumentationRegistry.getTargetContext();
     protected DpmMockContext mMockContext;
+    private MockSystemServices mServices;
 
-    public File dataDir;
-
+    // Attributes below are public so they don't need to be prefixed with m
     public ComponentName admin1;
     public ComponentName admin2;
     public ComponentName admin3;
     public ComponentName adminAnotherPackage;
     public ComponentName adminNoPerm;
+    public ComponentName delegateCertInstaller;
 
-    @Override
-    protected void setUp() throws Exception {
-        super.setUp();
-
-        mRealTestContext = super.getContext();
-
-        mMockContext = new DpmMockContext(
-                mRealTestContext, new File(mRealTestContext.getCacheDir(), "test-data"));
+    @Before
+    public void setFixtures() throws Exception {
+        var mockBinder = new DpmMockContext.MockBinder();
+        mServices = new MockSystemServices(mRealTestContext, "test-data", mockBinder);
+        mMockContext = new DpmMockContext(mServices, mRealTestContext, mockBinder);
 
         admin1 = new ComponentName(mRealTestContext, DummyDeviceAdmins.Admin1.class);
         admin2 = new ComponentName(mRealTestContext, DummyDeviceAdmins.Admin2.class);
@@ -64,19 +77,42 @@ public abstract class DpmTestBase extends AndroidTestCase {
         adminAnotherPackage = new ComponentName(DpmMockContext.ANOTHER_PACKAGE_NAME,
                 "whatever.random.class");
         adminNoPerm = new ComponentName(mRealTestContext, DummyDeviceAdmins.AdminNoPerm.class);
+        delegateCertInstaller = new ComponentName(DpmMockContext.DELEGATE_PACKAGE_NAME,
+                "some.random.class");
+        mockSystemPropertiesToReturnDefault();
     }
 
-    @Override
-    public DpmMockContext getContext() {
+    protected DpmMockContext getContext() {
         return mMockContext;
     }
 
+    public MockSystemServices getServices() {
+        return mServices;
+    }
+
+    protected void sendBroadcastWithUser(DevicePolicyManagerServiceTestable dpms, String action,
+            int userHandle) throws Exception {
+        final Intent intent = new Intent(action);
+        intent.putExtra(Intent.EXTRA_USER_HANDLE, userHandle);
+        getServices().injectBroadcast(getContext(), intent, userHandle);
+        flushTasks(dpms);
+    }
+
+    protected void flushTasks(DevicePolicyManagerServiceTestable dpms) throws Exception {
+        dpms.mHandler.runWithScissors(() -> { }, 0 /*now*/);
+        dpms.mBackgroundHandler.runWithScissors(() -> { }, 0 /*now*/);
+
+        // We can't let exceptions happen on the background thread. Throw them here if they happen
+        // so they still cause the test to fail despite being suppressed.
+        getServices().rethrowBackgroundBroadcastExceptions();
+    }
+
     protected interface DpmRunnable {
-        public void run(DevicePolicyManager dpm) throws Exception;
+        void run(DevicePolicyManager dpm) throws Exception;
     }
 
     /**
-     * Simulate an RPC from {@param caller} to the service context ({@link #mContext}).
+     * Simulate an RPC from {@param caller} to the service context ({@link #mMockContext}).
      *
      * The caller sees its own context. The server also sees its own separate context, with the
      * appropriate calling UID and calling permissions fields already set up.
@@ -85,12 +121,15 @@ public abstract class DpmTestBase extends AndroidTestCase {
             DpmRunnable action) {
         final DpmMockContext serviceContext = mMockContext;
 
+        // Save calling UID and PID before clearing identity so we don't run into aliasing issues.
+        final int callingUid = caller.binder.callingUid;
+        final int callingPid = caller.binder.callingPid;
+
         final long origId = serviceContext.binder.clearCallingIdentity();
         try {
-            serviceContext.binder.callingUid = caller.binder.callingUid;
-            serviceContext.binder.callingPid = caller.binder.callingPid;
-            serviceContext.binder.callingPermissions.put(caller.binder.callingUid,
-                    caller.permissions);
+            serviceContext.binder.callingUid = callingUid;
+            serviceContext.binder.callingPid = callingPid;
+            serviceContext.binder.callingPermissions.put(callingUid, caller.permissions);
             action.run(new DevicePolicyManagerTestable(caller, dpms));
         } catch (Exception e) {
             throw new AssertionError(e);
@@ -99,25 +138,34 @@ public abstract class DpmTestBase extends AndroidTestCase {
         }
     }
 
-    protected void markPackageAsInstalled(String packageName, ApplicationInfo ai, int userId)
+    private void markPackageAsInstalled(String packageName, ApplicationInfo ai, int userId)
             throws Exception {
         final PackageInfo pi = DpmTestUtils.cloneParcelable(
                 mRealTestContext.getPackageManager().getPackageInfo(
                         mRealTestContext.getPackageName(), 0));
-        assertTrue(pi.applicationInfo.flags != 0);
+        assertThat(pi.applicationInfo.flags).isNotEqualTo(0);
 
         if (ai != null) {
             pi.applicationInfo = ai;
         }
 
-        doReturn(pi).when(mMockContext.ipackageManager).getPackageInfo(
-                eq(packageName),
-                eq(0),
-                eq(userId));
+        doReturn(pi).when(mServices.ipackageManager).getPackageInfo(packageName, 0, userId);
 
-        doReturn(ai.uid).when(mMockContext.packageManager).getPackageUidAsUser(
-                eq(packageName),
-                eq(userId));
+        mServices.addTestPackageUid(packageName, ai.uid);
+    }
+
+    protected void markDelegatedCertInstallerAsInstalled() throws Exception {
+        final ApplicationInfo ai = new ApplicationInfo();
+        ai.enabledSetting = PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
+        ai.flags = ApplicationInfo.FLAG_HAS_CODE;
+        // Mark the package as installed on the work profile.
+        ai.uid = UserHandle.getUid(DpmMockContext.CALLER_USER_HANDLE,
+                DpmMockContext.DELEGATE_CERT_INSTALLER_UID);
+        ai.packageName = delegateCertInstaller.getPackageName();
+        ai.name = delegateCertInstaller.getClassName();
+
+        markPackageAsInstalled(delegateCertInstaller.getPackageName(), ai,
+                DpmMockContext.CALLER_USER_HANDLE);
     }
 
     protected void setUpPackageManagerForAdmin(ComponentName admin, int packageUid)
@@ -171,9 +219,9 @@ public abstract class DpmTestBase extends AndroidTestCase {
         ai.packageName = admin.getPackageName();
         ai.name = admin.getClassName();
 
-        doReturn(ai).when(mMockContext.ipackageManager).getApplicationInfo(
+        doReturn(ai).when(mServices.ipackageManager).getApplicationInfo(
                 eq(admin.getPackageName()),
-                anyInt(),
+                anyLong(),
                 eq(UserHandle.getUserId(packageUid)));
 
         // Set up queryBroadcastReceivers().
@@ -184,8 +232,8 @@ public abstract class DpmTestBase extends AndroidTestCase {
                 mRealTestContext.getPackageManager().queryBroadcastReceivers(
                         resolveIntent,
                         PackageManager.GET_META_DATA);
-        assertNotNull(realResolveInfo);
-        assertEquals(1, realResolveInfo.size());
+        assertThat(realResolveInfo).isNotNull();
+        assertThat(realResolveInfo).hasSize(1);
 
         // We need to change AI, so set a clone.
         realResolveInfo.set(0, DpmTestUtils.cloneParcelable(realResolveInfo.get(0)));
@@ -198,14 +246,41 @@ public abstract class DpmTestBase extends AndroidTestCase {
 
         // Note we don't set up queryBroadcastReceivers.  We don't use it in DPMS.
 
-        doReturn(aci).when(mMockContext.ipackageManager).getReceiverInfo(
+        doReturn(aci).when(mServices.ipackageManager).getReceiverInfo(
                 eq(admin),
-                anyInt(),
+                anyLong(),
                 eq(UserHandle.getUserId(packageUid)));
 
-        doReturn(new String[] {admin.getPackageName()}).when(mMockContext.ipackageManager)
+        doReturn(new String[] {admin.getPackageName()}).when(mServices.ipackageManager)
             .getPackagesForUid(eq(packageUid));
+        doReturn(new String[] {admin.getPackageName()}).when(mServices.packageManager)
+                .getPackagesForUid(eq(packageUid));
         // Set up getPackageInfo().
         markPackageAsInstalled(admin.getPackageName(), ai, UserHandle.getUserId(packageUid));
+    }
+
+    /**
+     * By default, system properties are mocked to return default value. Override the mock if you
+     * want a specific value.
+     */
+    private void mockSystemPropertiesToReturnDefault() {
+        when(getServices().systemProperties.get(
+                anyString(), anyString())).thenAnswer(
+                invocation -> invocation.getArguments()[1]
+        );
+
+        when(getServices().systemProperties.getBoolean(
+                anyString(), anyBoolean())).thenAnswer(
+                invocation -> invocation.getArguments()[1]
+        );
+
+        when(getServices().systemProperties.getLong(
+                anyString(), anyLong())).thenAnswer(
+                invocation -> invocation.getArguments()[1]
+        );
+    }
+
+    protected InputStream getRawStream(@RawRes int id) {
+        return mRealTestContext.getResources().openRawResource(id);
     }
 }

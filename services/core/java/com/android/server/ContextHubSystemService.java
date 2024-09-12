@@ -16,17 +16,29 @@
 
 package com.android.server;
 
-import com.android.server.location.ContextHubService;
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.content.Context;
 import android.util.Log;
 
+import com.android.internal.util.ConcurrentUtils;
+import com.android.server.location.contexthub.ContextHubService;
+import com.android.server.location.contexthub.IContextHubWrapper;
+
+import java.util.concurrent.Future;
+
 class ContextHubSystemService extends SystemService {
     private static final String TAG = "ContextHubSystemService";
-    private final ContextHubService mContextHubService;
+    private ContextHubService mContextHubService;
+
+    private Future<?> mInit;
 
     public ContextHubSystemService(Context context) {
         super(context);
-        mContextHubService = new ContextHubService(context);
+        mInit = SystemServerInitThreadPool.submit(() -> {
+            mContextHubService = new ContextHubService(context,
+                    IContextHubWrapper.getContextHubWrapper());
+        }, "Init ContextHubSystemService");
     }
 
     @Override
@@ -37,7 +49,15 @@ class ContextHubSystemService extends SystemService {
     public void onBootPhase(int phase) {
         if (phase == SystemService.PHASE_SYSTEM_SERVICES_READY) {
             Log.d(TAG, "onBootPhase: PHASE_SYSTEM_SERVICES_READY");
+            ConcurrentUtils.waitForFutureNoInterrupt(mInit,
+                    "Wait for ContextHubSystemService init");
+            mInit = null;
             publishBinderService(Context.CONTEXTHUB_SERVICE, mContextHubService);
         }
+    }
+
+    @Override
+    public void onUserSwitching(@Nullable TargetUser from, @NonNull TargetUser to) {
+        mContextHubService.onUserChanged();
     }
 }

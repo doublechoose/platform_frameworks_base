@@ -20,7 +20,7 @@
 #include <set>
 #include <utility>
 
-#include "ConfigDescription.h"
+#include "androidfw/ConfigDescription.h"
 
 namespace aapt {
 
@@ -34,28 +34,24 @@ class IConfigFilter {
   /**
    * Returns true if the filter matches the configuration, false otherwise.
    */
-  virtual bool Match(const ConfigDescription& config) const = 0;
+  virtual bool Match(const android::ConfigDescription& config) const = 0;
 };
 
 /**
- * Implements config axis matching. An axis is one component of a configuration,
- * like screen
- * density or locale. If an axis is specified in the filter, and the axis is
- * specified in
- * the configuration to match, they must be compatible. Otherwise the
- * configuration to match is
- * accepted.
+ * Implements config axis matching. An axis is one component of a configuration, like screen density
+ * or locale. If an axis is specified in the filter, and the axis is specified in the configuration
+ * to match, they must be compatible. Otherwise the configuration to match is accepted.
  *
  * Used when handling "-c" options.
  */
 class AxisConfigFilter : public IConfigFilter {
  public:
-  void AddConfig(ConfigDescription config);
+  void AddConfig(android::ConfigDescription config);
 
-  bool Match(const ConfigDescription& config) const override;
+  bool Match(const android::ConfigDescription& config) const override;
 
  private:
-  std::set<std::pair<ConfigDescription, uint32_t>> configs_;
+  std::set<std::pair<android::ConfigDescription, uint32_t>> configs_;
   uint32_t config_mask_ = 0;
 };
 

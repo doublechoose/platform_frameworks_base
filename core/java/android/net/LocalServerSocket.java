@@ -16,14 +16,15 @@
 
 package android.net;
 
-import java.io.IOException;
+import java.io.Closeable;
 import java.io.FileDescriptor;
+import java.io.IOException;
 
 /**
  * Non-standard class for creating an inbound UNIX-domain socket
  * in the Linux abstract namespace.
  */
-public class LocalServerSocket {
+public class LocalServerSocket implements Closeable {
     private final LocalSocketImpl impl;
     private final LocalSocketAddress localAddress;
 
@@ -54,7 +55,9 @@ public class LocalServerSocket {
      * Create a LocalServerSocket from a file descriptor that's already
      * been created and bound. listen() will be called immediately on it.
      * Used for cases where file descriptors are passed in via environment
-     * variables
+     * variables. The passed-in FileDescriptor is not managed by this class
+     * and must be closed by the caller. Calling {@link #close()} on a socket
+     * created by this method has no effect.
      *
      * @param fd bound file descriptor
      * @throws IOException
@@ -106,7 +109,7 @@ public class LocalServerSocket {
      * 
      * @throws IOException
      */
-    public void close() throws IOException
+    @Override public void close() throws IOException
     {
         impl.close();
     }

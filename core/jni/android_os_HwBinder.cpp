@@ -20,6 +20,8 @@
 
 #include "android_os_HwBinder.h"
 
+#include "android_util_Binder.h" // for binder_report_exception
+
 #include "android_os_HwParcel.h"
 #include "android_os_HwRemoteBinder.h"
 
@@ -33,9 +35,10 @@
 #include <hidl/ServiceManagement.h>
 #include <hidl/Status.h>
 #include <hidl/HidlTransportSupport.h>
+#include <hwbinder/IPCThreadState.h>
 #include <hwbinder/ProcessState.h>
 #include <nativehelper/ScopedLocalRef.h>
-#include <vintf/parse_string.h>
+#include <nativehelper/ScopedUtfChars.h>
 #include <utils/misc.h>
 
 #include "core_jni_helpers.h"
@@ -150,7 +153,7 @@ status_t JHwBinder::onTransact(
         uint32_t flags,
         TransactCallback callback) {
     JNIEnv *env = AndroidRuntime::getJNIEnv();
-    bool isOneway = (flags & TF_ONE_WAY) != 0;
+    bool isOneway = (flags & IBinder::FLAG_ONEWAY) != 0;
     ScopedLocalRef<jobject> replyObj(env, nullptr);
     sp<JHwParcel> replyContext = nullptr;
 
@@ -181,15 +184,7 @@ status_t JHwBinder::onTransact(
         env->ExceptionDescribe();
         env->ExceptionClear();
 
-        // It is illegal to call IsInstanceOf if there is a pending exception.
-        // Attempting to do so results in a JniAbort which crashes the entire process.
-        if (env->IsInstanceOf(excep, gErrorClass)) {
-            /* It's an error */
-            LOG(ERROR) << "Forcefully exiting";
-            exit(1);
-        } else {
-            LOG(ERROR) << "Uncaught exception!";
-        }
+        binder_report_exception(env, excep, "Uncaught error or exception in hwbinder!");
 
         env->DeleteLocalRef(excep);
     }
@@ -222,6 +217,21 @@ status_t JHwBinder::onTransact(
     return err;
 }
 
+bool validateCanUseHwBinder(const sp<hardware::IBinder>& binder) {
+    if (binder != nullptr && binder->localBinder() != nullptr) {
+        // untested/unsupported/inefficient
+        // see b/129150021, doesn't work with scatter-gather
+        //
+        // explicitly disabling until it is supported
+        // (note, even if this is fixed to work with scatter gather, we would also need
+        // to convert this to the Java object rather than re-wrapping with a proxy)
+        LOG(ERROR) << "Local Java Binder not supported.";
+        return false;
+    }
+
+    return true;
+}
+
 }  // namespace android
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -247,157 +257,132 @@ static void JHwBinder_native_setup(JNIEnv *env, jobject thiz) {
     JHwBinder::SetNativeContext(env, thiz, context);
 }
 
-static void JHwBinder_native_transact(
-        JNIEnv * /* env */,
-        jobject /* thiz */,
-        jint /* code */,
-        jobject /* requestObj */,
-        jobject /* replyObj */,
-        jint /* flags */) {
-    CHECK(!"Should not be here");
+static void JHwBinder_native_transact(JNIEnv *env, jobject thiz, jint code, jobject requestObj,
+                                      jobject replyObj, jint flags) {
+    if (requestObj == NULL) {
+        jniThrowException(env, "java/lang/NullPointerException", NULL);
+        return;
+    }
+    sp<hardware::IBinder> binder = JHwBinder::GetNativeBinder(env, thiz);
+    sp<android::hidl::base::V1_0::IBase> base = new android::hidl::base::V1_0::BpHwBase(binder);
+    hidl_string desc;
+    auto ret = base->interfaceDescriptor(
+            [&desc](const hidl_string &descriptor) { desc = descriptor; });
+    ret.assertOk();
+    // Only the fake hwservicemanager is allowed to be used locally like this.
+    if (desc != "android.hidl.manager@1.2::IServiceManager" &&
+        desc != "android.hidl.manager@1.1::IServiceManager" &&
+        desc != "android.hidl.manager@1.0::IServiceManager") {
+        LOG(FATAL) << "Local binders are not supported!";
+    }
+    if (replyObj == nullptr) {
+        LOG(FATAL) << "Unexpected null replyObj. code: " << code;
+        return;
+    }
+    const hardware::Parcel *request = JHwParcel::GetNativeContext(env, requestObj)->getParcel();
+    sp<JHwParcel> replyContext = JHwParcel::GetNativeContext(env, replyObj);
+    hardware::Parcel *reply = replyContext->getParcel();
+
+    request->setDataPosition(0);
+
+    bool isOneway = (flags & IBinder::FLAG_ONEWAY) != 0;
+    if (!isOneway) {
+        replyContext->setTransactCallback([](auto &replyParcel) {});
+    }
+
+    env->CallVoidMethod(thiz, gFields.onTransactID, code, requestObj, replyObj, flags);
+
+    if (env->ExceptionCheck()) {
+        jthrowable excep = env->ExceptionOccurred();
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+
+        binder_report_exception(env, excep, "Uncaught error or exception in hwbinder!");
+
+        env->DeleteLocalRef(excep);
+    }
+
+    if (!isOneway) {
+        if (!replyContext->wasSent()) {
+            // The implementation never finished the transaction.
+            LOG(ERROR) << "The reply failed to send!";
+        }
+    }
+
+    reply->setDataPosition(0);
 }
 
 static void JHwBinder_native_registerService(
         JNIEnv *env,
         jobject thiz,
         jstring serviceNameObj) {
-    if (serviceNameObj == NULL) {
-        jniThrowException(env, "java/lang/NullPointerException", NULL);
-        return;
-    }
-
-    const char *serviceName = env->GetStringUTFChars(serviceNameObj, NULL);
-    if (serviceName == NULL) {
-        return;  // XXX exception already pending?
+    ScopedUtfChars str(env, serviceNameObj);
+    if (str.c_str() == nullptr) {
+        return;  // NPE will be pending.
     }
 
     sp<hardware::IBinder> binder = JHwBinder::GetNativeBinder(env, thiz);
-
-    /* TODO(b/33440494) this is not right */
     sp<hidl::base::V1_0::IBase> base = new hidl::base::V1_0::BpHwBase(binder);
 
-    auto manager = hardware::defaultServiceManager();
-
-    if (manager == nullptr) {
-        LOG(ERROR) << "Could not get hwservicemanager.";
-        signalExceptionForError(env, UNKNOWN_ERROR, true /* canThrowRemoteException */);
-        return;
-    }
-
-    Return<bool> ret = manager->add(serviceName, base);
-
-    env->ReleaseStringUTFChars(serviceNameObj, serviceName);
-    serviceName = NULL;
-
-    bool ok = ret.isOk() && ret;
+    bool ok = hardware::details::registerAsServiceInternal(base, str.c_str()) == OK;
 
     if (ok) {
-        LOG(INFO) << "Starting thread pool.";
+        LOG(INFO) << "HwBinder: Starting thread pool for " << str.c_str();
         ::android::hardware::ProcessState::self()->startThreadPool();
     }
 
-    signalExceptionForError(env, (ok ? OK : UNKNOWN_ERROR), true /* canThrowRemoteException */);
+    // avoiding richer error exceptions to stick with legacy behavior
+    signalExceptionForError(env, (ok ? OK : UNKNOWN_ERROR), true /*canThrowRemoteException*/);
 }
 
 static jobject JHwBinder_native_getService(
         JNIEnv *env,
         jclass /* clazzObj */,
         jstring ifaceNameObj,
-        jstring serviceNameObj) {
+        jstring serviceNameObj,
+        jboolean retry) {
 
     using ::android::hidl::base::V1_0::IBase;
-    using ::android::hidl::manager::V1_0::IServiceManager;
+    using ::android::hardware::details::getRawServiceInternal;
 
-    if (ifaceNameObj == NULL) {
-        jniThrowException(env, "java/lang/NullPointerException", NULL);
-        return NULL;
-    }
-    if (serviceNameObj == NULL) {
-        jniThrowException(env, "java/lang/NullPointerException", NULL);
-        return NULL;
-    }
-
-    auto manager = hardware::defaultServiceManager();
-
-    if (manager == nullptr) {
-        LOG(ERROR) << "Could not get hwservicemanager.";
-        signalExceptionForError(env, UNKNOWN_ERROR, true /* canThrowRemoteException */);
-        return NULL;
+    std::string ifaceName;
+    {
+        ScopedUtfChars str(env, ifaceNameObj);
+        if (str.c_str() == nullptr) {
+            return nullptr;  // NPE will be pending.
+        }
+        ifaceName = str.c_str();
     }
 
-    const char *ifaceNameCStr = env->GetStringUTFChars(ifaceNameObj, NULL);
-    if (ifaceNameCStr == NULL) {
-        return NULL; // XXX exception already pending?
-    }
-    std::string ifaceName(ifaceNameCStr);
-    env->ReleaseStringUTFChars(ifaceNameObj, ifaceNameCStr);
-    ::android::hardware::hidl_string ifaceNameHStr;
-    ifaceNameHStr.setToExternal(ifaceName.c_str(), ifaceName.size());
-
-    const char *serviceNameCStr = env->GetStringUTFChars(serviceNameObj, NULL);
-    if (serviceNameCStr == NULL) {
-        return NULL; // XXX exception already pending?
-    }
-    std::string serviceName(serviceNameCStr);
-    env->ReleaseStringUTFChars(serviceNameObj, serviceNameCStr);
-    ::android::hardware::hidl_string serviceNameHStr;
-    serviceNameHStr.setToExternal(serviceName.c_str(), serviceName.size());
-
-    LOG(INFO) << "Looking for service "
-              << ifaceName
-              << "/"
-              << serviceName;
-
-    Return<IServiceManager::Transport> transportRet =
-            manager->getTransport(ifaceNameHStr, serviceNameHStr);
-
-    if (!transportRet.isOk()) {
-        signalExceptionForError(env, UNKNOWN_ERROR, true /* canThrowRemoteException */);
-        return NULL;
+    std::string serviceName;
+    {
+        ScopedUtfChars str(env, serviceNameObj);
+        if (str.c_str() == nullptr) {
+            return nullptr;  // NPE will be pending.
+        }
+        serviceName = str.c_str();
     }
 
-    IServiceManager::Transport transport = transportRet;
-
-#ifdef __ANDROID_TREBLE__
-#ifdef __ANDROID_DEBUGGABLE__
-    const char* testingOverride = std::getenv("TREBLE_TESTING_OVERRIDE");
-    const bool vintfLegacy = (transport == IServiceManager::Transport::EMPTY)
-            && testingOverride && !strcmp(testingOverride, "true");
-#else // __ANDROID_TREBLE__ but not __ANDROID_DEBUGGABLE__
-    const bool vintfLegacy = false;
-#endif // __ANDROID_DEBUGGABLE__
-#else // not __ANDROID_TREBLE__
-    const bool vintfLegacy = (transport == IServiceManager::Transport::EMPTY);
-#endif // __ANDROID_TREBLE__";
-
-    if (transport != IServiceManager::Transport::HWBINDER && !vintfLegacy) {
-        LOG(ERROR) << "service " << ifaceName << " declares transport method "
-                   << toString(transport) << " but framework expects hwbinder.";
-        signalExceptionForError(env, NAME_NOT_FOUND, true /* canThrowRemoteException */);
-        return NULL;
-    }
-
-    Return<sp<hidl::base::V1_0::IBase>> ret = manager->get(ifaceNameHStr, serviceNameHStr);
-
-    if (!ret.isOk()) {
-        signalExceptionForError(env, UNKNOWN_ERROR, true /* canThrowRemoteException */);
-        return NULL;
-    }
-
+    sp<IBase> ret = getRawServiceInternal(ifaceName, serviceName, retry /* retry */, false /* getStub */);
     sp<hardware::IBinder> service = hardware::toBinder<hidl::base::V1_0::IBase>(ret);
 
-    if (service == NULL) {
+    if (service == nullptr || !validateCanUseHwBinder(service)) {
         signalExceptionForError(env, NAME_NOT_FOUND);
-        return NULL;
+        return nullptr;
     }
 
-    LOG(INFO) << "Starting thread pool.";
+    LOG(INFO) << "HwBinder: Starting thread pool for getting: " << ifaceName << "/" << serviceName;
     ::android::hardware::ProcessState::self()->startThreadPool();
 
     return JHwRemoteBinder::NewObject(env, service);
 }
 
-void JHwBinder_native_configureRpcThreadpool(jlong maxThreads, jboolean callerWillJoin) {
+void JHwBinder_native_setTrebleTestingOverride(JNIEnv*, jclass, jboolean testingOverride) {
+    hardware::details::setTrebleTestingOverride(testingOverride);
+}
+
+void JHwBinder_native_configureRpcThreadpool(JNIEnv *, jclass,
+        jlong maxThreads, jboolean callerWillJoin) {
     CHECK(maxThreads > 0);
     ProcessState::self()->setThreadPoolConfiguration(maxThreads, callerWillJoin /*callerJoinsPool*/);
 }
@@ -406,7 +391,7 @@ void JHwBinder_native_joinRpcThreadpool() {
     IPCThreadState::self()->joinThreadPool();
 }
 
-static void JHwBinder_report_sysprop_change(JNIEnv /**env*/, jobject /*clazz*/)
+static void JHwBinder_report_sysprop_change(JNIEnv * /*env*/, jclass /*clazz*/)
 {
     report_sysprop_change();
 }
@@ -422,8 +407,11 @@ static JNINativeMethod gMethods[] = {
     { "registerService", "(Ljava/lang/String;)V",
         (void *)JHwBinder_native_registerService },
 
-    { "getService", "(Ljava/lang/String;Ljava/lang/String;)L" PACKAGE_PATH "/IHwBinder;",
+    { "getService", "(Ljava/lang/String;Ljava/lang/String;Z)L" PACKAGE_PATH "/IHwBinder;",
         (void *)JHwBinder_native_getService },
+
+    { "setTrebleTestingOverride", "(Z)V",
+        (void *)JHwBinder_native_setTrebleTestingOverride },
 
     { "configureRpcThreadpool", "(JZ)V",
         (void *)JHwBinder_native_configureRpcThreadpool },

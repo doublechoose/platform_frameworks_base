@@ -14,35 +14,69 @@
 
 package com.android.systemui.globalactions;
 
-import com.android.systemui.Dependency;
-import com.android.systemui.plugins.GlobalActions;
-import com.android.systemui.statusbar.policy.DeviceProvisionedController;
-import com.android.systemui.statusbar.policy.KeyguardMonitor;
+import static android.app.StatusBarManager.DISABLE2_GLOBAL_ACTIONS;
 
 import android.content.Context;
-import android.support.v7.view.ContextThemeWrapper;
 
-public class GlobalActionsImpl implements GlobalActions {
+import com.android.systemui.plugins.GlobalActions;
+import com.android.systemui.statusbar.BlurUtils;
+import com.android.systemui.statusbar.CommandQueue;
+import com.android.systemui.statusbar.policy.DeviceProvisionedController;
+import com.android.systemui.statusbar.policy.KeyguardStateController;
+
+import javax.inject.Inject;
+
+public class GlobalActionsImpl implements GlobalActions, CommandQueue.Callbacks {
 
     private final Context mContext;
-    private final KeyguardMonitor mKeyguardMonitor;
+    private final KeyguardStateController mKeyguardStateController;
     private final DeviceProvisionedController mDeviceProvisionedController;
-    private GlobalActionsDialog mGlobalActions;
+    private final BlurUtils mBlurUtils;
+    private final CommandQueue mCommandQueue;
+    private final GlobalActionsDialogLite mGlobalActionsDialog;
+    private boolean mDisabled;
+    private ShutdownUi mShutdownUi;
 
-    public GlobalActionsImpl(Context context) {
+    @Inject
+    public GlobalActionsImpl(Context context, CommandQueue commandQueue,
+            GlobalActionsDialogLite globalActionsDialog, BlurUtils blurUtils,
+            KeyguardStateController keyguardStateController,
+            DeviceProvisionedController deviceProvisionedController,
+            ShutdownUi shutdownUi) {
         mContext = context;
-        mKeyguardMonitor = Dependency.get(KeyguardMonitor.class);
-        mDeviceProvisionedController = Dependency.get(DeviceProvisionedController.class);
+        mGlobalActionsDialog = globalActionsDialog;
+        mKeyguardStateController = keyguardStateController;
+        mDeviceProvisionedController = deviceProvisionedController;
+        mCommandQueue = commandQueue;
+        mBlurUtils = blurUtils;
+        mCommandQueue.addCallback(this);
+        mShutdownUi = shutdownUi;
+    }
+
+    @Override
+    public void destroy() {
+        mCommandQueue.removeCallback(this);
+        mGlobalActionsDialog.destroy();
     }
 
     @Override
     public void showGlobalActions(GlobalActionsManager manager) {
-        if (mGlobalActions == null) {
-            final ContextThemeWrapper context = new ContextThemeWrapper(mContext,
-                    android.R.style.Theme_Material_Light);
-            mGlobalActions = new GlobalActionsDialog(context, manager);
+        if (mDisabled) return;
+        mGlobalActionsDialog.showOrHideDialog(mKeyguardStateController.isShowing(),
+                mDeviceProvisionedController.isDeviceProvisioned(), null /* view */);
+    }
+
+    @Override
+    public void showShutdownUi(boolean isReboot, String reason) {
+        mShutdownUi.showShutdownUi(isReboot, reason);
+    }
+    @Override
+    public void disable(int displayId, int state1, int state2, boolean animate) {
+        final boolean disabled = (state2 & DISABLE2_GLOBAL_ACTIONS) != 0;
+        if (displayId != mContext.getDisplayId() || disabled == mDisabled) return;
+        mDisabled = disabled;
+        if (disabled) {
+            mGlobalActionsDialog.dismissDialog();
         }
-        mGlobalActions.showDialog(mKeyguardMonitor.isShowing(),
-                mDeviceProvisionedController.isDeviceProvisioned());
     }
 }

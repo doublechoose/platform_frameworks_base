@@ -13,22 +13,39 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 */
+
 package android.animation;
+
+import static android.test.MoreAsserts.assertNotEqual;
+
+import static junit.framework.Assert.assertEquals;
+import static junit.framework.Assert.assertFalse;
+import static junit.framework.Assert.assertNotNull;
+import static junit.framework.Assert.assertTrue;
 
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.SystemClock;
-import android.test.ActivityInstrumentationTestCase2;
-import android.test.suitebuilder.annotation.SmallTest;
 import android.view.Choreographer;
 import android.view.animation.LinearInterpolator;
 
+import androidx.test.filters.MediumTest;
+import androidx.test.rule.ActivityTestRule;
+import androidx.test.runner.AndroidJUnit4;
+
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
 import java.util.ArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
-import static android.test.MoreAsserts.assertNotEqual;
-
-public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAnimatorActivity> {
+@RunWith(AndroidJUnit4.class)
+@MediumTest
+public class ValueAnimatorTests {
     private static final long WAIT_TIME_OUT = 5000;
     private ValueAnimator a1;
     private ValueAnimator a2;
@@ -45,25 +62,22 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
     private final static long DEFAULT_FRAME_INTERVAL = 5; //ms
     private final static long COMMIT_DELAY = 3; //ms
 
-    public ValueAnimatorTests() {
-        super(BasicAnimatorActivity.class);
-    }
+    private ActivityTestRule<BasicAnimatorActivity> mActivityRule =
+            new ActivityTestRule<>(BasicAnimatorActivity.class);
 
-    @Override
+    @Before
     public void setUp() throws Exception {
-        super.setUp();
         a1 = ValueAnimator.ofFloat(A1_START_VALUE, A1_END_VALUE).setDuration(300);
         a2 = ValueAnimator.ofInt(A2_START_VALUE, A2_END_VALUE).setDuration(500);
     }
 
-    @Override
+    @After
     public void tearDown() throws Exception {
         a1 = null;
         a2 = null;
-        super.tearDown();
     }
 
-    @SmallTest
+    @Test
     public void testStartDelay() throws Throwable {
         final ValueAnimator a = ValueAnimator.ofFloat(5f, 20f);
         assertEquals(a.getStartDelay(), 0);
@@ -75,7 +89,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         a.addUpdateListener(listener);
         final long[] startTime = new long[1];
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // Test the time between isRunning() and isStarted()
@@ -89,7 +103,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
 
         Thread.sleep(a.getTotalDuration());
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertTrue(listener.wasRunning);
@@ -98,7 +112,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
 
         Thread.sleep(a.getTotalDuration());
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(a.isStarted());
@@ -106,7 +120,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
     }
 
-    @SmallTest
+    @Test
     public void testListenerCallbacks() throws Throwable {
         final MyListener l1 = new MyListener();
         final MyListener l2 = new MyListener();
@@ -121,7 +135,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         assertFalse(l2.cancelCalled);
         assertFalse(l2.endCalled);
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 a1.start();
@@ -133,7 +147,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         Thread.sleep(POLL_INTERVAL);
         wait += POLL_INTERVAL;
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(l1.cancelCalled);
@@ -144,7 +158,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
 
         while (wait < a2.getStartDelay()) {
-            runTestOnUiThread(new Runnable() {
+            mActivityRule.runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
                     // Make sure a2's start listener isn't called during start delay.
@@ -159,7 +173,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         long delay = Math.max(a1.getTotalDuration(), a2.getTotalDuration()) + TOLERANCE;
         Thread.sleep(delay);
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // a1 is canceled.
@@ -175,7 +189,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
     }
 
-    @SmallTest
+    @Test
     public void testIsStarted() throws Throwable {
         assertFalse(a1.isStarted());
         assertFalse(a2.isStarted());
@@ -185,7 +199,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         a1.setStartDelay(startDelay);
         final long[] startTime = new long[1];
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 a1.start();
@@ -199,7 +213,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         while (delayMs < startDelay) {
             Thread.sleep(POLL_INTERVAL);
             delayMs += POLL_INTERVAL;
-            runTestOnUiThread(new Runnable() {
+            mActivityRule.runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
                     if (SystemClock.uptimeMillis() - startTime[0] < startDelay) {
@@ -210,7 +224,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         }
 
         Thread.sleep(startDelay);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertTrue(a1.isRunning());
@@ -220,7 +234,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
 
         long delay = Math.max(a1.getTotalDuration(), a2.getTotalDuration()) * 2;
         Thread.sleep(delay);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(a1.isStarted());
@@ -231,9 +245,9 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
     }
 
-    @SmallTest
+    @Test
     public void testPause() throws Throwable {
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(a1.isPaused());
@@ -250,7 +264,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
 
         Thread.sleep(POLL_INTERVAL);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertTrue(a1.isRunning());
@@ -263,7 +277,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
 
         Thread.sleep(a2.getTotalDuration());
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // By this time, a2 should have finished, and a1 is still paused
@@ -278,7 +292,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
 
         Thread.sleep(POLL_INTERVAL);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertTrue(a1.isRunning());
@@ -288,7 +302,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
 
         Thread.sleep(a1.getTotalDuration());
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // a1 should finish by now.
@@ -300,7 +314,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
 
     }
 
-    @SmallTest
+    @Test
     public void testPauseListener() throws Throwable {
         MyPauseListener l1 = new MyPauseListener();
         MyPauseListener l2 = new MyPauseListener();
@@ -312,7 +326,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         assertFalse(l2.pauseCalled);
         assertFalse(l2.resumeCalled);
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 a1.start();
@@ -328,7 +342,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         // Only a1's pause listener should be called.
         assertTrue(l1.pauseCalled);
         assertFalse(l1.resumeCalled);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 a1.resume();
@@ -343,7 +357,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         assertFalse(l2.resumeCalled);
     }
 
-    @SmallTest
+    @Test
     public void testResume() throws Throwable {
         final MyUpdateListener l1 = new MyUpdateListener();
         final long totalDuration = a1.getTotalDuration();
@@ -355,7 +369,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
 
         final long[] lastUpdate = new long[1];
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 a1.start();
@@ -364,7 +378,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
 
         Thread.sleep(totalDuration / 2);
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertTrue(l1.firstRunningFrameTime > 0);
@@ -376,7 +390,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
 
         Thread.sleep(totalDuration);
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // There should be no update after pause()
@@ -387,7 +401,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
 
         do {
             Thread.sleep(POLL_INTERVAL);
-            runTestOnUiThread(new Runnable() {
+            mActivityRule.runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
                     assertTrue(l1.lastUpdateTime > lastUpdate[0]);
@@ -402,7 +416,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         assertTrue(Math.abs(entireSpan - frameDelta) < TOLERANCE);
     }
 
-    @SmallTest
+    @Test
     public void testEnd() throws Throwable {
         final MyListener l1 = new MyListener();
         final MyListener l2 = new MyListener();
@@ -421,7 +435,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
             }
         });
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(l1.cancelCalled);
@@ -433,7 +447,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
             }
         });
         Thread.sleep(POLL_INTERVAL);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 a1.end();
@@ -441,7 +455,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
             }
         });
         Thread.sleep(POLL_INTERVAL);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // Calling cancel from onAnimationEnd will be ignored.
@@ -459,7 +473,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
 
     }
 
-    @SmallTest
+    @Test
     public void testEndValue() throws Throwable {
         final MyListener l1 = new MyListener();
         a1.addListener(l1);
@@ -467,7 +481,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         final MyListener l2 = new MyListener();
         a2.addListener(l2);
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 a1.start();
@@ -476,7 +490,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
 
         Thread.sleep(POLL_INTERVAL);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // Animation has started but not finished, check animated values against end values
@@ -492,7 +506,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
 
         Thread.sleep(a1.getTotalDuration());
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(l1.cancelCalled);
@@ -508,7 +522,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
     }
 
-    @SmallTest
+    @Test
     public void testUpdateListener() throws InterruptedException {
 
         final MyFrameCallbackProvider provider = new MyFrameCallbackProvider();
@@ -530,13 +544,13 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
                 long currentTime = SystemClock.uptimeMillis();
                 long frameDelay = provider.getFrameDelay();
                 if (lastUpdateTime > 0) {
-                    // Error tolerance here is one frame.
-                    assertTrue((currentTime - lastUpdateTime) < frameDelay * 2);
+                    // Error tolerance here is 3 frame.
+                    assertTrue((currentTime - lastUpdateTime) < frameDelay * 4);
                 } else {
                     // First frame:
                     assertTrue(listener.startCalled);
                     assertTrue(listener.startTime > 0);
-                    assertTrue(currentTime - listener.startTime < frameDelay * 2);
+                    assertTrue(currentTime - listener.startTime < frameDelay * 4);
                 }
                 super.onAnimationUpdate(animation);
             }
@@ -556,6 +570,9 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         assertTrue(a1.isStarted());
         Thread.sleep(a1.getTotalDuration() + TOLERANCE);
         // Finished by now.
+        if (provider.mAssertionError != null) {
+            throw provider.mAssertionError;
+        }
         assertFalse(a1.isStarted());
         assertTrue(listener.endTime > 0);
 
@@ -565,7 +582,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
     }
 
 
-    @SmallTest
+    @Test
     public void testConcurrentModification() throws Throwable {
         // Attempt to modify list of animations as the list is being iterated
         final ValueAnimator a0 = ValueAnimator.ofInt(100, 200).setDuration(500);
@@ -585,7 +602,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         };
         a2.addListener(listener);
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 a0.start();
@@ -595,7 +612,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
                 a4.start();
             }
         });
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertTrue(a0.isStarted());
@@ -606,7 +623,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
             }
         });
         Thread.sleep(POLL_INTERVAL);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // End the animator that should be in the middle of the list.
@@ -622,7 +639,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         assertFalse(a4.isStarted());
     }
 
-    @SmallTest
+    @Test
     public void testSeek() throws Throwable {
         final MyListener l1 = new MyListener();
         final MyListener l2 = new MyListener();
@@ -643,7 +660,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         a1.setInterpolator(interpolator);
         a2.setInterpolator(interpolator);
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(a1.isStarted());
@@ -664,7 +681,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         Thread.sleep(POLL_INTERVAL);
 
         // Start animation and seek during the animation.
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(a1.isStarted());
@@ -681,7 +698,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
 
         Thread.sleep(POLL_INTERVAL);
         final float halfwayFraction = 0.5f;
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertTrue(l1.startCalled);
@@ -706,7 +723,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         Thread.sleep(POLL_INTERVAL);
 
         // Check that seeking during running doesn't change animation's internal state
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertTrue(l1.startCalled);
@@ -725,7 +742,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         long wait = Math.max(a1.getTotalDuration(), a2.getTotalDuration());
         Thread.sleep(wait);
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // Verify that the animators have finished.
@@ -742,7 +759,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         // Re-start animator a1 after it ends normally, and check that seek value from last run
         // does not affect the new run.
         updateListener1.reset();
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 a1.start();
@@ -750,7 +767,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
 
         Thread.sleep(POLL_INTERVAL);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertTrue(updateListener1.wasRunning);
@@ -762,14 +779,14 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
 
     }
 
-    @SmallTest
+    @Test
     public void testSeekWhileRunning() throws Throwable {
         // Seek one animator to the beginning and the other one to the end when they are running.
         final MyListener l1 = new MyListener();
         final MyListener l2 = new MyListener();
         a1.addListener(l1);
         a2.addListener(l2);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(l1.startCalled);
@@ -781,7 +798,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
             }
         });
         Thread.sleep(POLL_INTERVAL);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(l1.endCalled);
@@ -794,7 +811,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
             }
         });
         Thread.sleep(POLL_INTERVAL);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // Check that a2 has finished due to the seeking, but a1 hasn't finished.
@@ -805,7 +822,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
 
         Thread.sleep(a1.getTotalDuration());
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // By now a1 should finish also.
@@ -815,7 +832,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
     }
 
-    @SmallTest
+    @Test
     public void testEndBeforeStart() throws Throwable {
         // This test calls two animators that are not yet started. One animator has completed a
         // previous run but hasn't started since then, the other one has never run. When end() is
@@ -827,7 +844,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         // First start a1's first run.
         final MyListener normalEndingListener = new MyListener();
         a1.addListener(normalEndingListener);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(a1.isStarted());
@@ -841,7 +858,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         Thread.sleep(a1.getTotalDuration() + POLL_INTERVAL);
 
         // a1 should have finished by now.
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // Call end() on both a1 and a2 without calling start()
@@ -874,7 +891,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
     }
 
-    @SmallTest
+    @Test
     public void testZeroDuration() throws Throwable {
         // Run two animators with zero duration, with one running forward and the other one
         // backward. Check that the animations start and finish with the correct end fractions.
@@ -893,7 +910,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         a1.addListener(l1);
         a2.addListener(l2);
         a3.addListener(l3);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(l1.startCalled);
@@ -912,7 +929,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
             }
         });
         Thread.sleep(POLL_INTERVAL);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // Check that the animators have started and finished with the right values.
@@ -932,7 +949,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
     }
 
-    @SmallTest
+    @Test
     public void testZeroScale() throws Throwable {
         // Test whether animations would end properly when the scale is forced to be zero
         float scale = ValueAnimator.getDurationScale();
@@ -940,12 +957,12 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
 
         // Run two animators, one of which has a start delay, after setting the duration scale to 0
         a1.setStartDelay(200);
-        final MyListener l1 =  new MyListener();
+        final MyListener l1 = new MyListener();
         final MyListener l2 = new MyListener();
         a1.addListener(l1);
         a2.addListener(l2);
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(l1.startCalled);
@@ -963,7 +980,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
         Thread.sleep(POLL_INTERVAL);
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertTrue(l1.startCalled);
@@ -979,7 +996,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         ValueAnimator.setDurationScale(scale);
     }
 
-    @SmallTest
+    @Test
     public void testReverse() throws Throwable {
         // Prolong animators duration so that we can do multiple checks during their run
         final ValueAnimator a3 = ValueAnimator.ofInt(0, 100);
@@ -995,7 +1012,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
 
         // Reverse three animators, seek one to the beginning and another to the end, and force
         // to end the third one during reversing.
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertFalse(l1.startCalled);
@@ -1010,7 +1027,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
             }
         });
         Thread.sleep(POLL_INTERVAL);
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 assertTrue(l1.startCalled);
@@ -1029,7 +1046,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         Thread.sleep(POLL_INTERVAL);
 
         // By now, a2 should have finished due to the seeking. It wouldn't have finished otherwise.
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // Check that both animations have started, and a2 has finished.
@@ -1040,7 +1057,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
         Thread.sleep(a1.getTotalDuration());
 
-        runTestOnUiThread(new Runnable() {
+        mActivityRule.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 // Verify that a1 has finished as well.
@@ -1052,6 +1069,89 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         });
     }
 
+    @Test
+    public void reentrantStart() throws Throwable {
+        CountDownLatch latch = new CountDownLatch(1);
+        a1.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationStart(Animator animation, boolean isReverse) {
+                a1.start();
+                latch.countDown();
+            }
+        });
+        mActivityRule.runOnUiThread(() -> a1.start());
+        assertTrue(latch.await(1, TimeUnit.SECONDS));
+
+        // Make sure that the UI thread isn't blocked by an infinite loop:
+        mActivityRule.runOnUiThread(() -> {});
+    }
+
+    @Test
+    public void reentrantPause() throws Throwable {
+        CountDownLatch latch = new CountDownLatch(1);
+        a1.addPauseListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationPause(Animator animation) {
+                a1.pause();
+                latch.countDown();
+            }
+        });
+        mActivityRule.runOnUiThread(() -> {
+            a1.start();
+            a1.pause();
+        });
+        assertTrue(latch.await(1, TimeUnit.SECONDS));
+
+        // Make sure that the UI thread isn't blocked by an infinite loop:
+        mActivityRule.runOnUiThread(() -> {});
+    }
+
+    @Test
+    public void reentrantResume() throws Throwable {
+        CountDownLatch latch = new CountDownLatch(1);
+        a1.addPauseListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationResume(Animator animation) {
+                a1.resume();
+                latch.countDown();
+            }
+        });
+        mActivityRule.runOnUiThread(() -> {
+            a1.start();
+            a1.pause();
+            a1.resume();
+        });
+        assertTrue(latch.await(1, TimeUnit.SECONDS));
+
+        // Make sure that the UI thread isn't blocked by an infinite loop:
+        mActivityRule.runOnUiThread(() -> {});
+    }
+
+    @Test
+    public void restartValueAnimator() throws Throwable {
+        CountDownLatch latch = new CountDownLatch(1);
+        ValueAnimator.AnimatorUpdateListener listener = new ValueAnimator.AnimatorUpdateListener() {
+            @Override
+            public void onAnimationUpdate(ValueAnimator animation) {
+                if (((float) animation.getAnimatedValue()) != A1_START_VALUE) {
+                    latch.countDown();
+                }
+            }
+        };
+        a1.addUpdateListener(listener);
+
+        mActivityRule.runOnUiThread(() -> {
+            a1.start();
+        });
+
+        // wait for a change in the value
+        assertTrue(latch.await(2, TimeUnit.SECONDS));
+
+        mActivityRule.runOnUiThread(() -> {
+            a1.start();
+            assertEquals(A1_START_VALUE, a1.getAnimatedValue());
+        });
+    }
     class MyUpdateListener implements ValueAnimator.AnimatorUpdateListener {
         boolean wasRunning = false;
         long firstRunningFrameTime = -1;
@@ -1128,6 +1228,7 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
         private final static int MSG_FRAME = 0;
         private long mFrameDelay = DEFAULT_FRAME_INTERVAL;
         private ArrayList<Choreographer.FrameCallback> mFrameCallbacks = new ArrayList<>();
+        volatile AssertionError mAssertionError = null;
 
         final LooperThread mThread = new LooperThread();
 
@@ -1173,15 +1274,20 @@ public class ValueAnimatorTests extends ActivityInstrumentationTestCase2<BasicAn
                 Looper.prepare();
                 mHandler = new Handler() {
                     public void handleMessage(Message msg) {
-                        // Handle message here.
-                        switch (msg.what) {
-                            case MSG_FRAME:
-                                for (int i = 0; i < mFrameCallbacks.size(); i++) {
-                                    mFrameCallbacks.get(i).doFrame(SystemClock.uptimeMillis());
-                                }
-                                break;
-                            default:
-                                break;
+                        try {
+                            // Handle message here.
+                            switch (msg.what) {
+                                case MSG_FRAME:
+                                    for (int i = 0; i < mFrameCallbacks.size(); i++) {
+                                        mFrameCallbacks.get(i).doFrame(SystemClock.uptimeMillis());
+                                    }
+                                    break;
+                                default:
+                                    break;
+                            }
+                        } catch (AssertionError e) {
+                            mAssertionError = e;
+                            Looper.myLooper().quit();
                         }
                     }
                 };

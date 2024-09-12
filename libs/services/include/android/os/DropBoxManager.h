@@ -57,15 +57,24 @@ public:
     // and a handle will be passed to the system process, so no additional permissions
     // are required from the system process.  Returns NULL if the file can't be opened.
     Status addFile(const String16& tag, const string& filename, int flags);
-    
-    class Entry : public virtual RefBase, public Parcelable {
+
+    // Create a new Entry from an already opened file. Takes ownership of the
+    // file descriptor.
+    Status addFile(const String16& tag, int fd, int flags);
+
+    class Entry : public Parcelable {
     public:
         Entry();
         virtual ~Entry();
 
         virtual status_t writeToParcel(Parcel* out) const;
         virtual status_t readFromParcel(const Parcel* in);
-        
+
+        const vector<uint8_t>& getData() const;
+        const unique_fd& getFd() const;
+        int32_t getFlags() const;
+        int64_t getTimestamp() const;
+
     private:
         Entry(const String16& tag, int32_t flags);
         Entry(const String16& tag, int32_t flags, int fd);
@@ -84,8 +93,6 @@ private:
     enum {
         HAS_BYTE_ARRAY = 8
     };
-
-    Status add(const Entry& entry);
 };
 
 }} // namespace android::os

@@ -18,7 +18,9 @@ package android.hardware.usb;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.SuppressLint;
 import android.annotation.SystemApi;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
@@ -45,9 +47,12 @@ public class UsbDeviceConnection {
     private Context mContext;
 
     // used by the JNI code
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private long mNativeContext;
 
     private final CloseGuard mCloseGuard = CloseGuard.get();
+
+    private final Object mLock = new Object();
 
     /**
      * UsbDevice should only be instantiated by UsbService implementation
@@ -59,13 +64,23 @@ public class UsbDeviceConnection {
 
     /* package */ boolean open(String name, ParcelFileDescriptor pfd, @NonNull Context context) {
         mContext = context.getApplicationContext();
-        boolean wasOpened = native_open(name, pfd.getFileDescriptor());
 
-        if (wasOpened) {
-            mCloseGuard.open("close");
+        synchronized (mLock) {
+            boolean wasOpened = native_open(name, pfd.getFileDescriptor());
+
+            if (wasOpened) {
+                mCloseGuard.open("UsbDeviceConnection.close");
+            }
+
+            return wasOpened;
         }
+    }
 
-        return wasOpened;
+    /***
+     * @return If this connection is currently open and usable.
+     */
+    boolean isOpen() {
+        return mNativeContext != 0;
     }
 
     /**
@@ -78,15 +93,60 @@ public class UsbDeviceConnection {
     }
 
     /**
+     * Cancel a request which relates to this connection.
+     *
+     * @return true if the request was successfully cancelled.
+     */
+    /* package */ boolean cancelRequest(UsbRequest request) {
+        synchronized (mLock) {
+            if (!isOpen()) {
+                return false;
+            }
+
+            return request.cancelIfOpen();
+        }
+    }
+
+    /**
+     * This is meant to be called by UsbRequest's queue() in order to synchronize on
+     * UsbDeviceConnection's mLock to prevent the connection being closed while queueing.
+     */
+    /* package */ boolean queueRequest(UsbRequest request, ByteBuffer buffer, int length) {
+        synchronized (mLock) {
+            if (!isOpen()) {
+                return false;
+            }
+
+            return request.queueIfConnectionOpen(buffer, length);
+        }
+    }
+
+    /**
+     * This is meant to be called by UsbRequest's queue() in order to synchronize on
+     * UsbDeviceConnection's mLock to prevent the connection being closed while queueing.
+     */
+    /* package */ boolean queueRequest(UsbRequest request, @Nullable ByteBuffer buffer) {
+        synchronized (mLock) {
+            if (!isOpen()) {
+                return false;
+            }
+
+            return request.queueIfConnectionOpen(buffer);
+        }
+    }
+
+    /**
      * Releases all system resources related to the device.
      * Once the object is closed it cannot be used again.
      * The client must call {@link UsbManager#openDevice} again
      * to retrieve a new instance to reestablish communication with the device.
      */
     public void close() {
-        if (mNativeContext != 0) {
-            native_close();
-            mCloseGuard.close();
+        synchronized (mLock) {
+            if (isOpen()) {
+                native_close();
+                mCloseGuard.close();
+            }
         }
     }
 
@@ -178,7 +238,7 @@ public class UsbDeviceConnection {
      * or negative value for failure
      */
     public int controlTransfer(int requestType, int request, int value,
-            int index, byte[] buffer, int length, int timeout) {
+            int index, @Nullable byte[] buffer, int length, int timeout) {
         return controlTransfer(requestType, request, value, index, buffer, 0, length, timeout);
     }
 
@@ -203,7 +263,7 @@ public class UsbDeviceConnection {
      * or negative value for failure
      */
     public int controlTransfer(int requestType, int request, int value, int index,
-            byte[] buffer, int offset, int length, int timeout) {
+            @Nullable byte[] buffer, int offset, int length, int timeout) {
         checkBounds(buffer, offset, length);
         return native_control_request(requestType, request, value, index,
                 buffer, offset, length, timeout);
@@ -221,7 +281,10 @@ public class UsbDeviceConnection {
      * @param endpoint the endpoint for this transaction
      * @param buffer buffer for data to send or receive; can be {@code null} to wait for next
      *               transaction without reading data
-     * @param length the length of the data to send or receive
+     * @param length the length of the data to send or receive. Before
+     *               {@value Build.VERSION_CODES#P}, a value larger than 16384 bytes
+     *               would be truncated down to 16384. In API {@value Build.VERSION_CODES#P}
+     *               and after, any value of length is valid.
      * @param timeout in milliseconds, 0 is infinite
      * @return length of data transferred (or zero) for success,
      * or negative value for failure
@@ -238,7 +301,10 @@ public class UsbDeviceConnection {
      * @param endpoint the endpoint for this transaction
      * @param buffer buffer for data to send or receive
      * @param offset the index of the first byte in the buffer to send or receive
-     * @param length the length of the data to send or receive
+     * @param length the length of the data to send or receive. Before
+     *               {@value Build.VERSION_CODES#P}, a value larger than 16384 bytes
+     *               would be truncated down to 16384. In API {@value Build.VERSION_CODES#P}
+     *               and after, any value of length is valid.
      * @param timeout in milliseconds, 0 is infinite
      * @return length of data transferred (or zero) for success,
      * or negative value for failure
@@ -246,6 +312,10 @@ public class UsbDeviceConnection {
     public int bulkTransfer(UsbEndpoint endpoint,
             byte[] buffer, int offset, int length, int timeout) {
         checkBounds(buffer, offset, length);
+        if (mContext.getApplicationInfo().targetSdkVersion < Build.VERSION_CODES.P
+                && length > UsbRequest.MAX_USBFS_BUFFER_SIZE) {
+            length = UsbRequest.MAX_USBFS_BUFFER_SIZE;
+        }
         return native_bulk_request(endpoint.getAddress(), buffer, offset, length, timeout);
     }
 
@@ -257,6 +327,7 @@ public class UsbDeviceConnection {
      * @hide
      */
     @SystemApi
+    @SuppressLint("RequiresPermission")
     public boolean resetDevice() {
         return native_reset_device();
     }
@@ -349,7 +420,9 @@ public class UsbDeviceConnection {
     @Override
     protected void finalize() throws Throwable {
         try {
-            mCloseGuard.warnIfOpen();
+            if (mCloseGuard != null) {
+                mCloseGuard.warnIfOpen();
+            }
         } finally {
             super.finalize();
         }

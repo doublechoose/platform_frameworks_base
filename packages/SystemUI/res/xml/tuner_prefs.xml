@@ -50,6 +50,10 @@
             android:key="bluetooth"
             android:title="@string/quick_settings_bluetooth_label" />
 
+        <com.android.systemui.tuner.StatusBarSwitch
+            android:key="cameratoggle"
+            android:title="@string/quick_settings_camera_label" />
+
         <!-- nfc -->
         <!-- tty -->
         <!-- speakerphone -->
@@ -98,18 +102,16 @@
             android:summary="%s"
             android:entries="@array/clock_options" />
 
+        <com.android.systemui.tuner.TunerSwitch
+            android:key="low_priority"
+            android:title="@string/tuner_low_priority"
+            sysui:defValue="false" />
+
     </PreferenceScreen>
 
     <PreferenceScreen
         android:key="volume_and_do_not_disturb"
         android:title="@string/volume_and_do_not_disturb">
-
-        <!-- Action for this is
-             MetricsConstants.ACTION_TUNER_DO_NOT_DISTURB_VOLUME_PANEL -->
-        <com.android.systemui.tuner.TunerSwitch
-            android:key="sysui_show_full_zen"
-            android:title="@string/tuner_full_zen_title"
-            sysui:metricsAction="314" />
 
         <!-- Action for this is
              MetricsConstants.ACTION_TUNER_DO_NOT_DISTURB_VOLUME_SHORTCUT -->
@@ -128,7 +130,7 @@
         <com.android.systemui.tuner.TunerSwitch
           android:key="doze_always_on"
           android:title="@string/tuner_doze_always_on"
-          sysui:defValue="false" />
+          sysui:defValue="true" />
 
     </PreferenceScreen>
 

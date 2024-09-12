@@ -16,6 +16,7 @@
 
 package android.app.backup;
 
+import android.annotation.Nullable;
 import android.annotation.SystemApi;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
@@ -24,6 +25,11 @@ import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 
 import com.android.internal.backup.IBackupTransport;
+import com.android.internal.backup.ITransportStatusCallback;
+import com.android.internal.infra.AndroidFuture;
+
+import java.util.Arrays;
+import java.util.List;
 
 /**
  * Concrete class that provides a stable-API bridge between IBackupTransport
@@ -51,9 +57,53 @@ public class BackupTransport {
     public static final int AGENT_UNKNOWN = -1004;
     public static final int TRANSPORT_QUOTA_EXCEEDED = -1005;
 
+    /**
+     * Indicates that the transport cannot accept a diff backup for this package.
+     *
+     * <p>Backup manager should clear its state for this package and immediately retry a
+     * non-incremental backup. This might be used if the transport no longer has data for this
+     * package in its backing store.
+     *
+     * <p>This is only valid when backup manager called {@link
+     * #performBackup(PackageInfo, ParcelFileDescriptor, int)} with {@link #FLAG_INCREMENTAL}.
+     */
+    public static final int TRANSPORT_NON_INCREMENTAL_BACKUP_REQUIRED = -1006;
+
     // Indicates that operation was initiated by user, not a scheduled one.
     // Transport should ignore its own moratoriums for call with this flag set.
     public static final int FLAG_USER_INITIATED = 1;
+
+    /**
+     * For key value backup, indicates that the backup data is a diff from a previous backup. The
+     * transport must apply this diff to an existing backup to build the new backup set.
+     *
+     * @see #performBackup(PackageInfo, ParcelFileDescriptor, int)
+     */
+    public static final int FLAG_INCREMENTAL = 1 << 1;
+
+    /**
+     * For key value backup, indicates that the backup data is a complete set, not a diff from a
+     * previous backup. The transport should clear any previous backup when storing this backup.
+     *
+     * @see #performBackup(PackageInfo, ParcelFileDescriptor, int)
+     */
+    public static final int FLAG_NON_INCREMENTAL = 1 << 2;
+
+    /**
+     * For key value backup, indicates that the backup contains no new data since the last backup
+     * attempt completed without any errors. The transport should use this to record that
+     * a successful backup attempt has been completed but no backup data has been changed.
+     *
+     * @see #performBackup(PackageInfo, ParcelFileDescriptor, int)
+     */
+    public static final int FLAG_DATA_NOT_CHANGED = 1 << 3;
+
+    /**
+     * Used as a boolean extra in the binding intent of transports. We pass {@code true} to
+     * notify transports that the current connection is used for registering the transport.
+     */
+    public static final String EXTRA_TRANSPORT_REGISTRATION =
+            "android.app.backup.extra.TRANSPORT_REGISTRATION";
 
     IBackupTransport mBinderImpl = new TransportImpl();
 
@@ -129,16 +179,33 @@ public class BackupTransport {
     }
 
     /**
-     * On demand, supply a short string that can be shown to the user as the label
-     * on an overflow menu item used to invoked the data management UI.
+     * On demand, supply a short string that can be shown to the user as the label on an overflow
+     * menu item used to invoke the data management UI.
      *
-     * @return A string to be used as the label for the transport's data management
-     *         affordance.  If the transport supplies a data management intent, this
-     *         method must not return {@code null}.
+     * @return A string to be used as the label for the transport's data management affordance. If
+     *     the transport supplies a data management intent, this method must not return {@code
+     *     null}.
+     * @deprecated Since Android Q, please use the variant {@link #dataManagementIntentLabel()}
+     *     instead.
      */
+    @Deprecated
+    @Nullable
     public String dataManagementLabel() {
         throw new UnsupportedOperationException(
                 "Transport dataManagementLabel() not implemented");
+    }
+
+    /**
+     * On demand, supply a short CharSequence that can be shown to the user as the label on an
+     * overflow menu item used to invoke the data management UI.
+     *
+     * @return A CharSequence to be used as the label for the transport's data management
+     *     affordance. If the transport supplies a data management intent, this method must not
+     *     return {@code null}.
+     */
+    @Nullable
+    public CharSequence dataManagementIntentLabel() {
+        return dataManagementLabel();
     }
 
     /**
@@ -231,18 +298,34 @@ public class BackupTransport {
      * {@link #TRANSPORT_OK}, {@link #finishBackup} will then be called to ensure the data
      * is sent and recorded successfully.
      *
+     * If the backup data is a diff against the previous backup then the flag {@link
+     * BackupTransport#FLAG_INCREMENTAL} will be set. Otherwise, if the data is a complete backup
+     * set then {@link BackupTransport#FLAG_NON_INCREMENTAL} will be set. Before P neither flag will
+     * be set regardless of whether the backup is incremental or not.
+     *
+     * <p>If {@link BackupTransport#FLAG_INCREMENTAL} is set and the transport does not have data
+     * for this package in its storage backend then it cannot apply the incremental diff. Thus it
+     * should return {@link BackupTransport#TRANSPORT_NON_INCREMENTAL_BACKUP_REQUIRED} to indicate
+     * that backup manager should delete its state and retry the package as a non-incremental
+     * backup. Before P, or if this is a non-incremental backup, then this return code is equivalent
+     * to {@link BackupTransport#TRANSPORT_ERROR}.
+     *
      * @param packageInfo The identity of the application whose data is being backed up.
      *   This specifically includes the signature list for the package.
      * @param inFd Descriptor of file with data that resulted from invoking the application's
      *   BackupService.doBackup() method.  This may be a pipe rather than a file on
      *   persistent media, so it may not be seekable.
-     * @param flags {@link BackupTransport#FLAG_USER_INITIATED} or 0.
+     * @param flags a combination of {@link BackupTransport#FLAG_USER_INITIATED}, {@link
+     *   BackupTransport#FLAG_NON_INCREMENTAL}, {@link BackupTransport#FLAG_INCREMENTAL},
+     *   {@link BackupTransport#FLAG_DATA_NOT_CHANGED},or 0.
      * @return one of {@link BackupTransport#TRANSPORT_OK} (OK so far),
      *  {@link BackupTransport#TRANSPORT_PACKAGE_REJECTED} (to suppress backup of this
      *  specific package, but allow others to proceed),
-     *  {@link BackupTransport#TRANSPORT_ERROR} (on network error or other failure), or
-     *  {@link BackupTransport#TRANSPORT_NOT_INITIALIZED} (if the backend dataset has
-     *  become lost due to inactivity purge or some other reason and needs re-initializing)
+     *  {@link BackupTransport#TRANSPORT_ERROR} (on network error or other failure), {@link
+     *  BackupTransport#TRANSPORT_NON_INCREMENTAL_BACKUP_REQUIRED} (if the transport cannot accept
+     *  an incremental backup for this package), or {@link
+     *  BackupTransport#TRANSPORT_NOT_INITIALIZED} (if the backend dataset has become lost due to
+     *  inactivity purge or some other reason and needs re-initializing)
      */
     public int performBackup(PackageInfo packageInfo, ParcelFileDescriptor inFd, int flags) {
         return performBackup(packageInfo, inFd);
@@ -564,6 +647,30 @@ public class BackupTransport {
     }
 
     /**
+     * Returns flags with additional information about the transport, which is accessible to the
+     * {@link android.app.backup.BackupAgent}. This allows the agent to decide what to do based on
+     * properties of the transport.
+     */
+    public int getTransportFlags() {
+        return 0;
+    }
+
+    /**
+     * Ask the transport for a {@link BackupManagerMonitor} instance which will be used by the
+     * framework to report logging events back to the transport.
+     *
+     * <p>Backups requested from outside the framework may pass in a monitor with the request,
+     * however backups initiated by the framework will call this method to retrieve one.
+     *
+     * @return {@link BackupManagerMonitor} or {@code null} if the transport implementation does not
+     *         wish to receive the logging events.
+     */
+    @Nullable
+    public BackupManagerMonitor getBackupManagerMonitor() {
+        return null;
+    }
+
+    /**
      * Bridge between the actual IBackupTransport implementation and the stable API.  If the
      * binder interface needs to change, we use this layer to translate so that we can
      * (if appropriate) decouple those framework-side changes from the BackupTransport
@@ -572,136 +679,303 @@ public class BackupTransport {
     class TransportImpl extends IBackupTransport.Stub {
 
         @Override
-        public String name() throws RemoteException {
-            return BackupTransport.this.name();
+        public void name(AndroidFuture<String> resultFuture) throws RemoteException {
+            try {
+                String result = BackupTransport.this.name();
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
         }
 
         @Override
-        public Intent configurationIntent() throws RemoteException {
-            return BackupTransport.this.configurationIntent();
-        }
-
-        @Override
-        public String currentDestinationString() throws RemoteException {
-            return BackupTransport.this.currentDestinationString();
-        }
-
-        @Override
-        public Intent dataManagementIntent() {
-            return BackupTransport.this.dataManagementIntent();
-        }
-
-        @Override
-        public String dataManagementLabel() {
-            return BackupTransport.this.dataManagementLabel();
-        }
-
-        @Override
-        public String transportDirName() throws RemoteException {
-            return BackupTransport.this.transportDirName();
-        }
-
-        @Override
-        public long requestBackupTime() throws RemoteException {
-            return BackupTransport.this.requestBackupTime();
-        }
-
-        @Override
-        public int initializeDevice() throws RemoteException {
-            return BackupTransport.this.initializeDevice();
-        }
-
-        @Override
-        public int performBackup(PackageInfo packageInfo, ParcelFileDescriptor inFd, int flags)
+        public void configurationIntent(AndroidFuture<Intent> resultFuture)
                 throws RemoteException {
-            return BackupTransport.this.performBackup(packageInfo, inFd, flags);
+            try {
+                Intent result = BackupTransport.this.configurationIntent();
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
         }
 
         @Override
-        public int clearBackupData(PackageInfo packageInfo) throws RemoteException {
-            return BackupTransport.this.clearBackupData(packageInfo);
-        }
-
-        @Override
-        public int finishBackup() throws RemoteException {
-            return BackupTransport.this.finishBackup();
-        }
-
-        @Override
-        public RestoreSet[] getAvailableRestoreSets() throws RemoteException {
-            return BackupTransport.this.getAvailableRestoreSets();
-        }
-
-        @Override
-        public long getCurrentRestoreSet() throws RemoteException {
-            return BackupTransport.this.getCurrentRestoreSet();
-        }
-
-        @Override
-        public int startRestore(long token, PackageInfo[] packages) throws RemoteException {
-            return BackupTransport.this.startRestore(token, packages);
-        }
-
-        @Override
-        public RestoreDescription nextRestorePackage() throws RemoteException {
-            return BackupTransport.this.nextRestorePackage();
-        }
-
-        @Override
-        public int getRestoreData(ParcelFileDescriptor outFd) throws RemoteException {
-            return BackupTransport.this.getRestoreData(outFd);
-        }
-
-        @Override
-        public void finishRestore() throws RemoteException {
-            BackupTransport.this.finishRestore();
-        }
-
-        @Override
-        public long requestFullBackupTime() throws RemoteException {
-            return BackupTransport.this.requestFullBackupTime();
-        }
-
-        @Override
-        public int performFullBackup(PackageInfo targetPackage, ParcelFileDescriptor socket,
-                int flags) throws RemoteException {
-            return BackupTransport.this.performFullBackup(targetPackage, socket, flags);
-        }
-
-        @Override
-        public int checkFullBackupSize(long size) {
-            return BackupTransport.this.checkFullBackupSize(size);
-        }
-
-        @Override
-        public int sendBackupData(int numBytes) throws RemoteException {
-            return BackupTransport.this.sendBackupData(numBytes);
-        }
-
-        @Override
-        public void cancelFullBackup() throws RemoteException {
-            BackupTransport.this.cancelFullBackup();
-        }
-
-        @Override
-        public boolean isAppEligibleForBackup(PackageInfo targetPackage, boolean isFullBackup)
+        public void currentDestinationString(AndroidFuture<String> resultFuture)
                 throws RemoteException {
-            return BackupTransport.this.isAppEligibleForBackup(targetPackage, isFullBackup);
+            try {
+                String result = BackupTransport.this.currentDestinationString();
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
         }
 
         @Override
-        public long getBackupQuota(String packageName, boolean isFullBackup) {
-            return BackupTransport.this.getBackupQuota(packageName, isFullBackup);
+        public void dataManagementIntent(AndroidFuture<Intent> resultFuture)
+                throws RemoteException {
+            try {
+                Intent result = BackupTransport.this.dataManagementIntent();
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
         }
 
         @Override
-        public int getNextFullRestoreDataChunk(ParcelFileDescriptor socket) {
-            return BackupTransport.this.getNextFullRestoreDataChunk(socket);
+        public void dataManagementIntentLabel(AndroidFuture<CharSequence> resultFuture)
+                throws RemoteException {
+            try {
+                CharSequence result = BackupTransport.this.dataManagementIntentLabel();
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
         }
 
         @Override
-        public int abortFullRestore() {
-            return BackupTransport.this.abortFullRestore();
+        public void transportDirName(AndroidFuture<String> resultFuture) throws RemoteException {
+            try {
+                String result = BackupTransport.this.transportDirName();
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
+        }
+
+        @Override
+        public void requestBackupTime(AndroidFuture<Long> resultFuture) throws RemoteException {
+            try {
+                long result = BackupTransport.this.requestBackupTime();
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
+        }
+
+        @Override
+        public void initializeDevice(ITransportStatusCallback callback) throws RemoteException {
+            try {
+                int result = BackupTransport.this.initializeDevice();
+                callback.onOperationCompleteWithStatus(result);
+            } catch (RuntimeException e) {
+                callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void performBackup(PackageInfo packageInfo, ParcelFileDescriptor inFd, int flags,
+                ITransportStatusCallback callback) throws RemoteException {
+            try {
+                int result = BackupTransport.this.performBackup(packageInfo, inFd, flags);
+                callback.onOperationCompleteWithStatus(result);
+            } catch (RuntimeException e) {
+                callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void clearBackupData(PackageInfo packageInfo, ITransportStatusCallback callback)
+                throws RemoteException {
+            try {
+                int result = BackupTransport.this.clearBackupData(packageInfo);
+                callback.onOperationCompleteWithStatus(result);
+            } catch (RuntimeException e) {
+                callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void finishBackup(ITransportStatusCallback callback) throws RemoteException {
+            try {
+                int result = BackupTransport.this.finishBackup();
+                callback.onOperationCompleteWithStatus(result);
+            } catch (RuntimeException e) {
+                callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void getAvailableRestoreSets(AndroidFuture<List<RestoreSet>> resultFuture)
+                throws RemoteException {
+            try {
+                RestoreSet[] result = BackupTransport.this.getAvailableRestoreSets();
+                resultFuture.complete(Arrays.asList(result));
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
+        }
+
+        @Override
+        public void getCurrentRestoreSet(AndroidFuture<Long> resultFuture)
+                throws RemoteException {
+            try {
+                long result = BackupTransport.this.getCurrentRestoreSet();
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
+        }
+
+        @Override
+        public void startRestore(long token, PackageInfo[] packages,
+                ITransportStatusCallback callback)  throws RemoteException {
+            try {
+                int result = BackupTransport.this.startRestore(token, packages);
+                callback.onOperationCompleteWithStatus(result);
+            } catch (RuntimeException e) {
+                callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void nextRestorePackage(AndroidFuture<RestoreDescription> resultFuture)
+                throws RemoteException {
+            try {
+                RestoreDescription result = BackupTransport.this.nextRestorePackage();
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
+        }
+
+        @Override
+        public void getRestoreData(ParcelFileDescriptor outFd,
+                ITransportStatusCallback callback) throws RemoteException {
+            try {
+                int result = BackupTransport.this.getRestoreData(outFd);
+                callback.onOperationCompleteWithStatus(result);
+            } catch (RuntimeException e) {
+                callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void finishRestore(ITransportStatusCallback callback)
+                throws RemoteException {
+            try {
+                BackupTransport.this.finishRestore();
+                callback.onOperationComplete();
+            } catch (RuntimeException e) {
+                callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void requestFullBackupTime(AndroidFuture<Long> resultFuture)
+                throws RemoteException {
+            try {
+                long result = BackupTransport.this.requestFullBackupTime();
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
+        }
+
+        @Override
+        public void performFullBackup(PackageInfo targetPackage, ParcelFileDescriptor socket,
+                int flags, ITransportStatusCallback callback) throws RemoteException {
+            try {
+                int result = BackupTransport.this.performFullBackup(targetPackage, socket, flags);
+                callback.onOperationCompleteWithStatus(result);
+            } catch (RuntimeException e) {
+                callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void checkFullBackupSize(long size, ITransportStatusCallback callback)
+                throws RemoteException {
+            try {
+                int result = BackupTransport.this.checkFullBackupSize(size);
+                callback.onOperationCompleteWithStatus(result);
+            } catch (RuntimeException e) {
+            callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void sendBackupData(int numBytes, ITransportStatusCallback callback)
+                throws RemoteException {
+            try {
+                int result = BackupTransport.this.sendBackupData(numBytes);
+                callback.onOperationCompleteWithStatus(result);
+            } catch (RuntimeException e) {
+                callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void cancelFullBackup(ITransportStatusCallback callback) throws RemoteException {
+            try {
+                BackupTransport.this.cancelFullBackup();
+                callback.onOperationComplete();
+            } catch (RuntimeException e) {
+                callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void isAppEligibleForBackup(PackageInfo targetPackage, boolean isFullBackup,
+                AndroidFuture<Boolean> resultFuture) throws RemoteException {
+            try {
+                boolean result = BackupTransport.this.isAppEligibleForBackup(targetPackage,
+                        isFullBackup);
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
+        }
+
+        @Override
+        public void getBackupQuota(String packageName, boolean isFullBackup,
+                AndroidFuture<Long> resultFuture) throws RemoteException {
+            try {
+                long result = BackupTransport.this.getBackupQuota(packageName, isFullBackup);
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
+        }
+
+        @Override
+        public void getTransportFlags(AndroidFuture<Integer> resultFuture) throws RemoteException {
+            try {
+                int result = BackupTransport.this.getTransportFlags();
+                resultFuture.complete(result);
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
+        }
+
+        @Override
+        public void getNextFullRestoreDataChunk(ParcelFileDescriptor socket,
+                ITransportStatusCallback callback) throws RemoteException {
+            try {
+                int result = BackupTransport.this.getNextFullRestoreDataChunk(socket);
+                callback.onOperationCompleteWithStatus(result);
+            } catch (RuntimeException e) {
+                callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void abortFullRestore(ITransportStatusCallback callback) throws RemoteException {
+            try {
+                int result = BackupTransport.this.abortFullRestore();
+                callback.onOperationCompleteWithStatus(result);
+            } catch (RuntimeException e) {
+                callback.onOperationCompleteWithStatus(BackupTransport.TRANSPORT_ERROR);
+            }
+        }
+
+        @Override
+        public void getBackupManagerMonitor(AndroidFuture<IBackupManagerMonitor> resultFuture) {
+            try {
+                BackupManagerMonitor result = BackupTransport.this.getBackupManagerMonitor();
+                resultFuture.complete(new BackupManagerMonitorWrapper(result));
+            } catch (RuntimeException e) {
+                resultFuture.cancel(/* mayInterruptIfRunning */ true);
+            }
         }
     }
 }

@@ -18,16 +18,19 @@ package android.widget;
 
 import android.annotation.IntDef;
 import android.annotation.NonNull;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.TypedArray;
 import android.graphics.Rect;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Trace;
 import android.util.AttributeSet;
 import android.util.MathUtils;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.RemotableViewMethod;
 import android.view.SoundEffectConstants;
 import android.view.View;
 import android.view.ViewDebug;
@@ -40,6 +43,7 @@ import android.view.accessibility.AccessibilityNodeInfo.CollectionInfo;
 import android.view.accessibility.AccessibilityNodeInfo.CollectionItemInfo;
 import android.view.accessibility.AccessibilityNodeProvider;
 import android.view.animation.GridLayoutAnimationController;
+import android.view.inspector.InspectableProperty;
 import android.widget.RemoteViews.RemoteView;
 
 import com.android.internal.R;
@@ -65,7 +69,12 @@ import java.lang.annotation.RetentionPolicy;
 @RemoteView
 public class GridView extends AbsListView {
     /** @hide */
-    @IntDef({NO_STRETCH, STRETCH_SPACING, STRETCH_COLUMN_WIDTH, STRETCH_SPACING_UNIFORM})
+    @IntDef(prefix = { "NO_STRETCH", "STRETCH_" }, value = {
+            NO_STRETCH,
+            STRETCH_SPACING,
+            STRETCH_COLUMN_WIDTH,
+            STRETCH_SPACING_UNIFORM
+    })
     @Retention(RetentionPolicy.SOURCE)
     public @interface StretchMode {}
 
@@ -101,14 +110,21 @@ public class GridView extends AbsListView {
      */
     public static final int AUTO_FIT = -1;
 
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 117521080)
     private int mNumColumns = AUTO_FIT;
 
+    @UnsupportedAppUsage
     private int mHorizontalSpacing = 0;
+    @UnsupportedAppUsage
     private int mRequestedHorizontalSpacing;
+    @UnsupportedAppUsage
     private int mVerticalSpacing = 0;
     private int mStretchMode = STRETCH_COLUMN_WIDTH;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 117521079)
     private int mColumnWidth;
+    @UnsupportedAppUsage
     private int mRequestedColumnWidth;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 123769395)
     private int mRequestedNumColumns;
 
     private View mReferenceView = null;
@@ -135,6 +151,8 @@ public class GridView extends AbsListView {
 
         final TypedArray a = context.obtainStyledAttributes(
                 attrs, R.styleable.GridView, defStyleAttr, defStyleRes);
+        saveAttributeDataForStyleable(context, R.styleable.GridView,
+                attrs, a, defStyleAttr, defStyleRes);
 
         int hSpacing = a.getDimensionPixelOffset(
                 R.styleable.GridView_horizontalSpacing, 0);
@@ -295,6 +313,7 @@ public class GridView extends AbsListView {
      * @return The view that is currently selected, if it happens to be in the
      *         range that we draw.
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     private View fillDown(int pos, int nextTop) {
         View selectedView = null;
 
@@ -394,6 +413,7 @@ public class GridView extends AbsListView {
      *
      * @return The view that is currently selected
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     private View fillUp(int pos, int nextBottom) {
         View selectedView = null;
 
@@ -960,6 +980,7 @@ public class GridView extends AbsListView {
         return sel;
     }
 
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private boolean determineColumns(int availableSpace) {
         final int requestedHorizontalSpacing = mRequestedHorizontalSpacing;
         final int stretchMode = mStretchMode;
@@ -1879,6 +1900,7 @@ public class GridView extends AbsListView {
      * Goes to the next or previous item according to the order set by the
      * adapter.
      */
+    @UnsupportedAppUsage
     boolean sequenceScroll(int direction) {
         int selectedPosition = mSelectedPosition;
         int numColumns = mNumColumns;
@@ -2029,6 +2051,7 @@ public class GridView extends AbsListView {
      *
      * @attr ref android.R.styleable#GridView_gravity
      */
+    @RemotableViewMethod
     public void setGravity(int gravity) {
         if (mGravity != gravity) {
             mGravity = gravity;
@@ -2043,6 +2066,7 @@ public class GridView extends AbsListView {
      *
      * @attr ref android.R.styleable#GridView_gravity
      */
+    @InspectableProperty(valueType = InspectableProperty.ValueType.GRAVITY)
     public int getGravity() {
         return mGravity;
     }
@@ -2056,6 +2080,7 @@ public class GridView extends AbsListView {
      *
      * @attr ref android.R.styleable#GridView_horizontalSpacing
      */
+    @RemotableViewMethod
     public void setHorizontalSpacing(int horizontalSpacing) {
         if (horizontalSpacing != mRequestedHorizontalSpacing) {
             mRequestedHorizontalSpacing = horizontalSpacing;
@@ -2078,6 +2103,7 @@ public class GridView extends AbsListView {
      *
      * @attr ref android.R.styleable#GridView_horizontalSpacing
      */
+    @InspectableProperty
     public int getHorizontalSpacing() {
         return mHorizontalSpacing;
     }
@@ -2113,6 +2139,7 @@ public class GridView extends AbsListView {
      *
      * @attr ref android.R.styleable#GridView_verticalSpacing
      */
+    @RemotableViewMethod
     public void setVerticalSpacing(int verticalSpacing) {
         if (verticalSpacing != mVerticalSpacing) {
             mVerticalSpacing = verticalSpacing;
@@ -2129,6 +2156,7 @@ public class GridView extends AbsListView {
      *
      * @attr ref android.R.styleable#GridView_verticalSpacing
      */
+    @InspectableProperty
     public int getVerticalSpacing() {
         return mVerticalSpacing;
     }
@@ -2141,6 +2169,7 @@ public class GridView extends AbsListView {
      *
      * @attr ref android.R.styleable#GridView_stretchMode
      */
+    @RemotableViewMethod
     public void setStretchMode(@StretchMode int stretchMode) {
         if (stretchMode != mStretchMode) {
             mStretchMode = stretchMode;
@@ -2149,6 +2178,13 @@ public class GridView extends AbsListView {
     }
 
     @StretchMode
+    @InspectableProperty(enumMapping = {
+            @InspectableProperty.EnumEntry(value = NO_STRETCH, name = "none"),
+            @InspectableProperty.EnumEntry(value = STRETCH_SPACING, name = "spacingWidth"),
+            @InspectableProperty.EnumEntry(
+                    value = STRETCH_SPACING_UNIFORM, name = "spacingWidthUniform"),
+            @InspectableProperty.EnumEntry(value = STRETCH_COLUMN_WIDTH, name = "columnWidth"),
+    })
     public int getStretchMode() {
         return mStretchMode;
     }
@@ -2160,6 +2196,7 @@ public class GridView extends AbsListView {
      *
      * @attr ref android.R.styleable#GridView_columnWidth
      */
+    @RemotableViewMethod
     public void setColumnWidth(int columnWidth) {
         if (columnWidth != mRequestedColumnWidth) {
             mRequestedColumnWidth = columnWidth;
@@ -2179,6 +2216,7 @@ public class GridView extends AbsListView {
      *
      * @attr ref android.R.styleable#GridView_columnWidth
      */
+    @InspectableProperty
     public int getColumnWidth() {
         return mColumnWidth;
     }
@@ -2207,6 +2245,7 @@ public class GridView extends AbsListView {
      *
      * @attr ref android.R.styleable#GridView_numColumns
      */
+    @RemotableViewMethod
     public void setNumColumns(int numColumns) {
         if (numColumns != mRequestedNumColumns) {
             mRequestedNumColumns = numColumns;
@@ -2223,6 +2262,7 @@ public class GridView extends AbsListView {
      * @see #setNumColumns(int)
      */
     @ViewDebug.ExportedProperty
+    @InspectableProperty
     public int getNumColumns() {
         return mNumColumns;
     }

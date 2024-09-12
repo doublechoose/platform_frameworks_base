@@ -21,6 +21,7 @@ import android.annotation.IdRes;
 import android.annotation.LayoutRes;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.res.Resources;
 import android.util.Log;
@@ -48,9 +49,6 @@ import java.util.List;
  * To customize what type of view is used for the data object,
  * override {@link #getView(int, View, ViewGroup)}
  * and inflate a view resource.
- * For a code example, see
- * the <a href="https://developer.android.com/samples/CustomChoiceList/index.html">
- * CustomChoiceList</a> sample.
  * </p>
  * <p>
  * For an example of using an array adapter with a ListView, see the
@@ -63,7 +61,7 @@ import java.util.List;
  * </p>
  * <p class="note"><strong>Note:</strong>
  * If you are considering using array adapter with a ListView, consider using
- * {@link android.support.v7.widget.RecyclerView} instead.
+ * {@link androidx.recyclerview.widget.RecyclerView} instead.
  * RecyclerView offers similar features with better performance and more flexibility than
  * ListView provides.
  * See the
@@ -77,6 +75,7 @@ public class ArrayAdapter<T> extends BaseAdapter implements Filterable, ThemedSp
      * used by the filter (see {@link #getFilter()} to make a synchronized copy of
      * the original array of data.
      */
+    @UnsupportedAppUsage
     private final Object mLock = new Object();
 
     private final LayoutInflater mInflater;
@@ -99,6 +98,7 @@ public class ArrayAdapter<T> extends BaseAdapter implements Filterable, ThemedSp
      * Contains the list of objects that represent the data of this ArrayAdapter.
      * The content of this list is referred to as "the array" in the documentation.
      */
+    @UnsupportedAppUsage
     private List<T> mObjects;
 
     /**
@@ -121,6 +121,7 @@ public class ArrayAdapter<T> extends BaseAdapter implements Filterable, ThemedSp
 
     // A copy of the original mObjects array, initialized from and then used instead as soon as
     // the mFilter ArrayFilter is used. mObjects will then only contain the filtered values.
+    @UnsupportedAppUsage
     private ArrayList<T> mOriginalValues;
     private ArrayFilter mFilter;
 
@@ -152,7 +153,8 @@ public class ArrayAdapter<T> extends BaseAdapter implements Filterable, ThemedSp
     }
 
     /**
-     * Constructor
+     * Constructor. This constructor will result in the underlying data collection being
+     * immutable, so methods such as {@link #clear()} will throw an exception.
      *
      * @param context The current context.
      * @param resource The resource ID for a layout file containing a TextView to use when
@@ -164,7 +166,8 @@ public class ArrayAdapter<T> extends BaseAdapter implements Filterable, ThemedSp
     }
 
     /**
-     * Constructor
+     * Constructor. This constructor will result in the underlying data collection being
+     * immutable, so methods such as {@link #clear()} will throw an exception.
      *
      * @param context The current context.
      * @param resource The resource ID for a layout file containing a layout to use when
@@ -218,6 +221,7 @@ public class ArrayAdapter<T> extends BaseAdapter implements Filterable, ThemedSp
      * Adds the specified object at the end of the array.
      *
      * @param object The object to add at the end of the array.
+     * @throws UnsupportedOperationException if the underlying data collection is immutable
      */
     public void add(@Nullable T object) {
         synchronized (mLock) {
@@ -261,6 +265,7 @@ public class ArrayAdapter<T> extends BaseAdapter implements Filterable, ThemedSp
      * Adds the specified items at the end of the array.
      *
      * @param items The items to add at the end of the array.
+     * @throws UnsupportedOperationException if the underlying data collection is immutable
      */
     public void addAll(T ... items) {
         synchronized (mLock) {
@@ -279,6 +284,7 @@ public class ArrayAdapter<T> extends BaseAdapter implements Filterable, ThemedSp
      *
      * @param object The object to insert into the array.
      * @param index The index at which the object must be inserted.
+     * @throws UnsupportedOperationException if the underlying data collection is immutable
      */
     public void insert(@Nullable T object, int index) {
         synchronized (mLock) {
@@ -296,6 +302,7 @@ public class ArrayAdapter<T> extends BaseAdapter implements Filterable, ThemedSp
      * Removes the specified object from the array.
      *
      * @param object The object to remove.
+     * @throws UnsupportedOperationException if the underlying data collection is immutable
      */
     public void remove(@Nullable T object) {
         synchronized (mLock) {
@@ -311,6 +318,8 @@ public class ArrayAdapter<T> extends BaseAdapter implements Filterable, ThemedSp
 
     /**
      * Remove all elements from the list.
+     *
+     * @throws UnsupportedOperationException if the underlying data collection is immutable
      */
     public void clear() {
         synchronized (mLock) {
@@ -526,6 +535,13 @@ public class ArrayAdapter<T> extends BaseAdapter implements Filterable, ThemedSp
      */
     @Override
     public CharSequence[] getAutofillOptions() {
+        // First check if app developer explicitly set them.
+        final CharSequence[] explicitOptions = super.getAutofillOptions();
+        if (explicitOptions != null) {
+            return explicitOptions;
+        }
+
+        // Otherwise, only return options that came from static resources.
         if (!mObjectsFromResources || mObjects == null || mObjects.isEmpty()) {
             return null;
         }

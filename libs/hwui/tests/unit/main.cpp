@@ -14,34 +14,28 @@
  * limitations under the License.
  */
 
-#include "gtest/gtest.h"
-#include "gmock/gmock.h"
-
-#include "Caches.h"
-#include "debug/GlesDriver.h"
-#include "debug/NullGlesDriver.h"
-#include "hwui/Typeface.h"
-#include "thread/TaskManager.h"
-#include "tests/common/LeakChecker.h"
-
+#include <getopt.h>
 #include <signal.h>
+
+#include "Properties.h"
+#include "gmock/gmock.h"
+#include "gtest/gtest.h"
+#include "hwui/Typeface.h"
+#include "tests/common/LeakChecker.h"
 
 using namespace std;
 using namespace android;
 using namespace android::uirenderer;
 
 static auto CRASH_SIGNALS = {
-        SIGABRT,
-        SIGSEGV,
-        SIGBUS,
+        SIGABRT, SIGSEGV, SIGBUS,
 };
 
 static map<int, struct sigaction> gSigChain;
 
 static void gtestSigHandler(int sig, siginfo_t* siginfo, void* context) {
     auto testinfo = ::testing::UnitTest::GetInstance()->current_test_info();
-    printf("[  FAILED  ] %s.%s\n", testinfo->test_case_name(),
-            testinfo->name());
+    printf("[  FAILED  ] %s.%s\n", testinfo->test_case_name(), testinfo->name());
     printf("[  FATAL!  ] Process crashed, aborting tests!\n");
     fflush(stdout);
 
@@ -51,11 +45,60 @@ static void gtestSigHandler(int sig, siginfo_t* siginfo, void* context) {
     raise(sig);
 }
 
+// For options that only exist in long-form. Anything in the
+// 0-255 range is reserved for short options (which just use their ASCII value)
+namespace LongOpts {
+enum {
+    Reserved = 255,
+    Renderer,
+};
+}
+
+static const struct option LONG_OPTIONS[] = {
+        {"renderer", required_argument, nullptr, LongOpts::Renderer}, {0, 0, 0, 0}};
+
+static RenderPipelineType parseRenderer(const char* renderer) {
+    // Anything that's not skiavk is skiagl
+    if (!strcmp(renderer, "skiavk")) {
+        return RenderPipelineType::SkiaVulkan;
+    }
+    return RenderPipelineType::SkiaGL;
+}
+
+struct Options {
+    RenderPipelineType renderer = RenderPipelineType::SkiaGL;
+};
+
+Options parseOptions(int argc, char* argv[]) {
+    int c;
+    opterr = 0;
+    Options opts;
+
+    while (true) {
+        /* getopt_long stores the option index here. */
+        int option_index = 0;
+
+        c = getopt_long(argc, argv, "", LONG_OPTIONS, &option_index);
+
+        if (c == -1) break;
+
+        switch (c) {
+            case 0:
+                // Option set a flag, don't need to do anything
+                // (although none of the current LONG_OPTIONS do this...)
+                break;
+
+            case LongOpts::Renderer:
+                opts.renderer = parseRenderer(optarg);
+                break;
+        }
+    }
+    return opts;
+}
+
 class TypefaceEnvironment : public testing::Environment {
 public:
-    virtual void SetUp() {
-        Typeface::setRobotoTypefaceForTest();
-    }
+    virtual void SetUp() { Typeface::setRobotoTypefaceForTest(); }
 };
 
 int main(int argc, char* argv[]) {
@@ -70,8 +113,11 @@ int main(int argc, char* argv[]) {
         gSigChain.insert(pair<int, struct sigaction>(sig, old_sa));
     }
 
-    // Replace the default GLES driver
-    debug::GlesDriver::replace(std::make_unique<debug::NullGlesDriver>());
+    // Avoid talking to SF
+    Properties::isolatedProcess = true;
+
+    auto opts = parseOptions(argc, argv);
+    Properties::overrideRenderPipelineType(opts.renderer);
 
     // Run the tests
     testing::InitGoogleTest(&argc, argv);
@@ -83,4 +129,3 @@ int main(int argc, char* argv[]) {
     test::LeakChecker::checkForLeaks();
     return ret;
 }
-

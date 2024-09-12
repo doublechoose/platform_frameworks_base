@@ -70,17 +70,15 @@ public class MbmsStreamingServiceBase extends IMbmsStreamingService.Stub {
         }
 
         final int uid = Binder.getCallingUid();
-        callback.asBinder().linkToDeath(new DeathRecipient() {
-            @Override
-            public void binderDied() {
-                onAppCallbackDied(uid, subscriptionId);
-            }
-        }, 0);
 
-        return initialize(new MbmsStreamingSessionCallback() {
+        int result = initialize(new MbmsStreamingSessionCallback() {
             @Override
             public void onError(final int errorCode, final String message) {
                 try {
+                    if (errorCode == MbmsErrors.UNKNOWN) {
+                        throw new IllegalArgumentException(
+                                "Middleware cannot send an unknown error.");
+                    }
                     callback.onError(errorCode, message);
                 } catch (RemoteException e) {
                     onAppCallbackDied(uid, subscriptionId);
@@ -105,6 +103,17 @@ public class MbmsStreamingServiceBase extends IMbmsStreamingService.Stub {
                 }
             }
         }, subscriptionId);
+
+        if (result == MbmsErrors.SUCCESS) {
+            callback.asBinder().linkToDeath(new DeathRecipient() {
+                @Override
+                public void binderDied() {
+                    onAppCallbackDied(uid, subscriptionId);
+                }
+            }, 0);
+        }
+
+        return result;
     }
 
 
@@ -161,17 +170,15 @@ public class MbmsStreamingServiceBase extends IMbmsStreamingService.Stub {
         }
 
         final int uid = Binder.getCallingUid();
-        callback.asBinder().linkToDeath(new DeathRecipient() {
-            @Override
-            public void binderDied() {
-                onAppCallbackDied(uid, subscriptionId);
-            }
-        }, 0);
 
-        return startStreaming(subscriptionId, serviceId, new StreamingServiceCallback() {
+        int result = startStreaming(subscriptionId, serviceId, new StreamingServiceCallback() {
             @Override
             public void onError(final int errorCode, final String message) {
                 try {
+                    if (errorCode == MbmsErrors.UNKNOWN) {
+                        throw new IllegalArgumentException(
+                                "Middleware cannot send an unknown error.");
+                    }
                     callback.onError(errorCode, message);
                 } catch (RemoteException e) {
                     onAppCallbackDied(uid, subscriptionId);
@@ -215,6 +222,17 @@ public class MbmsStreamingServiceBase extends IMbmsStreamingService.Stub {
                 }
             }
         });
+
+        if (result == MbmsErrors.SUCCESS) {
+            callback.asBinder().linkToDeath(new DeathRecipient() {
+                @Override
+                public void binderDied() {
+                    onAppCallbackDied(uid, subscriptionId);
+                }
+            }, 0);
+        }
+
+        return result;
     }
 
     /**
@@ -273,5 +291,22 @@ public class MbmsStreamingServiceBase extends IMbmsStreamingService.Stub {
      * @param subscriptionId The subscription ID the app is using.
      */
     public void onAppCallbackDied(int uid, int subscriptionId) {
+    }
+
+
+    // Following two methods exist to workaround b/124210145
+    /** @hide */
+    @SystemApi
+    @Override
+    public android.os.IBinder asBinder() {
+        return super.asBinder();
+    }
+
+    /** @hide */
+    @SystemApi
+    @Override
+    public boolean onTransact(int code, android.os.Parcel data, android.os.Parcel reply,
+            int flags) throws RemoteException {
+        return super.onTransact(code, data, reply, flags);
     }
 }

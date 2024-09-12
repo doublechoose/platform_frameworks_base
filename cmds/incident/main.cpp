@@ -21,10 +21,12 @@
 #include <android/os/BnIncidentReportStatusListener.h>
 #include <android/os/IIncidentManager.h>
 #include <android/os/IncidentReportArgs.h>
+#include <android/util/ProtoOutputStream.h>
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
 #include <utils/Looper.h>
 
+#include <cstring>
 #include <fcntl.h>
 #include <getopt.h>
 #include <stdio.h>
@@ -35,6 +37,9 @@ using namespace android;
 using namespace android::base;
 using namespace android::binder;
 using namespace android::os;
+using android::util::FIELD_COUNT_SINGLE;
+using android::util::FIELD_TYPE_STRING;
+using android::util::ProtoOutputStream;
 
 // ================================================================================
 class StatusListener : public BnIncidentReportStatusListener {
@@ -47,9 +52,13 @@ public:
     virtual Status onReportServiceStatus(const String16& service, int32_t status);
     virtual Status onReportFinished();
     virtual Status onReportFailed();
+
+    int getExitCodeOrElse(int defaultCode);
+ private:
+    int mExitCode;
 };
 
-StatusListener::StatusListener()
+StatusListener::StatusListener(): mExitCode(-1)
 {
 }
 
@@ -67,13 +76,15 @@ Status
 StatusListener::onReportSectionStatus(int32_t section, int32_t status)
 {
     fprintf(stderr, "section %d status %d\n", section, status);
+    ALOGD("section %d status %d\n", section, status);
     return Status::ok();
 }
 
 Status
 StatusListener::onReportServiceStatus(const String16& service, int32_t status)
 {
-    fprintf(stderr, "service '%s' status %d\n", String8(service).string(), status);
+    fprintf(stderr, "service '%s' status %d\n", String8(service).c_str(), status);
+    ALOGD("service '%s' status %d\n", String8(service).c_str(), status);
     return Status::ok();
 }
 
@@ -81,7 +92,8 @@ Status
 StatusListener::onReportFinished()
 {
     fprintf(stderr, "done\n");
-    exit(0);
+    ALOGD("done\n");
+    mExitCode = 0;
     return Status::ok();
 }
 
@@ -89,19 +101,52 @@ Status
 StatusListener::onReportFailed()
 {
     fprintf(stderr, "failed\n");
-    exit(1);
+    ALOGD("failed\n");
+    mExitCode = 1;
     return Status::ok();
+}
+
+int
+StatusListener::getExitCodeOrElse(int defaultCode) {
+    return mExitCode == -1 ? defaultCode : mExitCode;
+}
+
+// ================================================================================
+static void section_list(FILE* out) {
+    IncidentSection sections[INCIDENT_SECTION_COUNT];
+    int i = 0;
+    int j = 0;
+    // sort the sections based on id
+    while (i < INCIDENT_SECTION_COUNT) {
+        IncidentSection curr = INCIDENT_SECTIONS[i];
+        for (int k = 0; k < j; k++) {
+            if (curr.id > sections[k].id) {
+                continue;
+            }
+            IncidentSection tmp = curr;
+            curr = sections[k];
+            sections[k] = tmp;
+        }
+        sections[j] = curr;
+        i++;
+        j++;
+    }
+
+    fprintf(out, "available sections:\n");
+    for (int i = 0; i < INCIDENT_SECTION_COUNT; ++i) {
+        fprintf(out, "id: %4d, name: %s\n", sections[i].id, sections[i].name);
+    }
 }
 
 // ================================================================================
 static IncidentSection const*
 find_section(const char* name)
 {
-    size_t low = 0;
-    size_t high = INCIDENT_SECTION_COUNT - 1;
+    ssize_t low = 0;
+    ssize_t high = INCIDENT_SECTION_COUNT - 1;
 
     while (low <= high) {
-        size_t mid = (low + high) >> 1;
+        ssize_t mid = (low + high) / 2;
         IncidentSection const* section = INCIDENT_SECTIONS + mid;
 
         int cmp = strcmp(section->name, name);
@@ -117,6 +162,64 @@ find_section(const char* name)
 }
 
 // ================================================================================
+static int
+get_privacy_policy(const char* arg)
+{
+    if (strcmp(arg, "L") == 0
+        || strcmp(arg, "LOCAL") == 0) {
+      return PRIVACY_POLICY_LOCAL;
+    }
+    if (strcmp(arg, "E") == 0
+        || strcmp(arg, "EXPLICIT") == 0) {
+      return PRIVACY_POLICY_EXPLICIT;
+    }
+    if (strcmp(arg, "A") == 0
+        || strcmp(arg, "AUTO") == 0
+        || strcmp(arg, "AUTOMATIC") == 0) {
+      return PRIVACY_POLICY_AUTOMATIC;
+    }
+    return -1; // return the default value
+}
+
+// ================================================================================
+static bool
+parse_receiver_arg(const string& arg, string* pkg, string* cls)
+{
+    if (arg.length() == 0) {
+        return true;
+    }
+    size_t slash = arg.find('/');
+    if (slash == string::npos) {
+        return false;
+    }
+    if (slash == 0 || slash == arg.length() - 1) {
+        return false;
+    }
+    if (arg.find('/', slash+1) != string::npos) {
+        return false;
+    }
+    pkg->assign(arg, 0, slash);
+    cls->assign(arg, slash+1);
+    if ((*cls)[0] == '.') {
+        *cls = (*pkg) + (*cls);
+    }
+    return true;
+}
+
+// ================================================================================
+static int
+stream_output(const int read_fd, const int write_fd) {
+    while (true) {
+        int amt = splice(read_fd, NULL, write_fd, NULL, 4096, 0);
+        if (amt < 0) {
+            return errno;
+        } else if (amt == 0) {
+            return 0;
+        }
+    }
+}
+
+// ================================================================================
 static void
 usage(FILE* out)
 {
@@ -125,8 +228,17 @@ usage(FILE* out)
     fprintf(out, "Takes an incident report.\n");
     fprintf(out, "\n");
     fprintf(out, "OPTIONS\n");
+    fprintf(out, "  -l           list available sections\n");
+    fprintf(out, "  -p           privacy spec, LOCAL, EXPLICIT or AUTOMATIC. Default AUTOMATIC.\n");
+    fprintf(out, "  -r REASON    human readable description of why the report is taken.\n");
+    fprintf(out, "  -z           gzip the incident report, i.e. pipe the output through gzip.\n");
+    fprintf(out, "\n");
+    fprintf(out, "and one of these destinations:\n");
     fprintf(out, "  -b           (default) print the report to stdout (in proto format)\n");
     fprintf(out, "  -d           send the report into dropbox\n");
+    fprintf(out, "  -u           print a full report to stdout for dumpstate to zip as a bug\n");
+    fprintf(out, "               report. SECTION is ignored. Should only be called by dumpstate.\n");
+    fprintf(out, "  -s PKG/CLS   send broadcast to the broadcast receiver.\n");
     fprintf(out, "\n");
     fprintf(out, "  SECTION     the field numbers of the incident report fields to include\n");
     fprintf(out, "\n");
@@ -137,25 +249,81 @@ main(int argc, char** argv)
 {
     Status status;
     IncidentReportArgs args;
-    enum { DEST_DROPBOX, DEST_STDOUT } destination = DEST_STDOUT;
+    enum { DEST_UNSET, DEST_DROPBOX, DEST_STDOUT, DEST_BROADCAST, DEST_DUMPSTATE } destination = DEST_UNSET;
+    int privacyPolicy = PRIVACY_POLICY_AUTOMATIC;
+    string reason;
+    string receiverArg;
 
     // Parse the args
     int opt;
-    while ((opt = getopt(argc, argv, "bhd")) != -1) {
+    while ((opt = getopt(argc, argv, "bhdlp:r:s:uz")) != -1) {
         switch (opt) {
-            case 'b':
-                destination = DEST_STDOUT;
-                break;
             case 'h':
                 usage(stdout);
                 return 0;
+            case 'l':
+                section_list(stdout);
+                return 0;
+            case 'b':
+                if (!(destination == DEST_UNSET || destination == DEST_STDOUT)) {
+                    usage(stderr);
+                    return 1;
+                }
+                destination = DEST_STDOUT;
+                break;
             case 'd':
+                if (!(destination == DEST_UNSET || destination == DEST_DROPBOX)) {
+                    usage(stderr);
+                    return 1;
+                }
                 destination = DEST_DROPBOX;
+                break;
+            case 'u':
+                if (!(destination == DEST_UNSET || destination == DEST_DUMPSTATE)) {
+                    usage(stderr);
+                    return 1;
+                }
+                destination = DEST_DUMPSTATE;
+                break;
+            case 'p':
+                privacyPolicy = get_privacy_policy(optarg);
+                break;
+            case 'r':
+                if (reason.size() > 0) {
+                    usage(stderr);
+                    return 1;
+                }
+                reason = optarg;
+                break;
+            case 's':
+                if (destination != DEST_UNSET) {
+                    usage(stderr);
+                    return 1;
+                }
+                destination = DEST_BROADCAST;
+                receiverArg = optarg;
+                break;
+            case 'z':
+                args.setGzip(true);
                 break;
             default:
                 usage(stderr);
                 return 1;
         }
+    }
+    if (destination == DEST_UNSET) {
+        destination = DEST_STDOUT;
+    }
+
+    string pkg;
+    string cls;
+    if (parse_receiver_arg(receiverArg, &pkg, &cls)) {
+        args.setReceiverPkg(pkg);
+        args.setReceiverCls(cls);
+    } else {
+        fprintf(stderr, "badly formatted -s package/class option: %s\n\n", receiverArg.c_str());
+        usage(stderr);
+        return 1;
     }
 
     if (optind == argc) {
@@ -171,6 +339,7 @@ main(int argc, char** argv)
                 } else {
                     IncidentSection const* ic = find_section(arg);
                     if (ic == NULL) {
+                        ALOGD("Invalid section: %s\n", arg);
                         fprintf(stderr, "Invalid section: %s\n", arg);
                         return 1;
                     }
@@ -179,8 +348,15 @@ main(int argc, char** argv)
             }
         }
     }
+    args.setPrivacyPolicy(privacyPolicy);
 
-
+    if (reason.size() > 0) {
+        ProtoOutputStream proto;
+        proto.write(/* reason field id */ 2 | FIELD_TYPE_STRING | FIELD_COUNT_SINGLE, reason);
+        vector<uint8_t> header;
+        proto.serializeToVector(&header);
+        args.addHeader(header);
+    }
 
     // Start the thread pool.
     sp<ProcessState> ps(ProcessState::self());
@@ -205,28 +381,29 @@ main(int argc, char** argv)
     if (destination == DEST_STDOUT) {
         // Call into the service
         sp<StatusListener> listener(new StatusListener());
-        status = service->reportIncidentToStream(args, listener, writeEnd);
+        status = service->reportIncidentToStream(args, listener, std::move(writeEnd));
 
         if (!status.isOk()) {
-            fprintf(stderr, "reportIncident returned \"%s\"\n", status.toString8().string());
+            fprintf(stderr, "reportIncident returned \"%s\"\n", status.toString8().c_str());
+            return 1;
         }
 
         // Wait for the result and print out the data they send.
         //IPCThreadState::self()->joinThreadPool();
-
-        while (true) {
-            int amt = splice(fds[0], NULL, STDOUT_FILENO, NULL, 4096, 0);
-            fprintf(stderr, "spliced %d bytes\n", amt);
-            if (amt < 0) {
-                return errno;
-            } else if (amt == 0) {
-                return 0;
-            }
+        return listener->getExitCodeOrElse(stream_output(fds[0], STDOUT_FILENO));
+    } else if (destination == DEST_DUMPSTATE) {
+        // Call into the service
+        sp<StatusListener> listener(new StatusListener());
+        status = service->reportIncidentToDumpstate(std::move(writeEnd), listener);
+        if (!status.isOk()) {
+            fprintf(stderr, "reportIncident returned \"%s\"\n", status.toString8().c_str());
+            return 1;
         }
+        return listener->getExitCodeOrElse(stream_output(fds[0], STDOUT_FILENO));
     } else {
         status = service->reportIncident(args);
         if (!status.isOk()) {
-            fprintf(stderr, "reportIncident returned \"%s\"\n", status.toString8().string());
+            fprintf(stderr, "reportIncident returned \"%s\"\n", status.toString8().c_str());
             return 1;
         } else {
             return 0;

@@ -18,33 +18,41 @@
 
 //#define LOG_NDEBUG 0
 
-#include <android/hardware/power/1.0/IPower.h>
-#include "JNIHelp.h"
-#include "jni.h"
-
-#include <nativehelper/ScopedUtfChars.h>
-
-#include <limits.h>
-
-#include <android-base/chrono_utils.h>
-#include <android_runtime/AndroidRuntime.h>
-#include <android_runtime/Log.h>
-#include <utils/Timers.h>
-#include <utils/misc.h>
-#include <utils/String8.h>
-#include <utils/Log.h>
-#include <hardware/power.h>
-#include <hardware_legacy/power.h>
-#include <suspend/autosuspend.h>
-
 #include "com_android_server_power_PowerManagerService.h"
 
-using android::hardware::Return;
-using android::hardware::Void;
-using android::hardware::power::V1_0::IPower;
-using android::hardware::power::V1_0::PowerHint;
-using android::hardware::power::V1_0::Feature;
+#include <aidl/android/hardware/power/Boost.h>
+#include <aidl/android/hardware/power/Mode.h>
+#include <aidl/android/system/suspend/ISystemSuspend.h>
+#include <aidl/android/system/suspend/IWakeLock.h>
+#include <android-base/chrono_utils.h>
+#include <android/binder_manager.h>
+#include <android/system/suspend/ISuspendControlService.h>
+#include <android/system/suspend/internal/ISuspendControlServiceInternal.h>
+#include <android_runtime/AndroidRuntime.h>
+#include <android_runtime/Log.h>
+#include <binder/IServiceManager.h>
+#include <com_android_input_flags.h>
+#include <gui/SurfaceComposerClient.h>
+#include <hardware_legacy/power.h>
+#include <hidl/ServiceManagement.h>
+#include <limits.h>
+#include <nativehelper/JNIHelp.h>
+#include <nativehelper/ScopedUtfChars.h>
+#include <powermanager/PowerHalController.h>
+#include <utils/Log.h>
+#include <utils/String8.h>
+#include <utils/Timers.h>
+#include <utils/misc.h>
+
+#include "jni.h"
+
+using aidl::android::hardware::power::Boost;
+using aidl::android::hardware::power::Mode;
+using aidl::android::system::suspend::ISystemSuspend;
+using aidl::android::system::suspend::IWakeLock;
+using aidl::android::system::suspend::WakeLockType;
 using android::String8;
+using android::system::suspend::ISuspendControlService;
 
 namespace android {
 
@@ -57,13 +65,11 @@ static struct {
 // ----------------------------------------------------------------------------
 
 static jobject gPowerManagerServiceObj;
-sp<IPower> gPowerHal = nullptr;
-bool gPowerHalExists = true;
-std::mutex gPowerHalMutex;
+static power::PowerHalController gPowerHalController;
 static nsecs_t gLastEventTime[USER_ACTIVITY_EVENT_LAST + 1];
 
 // Throttling interval for user activity calls.
-static const nsecs_t MIN_TIME_BETWEEN_USERACTIVITIES = 500 * 1000000L; // 500ms
+static const nsecs_t MIN_TIME_BETWEEN_USERACTIVITIES = 100 * 1000000L; // 100ms
 
 // ----------------------------------------------------------------------------
 
@@ -77,39 +83,23 @@ static bool checkAndClearExceptionFromCallback(JNIEnv* env, const char* methodNa
     return false;
 }
 
-// Check validity of current handle to the power HAL service, and call getService() if necessary.
-// The caller must be holding gPowerHalMutex.
-bool getPowerHal() {
-    if (gPowerHalExists && gPowerHal == nullptr) {
-        gPowerHal = IPower::getService();
-        if (gPowerHal != nullptr) {
-            ALOGI("Loaded power HAL service");
-        } else {
-            ALOGI("Couldn't load power HAL service");
-            gPowerHalExists = false;
-        }
-    }
-    return gPowerHal != nullptr;
+static void setPowerBoost(Boost boost, int32_t durationMs) {
+    gPowerHalController.setBoost(boost, durationMs);
+    SurfaceComposerClient::notifyPowerBoost(static_cast<int32_t>(boost));
 }
 
-// Check if a call to a power HAL function failed; if so, log the failure and invalidate the
-// current handle to the power HAL service. The caller must be holding gPowerHalMutex.
-static void processReturn(const Return<void> &ret, const char* functionName) {
-    if (!ret.isOk()) {
-        ALOGE("%s() failed: power HAL service not available.", functionName);
-        gPowerHal = nullptr;
+static bool setPowerMode(Mode mode, bool enabled) {
+    android::base::Timer t;
+    auto result = gPowerHalController.setMode(mode, enabled);
+    if (mode == Mode::INTERACTIVE && t.duration() > 20ms) {
+        ALOGD("Excessive delay in setting interactive mode to %s while turning screen %s",
+              enabled ? "true" : "false", enabled ? "on" : "off");
     }
+    return result.isOk();
 }
 
-void android_server_PowerManagerService_userActivity(nsecs_t eventTime, int32_t eventType) {
-    // Tell the power HAL when user activity occurs.
-    gPowerHalMutex.lock();
-    if (getPowerHal()) {
-        Return<void> ret = gPowerHal->powerHint(PowerHint::INTERACTION, 0);
-        processReturn(ret, "powerHint");
-    }
-    gPowerHalMutex.unlock();
-
+void android_server_PowerManagerService_userActivity(nsecs_t eventTime, int32_t eventType,
+                                                     ui::LogicalDisplayId displayId) {
     if (gPowerManagerServiceObj) {
         // Throttle calls into user activity by event type.
         // We're a little conservative about argument checking here in case the caller
@@ -120,18 +110,89 @@ void android_server_PowerManagerService_userActivity(nsecs_t eventTime, int32_t 
                 eventTime = now;
             }
 
-            if (gLastEventTime[eventType] + MIN_TIME_BETWEEN_USERACTIVITIES > eventTime) {
-                return;
+            if (!com::android::input::flags::rate_limit_user_activity_poke_in_dispatcher()) {
+                if (gLastEventTime[eventType] + MIN_TIME_BETWEEN_USERACTIVITIES > eventTime) {
+                    return;
+                }
+                gLastEventTime[eventType] = eventTime;
             }
-            gLastEventTime[eventType] = eventTime;
         }
+        // Note that the below PowerManagerService method may call setPowerBoost.
 
         JNIEnv* env = AndroidRuntime::getJNIEnv();
 
         env->CallVoidMethod(gPowerManagerServiceObj,
-                gPowerManagerServiceClassInfo.userActivityFromNative,
-                nanoseconds_to_milliseconds(eventTime), eventType, 0);
+                            gPowerManagerServiceClassInfo.userActivityFromNative,
+                            nanoseconds_to_milliseconds(eventTime), eventType, displayId.val(), 0);
         checkAndClearExceptionFromCallback(env, "userActivityFromNative");
+    }
+}
+
+static std::shared_ptr<ISystemSuspend> gSuspendHal = nullptr;
+static sp<ISuspendControlService> gSuspendControl = nullptr;
+static sp<system::suspend::internal::ISuspendControlServiceInternal> gSuspendControlInternal =
+        nullptr;
+static std::shared_ptr<IWakeLock> gSuspendBlocker = nullptr;
+static std::mutex gSuspendMutex;
+
+// Assume SystemSuspend HAL is always alive.
+// TODO: Force device to restart if SystemSuspend HAL dies.
+std::shared_ptr<ISystemSuspend> getSuspendHal() {
+    static std::once_flag suspendHalFlag;
+    std::call_once(suspendHalFlag, []() {
+        const std::string suspendInstance = std::string() + ISystemSuspend::descriptor + "/default";
+        gSuspendHal = ISystemSuspend::fromBinder(
+                ndk::SpAIBinder(AServiceManager_waitForService(suspendInstance.c_str())));
+        assert(gSuspendHal != nullptr);
+    });
+    return gSuspendHal;
+}
+
+sp<ISuspendControlService> getSuspendControl() {
+    static std::once_flag suspendControlFlag;
+    std::call_once(suspendControlFlag, [](){
+        gSuspendControl = waitForService<ISuspendControlService>(String16("suspend_control"));
+        LOG_ALWAYS_FATAL_IF(gSuspendControl == nullptr);
+    });
+    return gSuspendControl;
+}
+
+sp<system::suspend::internal::ISuspendControlServiceInternal> getSuspendControlInternal() {
+    static std::once_flag suspendControlFlag;
+    std::call_once(suspendControlFlag, []() {
+        gSuspendControlInternal =
+                waitForService<system::suspend::internal::ISuspendControlServiceInternal>(
+                        String16("suspend_control_internal"));
+        LOG_ALWAYS_FATAL_IF(gSuspendControlInternal == nullptr);
+    });
+    return gSuspendControlInternal;
+}
+
+void enableAutoSuspend() {
+    static bool enabled = false;
+    if (!enabled) {
+        static sp<IBinder> autosuspendClientToken = new BBinder();
+        sp<system::suspend::internal::ISuspendControlServiceInternal> suspendControl =
+                getSuspendControlInternal();
+        suspendControl->enableAutosuspend(autosuspendClientToken, &enabled);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(gSuspendMutex);
+        if (gSuspendBlocker) {
+            gSuspendBlocker->release();
+            gSuspendBlocker = nullptr;
+        }
+    }
+}
+
+void disableAutoSuspend() {
+    std::lock_guard<std::mutex> lock(gSuspendMutex);
+    if (!gSuspendBlocker) {
+        std::shared_ptr<ISystemSuspend> suspendHal = getSuspendHal();
+        suspendHal->acquireWakeLock(WakeLockType::PARTIAL, "PowerManager.SuspendLockout",
+                                    &gSuspendBlocker);
+        assert(gSuspendBlocker != nullptr);
     }
 }
 
@@ -139,10 +200,7 @@ void android_server_PowerManagerService_userActivity(nsecs_t eventTime, int32_t 
 
 static void nativeInit(JNIEnv* env, jobject obj) {
     gPowerManagerServiceObj = env->NewGlobalRef(obj);
-
-    gPowerHalMutex.lock();
-    getPowerHal();
-    gPowerHalMutex.unlock();
+    gPowerHalController.init();
 }
 
 static void nativeAcquireSuspendBlocker(JNIEnv *env, jclass /* clazz */, jstring nameStr) {
@@ -155,69 +213,51 @@ static void nativeReleaseSuspendBlocker(JNIEnv *env, jclass /* clazz */, jstring
     release_wake_lock(name.c_str());
 }
 
-static void nativeSetInteractive(JNIEnv* /* env */, jclass /* clazz */, jboolean enable) {
-    std::lock_guard<std::mutex> lock(gPowerHalMutex);
-    if (getPowerHal()) {
-        android::base::Timer t;
-        Return<void> ret = gPowerHal->setInteractive(enable);
-        processReturn(ret, "setInteractive");
-        if (t.duration() > 20ms) {
-            ALOGD("Excessive delay in setInteractive(%s) while turning screen %s",
-                  enable ? "true" : "false", enable ? "on" : "off");
-        }
-    }
-}
-
 static void nativeSetAutoSuspend(JNIEnv* /* env */, jclass /* clazz */, jboolean enable) {
     if (enable) {
         android::base::Timer t;
-        autosuspend_enable();
+        enableAutoSuspend();
         if (t.duration() > 100ms) {
             ALOGD("Excessive delay in autosuspend_enable() while turning screen off");
         }
     } else {
         android::base::Timer t;
-        autosuspend_disable();
+        disableAutoSuspend();
         if (t.duration() > 100ms) {
             ALOGD("Excessive delay in autosuspend_disable() while turning screen on");
         }
     }
 }
 
-static void nativeSendPowerHint(JNIEnv *env, jclass clazz, jint hintId, jint data) {
-    std::lock_guard<std::mutex> lock(gPowerHalMutex);
-    if (getPowerHal()) {
-        Return<void> ret =  gPowerHal->powerHint((PowerHint)hintId, data);
-        processReturn(ret, "powerHint");
-    }
+static void nativeSetPowerBoost(JNIEnv* /* env */, jclass /* clazz */, jint boost,
+                                jint durationMs) {
+    setPowerBoost(static_cast<Boost>(boost), durationMs);
 }
 
-static void nativeSetFeature(JNIEnv *env, jclass clazz, jint featureId, jint data) {
-    std::lock_guard<std::mutex> lock(gPowerHalMutex);
-    if (getPowerHal()) {
-        Return<void> ret = gPowerHal->setFeature((Feature)featureId, static_cast<bool>(data));
-        processReturn(ret, "setFeature");
-    }
+static jboolean nativeSetPowerMode(JNIEnv* /* env */, jclass /* clazz */, jint mode,
+                                   jboolean enabled) {
+    return setPowerMode(static_cast<Mode>(mode), enabled);
+}
+
+static bool nativeForceSuspend(JNIEnv* /* env */, jclass /* clazz */) {
+    bool retval = false;
+    getSuspendControlInternal()->forceSuspend(&retval);
+    return retval;
 }
 
 // ----------------------------------------------------------------------------
 
 static const JNINativeMethod gPowerManagerServiceMethods[] = {
-    /* name, signature, funcPtr */
-    { "nativeInit", "()V",
-            (void*) nativeInit },
-    { "nativeAcquireSuspendBlocker", "(Ljava/lang/String;)V",
-            (void*) nativeAcquireSuspendBlocker },
-    { "nativeReleaseSuspendBlocker", "(Ljava/lang/String;)V",
-            (void*) nativeReleaseSuspendBlocker },
-    { "nativeSetInteractive", "(Z)V",
-            (void*) nativeSetInteractive },
-    { "nativeSetAutoSuspend", "(Z)V",
-            (void*) nativeSetAutoSuspend },
-    { "nativeSendPowerHint", "(II)V",
-            (void*) nativeSendPowerHint },
-    { "nativeSetFeature", "(II)V",
-            (void*) nativeSetFeature },
+        /* name, signature, funcPtr */
+        {"nativeInit", "()V", (void*)nativeInit},
+        {"nativeAcquireSuspendBlocker", "(Ljava/lang/String;)V",
+         (void*)nativeAcquireSuspendBlocker},
+        {"nativeForceSuspend", "()Z", (void*)nativeForceSuspend},
+        {"nativeReleaseSuspendBlocker", "(Ljava/lang/String;)V",
+         (void*)nativeReleaseSuspendBlocker},
+        {"nativeSetAutoSuspend", "(Z)V", (void*)nativeSetAutoSuspend},
+        {"nativeSetPowerBoost", "(II)V", (void*)nativeSetPowerBoost},
+        {"nativeSetPowerMode", "(IZ)Z", (void*)nativeSetPowerMode},
 };
 
 #define FIND_CLASS(var, className) \
@@ -244,11 +284,13 @@ int register_android_server_PowerManagerService(JNIEnv* env) {
     FIND_CLASS(clazz, "com/android/server/power/PowerManagerService");
 
     GET_METHOD_ID(gPowerManagerServiceClassInfo.userActivityFromNative, clazz,
-            "userActivityFromNative", "(JII)V");
+            "userActivityFromNative", "(JIII)V");
 
-    // Initialize
-    for (int i = 0; i <= USER_ACTIVITY_EVENT_LAST; i++) {
-        gLastEventTime[i] = LLONG_MIN;
+    if (!com::android::input::flags::rate_limit_user_activity_poke_in_dispatcher()) {
+        // Initialize
+        for (int i = 0; i <= USER_ACTIVITY_EVENT_LAST; i++) {
+            gLastEventTime[i] = LLONG_MIN;
+        }
     }
     gPowerManagerServiceObj = NULL;
     return 0;

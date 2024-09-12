@@ -17,8 +17,8 @@
 package com.android.providers.settings;
 
 import static junit.framework.Assert.assertEquals;
-import static junit.framework.Assert.assertSame;
 import static junit.framework.Assert.assertNull;
+import static junit.framework.Assert.assertSame;
 import static junit.framework.Assert.fail;
 
 import android.content.ContentResolver;
@@ -32,6 +32,7 @@ import android.os.SystemClock;
 import android.os.UserHandle;
 import android.provider.Settings;
 import android.util.Log;
+
 import org.junit.Test;
 
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -127,17 +128,18 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
         }
     }
 
-    @Test
-    public void testSelectAllSecureViaProviderApi() throws Exception {
-        setSettingViaProviderApiAndAssertSuccessfulChange(SETTING_TYPE_SECURE,
-                FAKE_SETTING_NAME, FAKE_SETTING_VALUE, false);
-        try {
-            queryAllSettingsViaProviderApiSettingAndAssertSettingPresent(SETTING_TYPE_SECURE,
-                    FAKE_SETTING_NAME);
-        } finally {
-            deleteStringViaProviderApi(SETTING_TYPE_SECURE, FAKE_SETTING_NAME);
-        }
-    }
+    // TODO(b/142206242): make this less flaky and re-enable it
+//    @Test
+//    public void testSelectAllSecureViaProviderApi() throws Exception {
+//        setSettingViaProviderApiAndAssertSuccessfulChange(SETTING_TYPE_SECURE,
+//                FAKE_SETTING_NAME, FAKE_SETTING_VALUE, false);
+//        try {
+//            queryAllSettingsViaProviderApiSettingAndAssertSettingPresent(SETTING_TYPE_SECURE,
+//                    FAKE_SETTING_NAME);
+//        } finally {
+//            deleteStringViaProviderApi(SETTING_TYPE_SECURE, FAKE_SETTING_NAME);
+//        }
+//    }
 
     @Test
     public void testSelectAllSystemViaProviderApi() throws Exception {
@@ -186,7 +188,6 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
         int insertedCount = 0;
         try {
             for (; insertedCount < 1200; insertedCount++) {
-                Log.w(LOG_TAG, "Adding app specific setting: " + insertedCount);
                 insertStringViaProviderApi(SETTING_TYPE_SYSTEM,
                         String.valueOf(insertedCount), FAKE_SETTING_VALUE, false);
             }
@@ -195,7 +196,6 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
             // expected
         } finally {
             for (; insertedCount >= 0; insertedCount--) {
-                Log.w(LOG_TAG, "Removing app specific setting: " + insertedCount);
                 deleteStringViaProviderApi(SETTING_TYPE_SYSTEM,
                         String.valueOf(insertedCount));
             }
@@ -259,7 +259,7 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
                     FAKE_SETTING_VALUE, false);
 
             // Reset the changes made by the "shell/root" package
-            resetToDefaultsViaShell(type, "shell");
+            resetToDefaultsViaShell(type, "com.android.shell");
             resetToDefaultsViaShell(type, "root");
 
             // Make sure the old APIs don't set defaults
@@ -273,7 +273,7 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
                     FAKE_SETTING_VALUE_2, false);
 
             // Reset the changes made by this package
-            resetToDefaultsViaShell(type, "shell");
+            resetToDefaultsViaShell(type, "com.android.shell");
             resetToDefaultsViaShell(type, "root");
 
             // Make sure the old APIs don't set defaults
@@ -314,7 +314,7 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
                     FAKE_SETTING_VALUE_2, "TOKEN2", false);
 
             // Reset settings associated with TOKEN1
-            resetToDefaultsViaShell(type, "shell", "TOKEN1");
+            resetToDefaultsViaShell(type, "com.android.shell", "TOKEN1");
             resetToDefaultsViaShell(type, "root", "TOKEN1");
 
             // Make sure TOKEN1 settings are reset
@@ -326,7 +326,7 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
                     FAKE_SETTING_NAME_1));
 
             // Reset settings associated with TOKEN2
-            resetToDefaultsViaShell(type, "shell", "TOKEN2");
+            resetToDefaultsViaShell(type, "com.android.shell", "TOKEN2");
             resetToDefaultsViaShell(type, "root", "TOKEN2");
 
             // Make sure TOKEN2 settings are reset
@@ -380,10 +380,11 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
         }
     }
 
-    @Test
-    public void testResetModeUntrustedClearGlobal() throws Exception {
-        testResetModeUntrustedClearCommon(SETTING_TYPE_GLOBAL);
-    }
+    // TODO(b/142206242): make this less flaky and re-enable it
+//    @Test
+//    public void testResetModeUntrustedClearGlobal() throws Exception {
+//        testResetModeUntrustedClearCommon(SETTING_TYPE_GLOBAL);
+//    }
 
     @Test
     public void testResetModeUntrustedClearSecure() throws Exception {
@@ -421,10 +422,11 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
         }
     }
 
-    @Test
-    public void testResetModeTrustedDefaultsGlobal() throws Exception {
-        testResetModeTrustedDefaultsCommon(SETTING_TYPE_GLOBAL);
-    }
+    // TODO(b/142206242): make this less flaky and re-enable it
+//    @Test
+//    public void testResetModeTrustedDefaultsGlobal() throws Exception {
+//        testResetModeTrustedDefaultsCommon(SETTING_TYPE_GLOBAL);
+//    }
 
     @Test
     public void testResetModeTrustedDefaultsSecure() throws Exception {
@@ -459,6 +461,31 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
             // Make sure we have a clean slate.
             putSetting(type, FAKE_SETTING_NAME, null);
             setSettingViaShell(type, FAKE_SETTING_NAME_1, null, true);
+        }
+    }
+
+    // To prevent FRP bypasses, the SECURE_FRP_MODE setting should not be reset when all other
+    // settings are reset.  But it should still be possible to explicitly set its value.
+    @Test
+    public void testSecureFrpModeSettingCannotBeReset() throws Exception {
+        final String name = Settings.Global.SECURE_FRP_MODE;
+        final String origValue = getSetting(SETTING_TYPE_GLOBAL, name);
+        setSettingViaShell(SETTING_TYPE_GLOBAL, name, "1", false);
+        try {
+            assertEquals("1", getSetting(SETTING_TYPE_GLOBAL, name));
+            for (int type : new int[] { SETTING_TYPE_GLOBAL, SETTING_TYPE_SECURE }) {
+                resetSettingsViaShell(type, Settings.RESET_MODE_UNTRUSTED_DEFAULTS);
+                resetSettingsViaShell(type, Settings.RESET_MODE_UNTRUSTED_CHANGES);
+                resetSettingsViaShell(type, Settings.RESET_MODE_TRUSTED_DEFAULTS);
+            }
+            // The value should still be "1".  It should not have been reset to null.
+            assertEquals("1", getSetting(SETTING_TYPE_GLOBAL, name));
+            // It should still be possible to explicitly set the value to "0".
+            setSettingViaShell(SETTING_TYPE_GLOBAL, name, "0", false);
+            assertEquals("0", getSetting(SETTING_TYPE_GLOBAL, name));
+        } finally {
+            setSettingViaShell(SETTING_TYPE_GLOBAL, name, origValue, false);
+            assertEquals(origValue, getSetting(SETTING_TYPE_GLOBAL, name));
         }
     }
 
@@ -614,7 +641,7 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
             final String name, final String value, final int userId) throws Exception {
         ContentResolver contentResolver = getContext().getContentResolver();
 
-        final Uri settingUri = getBaseUriForType(type);
+        final Uri settingUri = getBaseUriForType(type).buildUpon().appendPath(name).build();
 
         final AtomicBoolean success = new AtomicBoolean();
 
@@ -641,20 +668,22 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
 
             final long startTimeMillis = SystemClock.uptimeMillis();
             synchronized (mLock) {
-                if (success.get()) {
-                    return;
-                }
-                final long elapsedTimeMillis = SystemClock.uptimeMillis() - startTimeMillis;
-                if (elapsedTimeMillis > WAIT_FOR_SETTING_URI_CHANGE_TIMEOUT_MILLIS) {
-                    fail("Could not change setting for "
-                            + WAIT_FOR_SETTING_URI_CHANGE_TIMEOUT_MILLIS + " ms");
-                }
-                final long remainingTimeMillis = WAIT_FOR_SETTING_URI_CHANGE_TIMEOUT_MILLIS
-                        - elapsedTimeMillis;
-                try {
-                    mLock.wait(remainingTimeMillis);
-                } catch (InterruptedException ie) {
-                    /* ignore */
+                while (true) {
+                    if (success.get()) {
+                        return;
+                    }
+                    final long elapsedTimeMillis = SystemClock.uptimeMillis() - startTimeMillis;
+                    if (elapsedTimeMillis >= WAIT_FOR_SETTING_URI_CHANGE_TIMEOUT_MILLIS) {
+                        fail("Could not change setting for "
+                                + WAIT_FOR_SETTING_URI_CHANGE_TIMEOUT_MILLIS + " ms");
+                    }
+                    final long remainingTimeMillis = WAIT_FOR_SETTING_URI_CHANGE_TIMEOUT_MILLIS
+                            - elapsedTimeMillis;
+                    try {
+                        mLock.wait(remainingTimeMillis);
+                    } catch (InterruptedException ie) {
+                        /* ignore */
+                    }
                 }
             }
         } finally {

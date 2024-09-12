@@ -17,42 +17,49 @@
 #ifndef ANDROID_HWUI_VPATH_H
 #define ANDROID_HWUI_VPATH_H
 
-#include "hwui/Canvas.h"
-#include "hwui/Bitmap.h"
 #include "DisplayList.h"
+#include "hwui/Bitmap.h"
+#include "hwui/Canvas.h"
+#include "renderthread/CacheManager.h"
 
 #include <SkBitmap.h>
+#include <SkCanvas.h>
 #include <SkColor.h>
 #include <SkColorFilter.h>
-#include <SkCanvas.h>
 #include <SkMatrix.h>
 #include <SkPaint.h>
 #include <SkPath.h>
 #include <SkPathMeasure.h>
 #include <SkRect.h>
+#include <SkRefCnt.h>
 #include <SkShader.h>
+#include <SkSurface.h>
 
 #include <cutils/compiler.h>
 #include <stddef.h>
-#include <vector>
 #include <string>
+#include <vector>
 
 namespace android {
 namespace uirenderer {
 
 // Debug
 #if DEBUG_VECTOR_DRAWABLE
-    #define VECTOR_DRAWABLE_LOGD(...) ALOGD(__VA_ARGS__)
+#define VECTOR_DRAWABLE_LOGD(...) ALOGD(__VA_ARGS__)
 #else
-    #define VECTOR_DRAWABLE_LOGD(...)
+#define VECTOR_DRAWABLE_LOGD(...)
 #endif
 
 namespace VectorDrawable {
-#define VD_SET_PRIMITIVE_FIELD_WITH_FLAG(field, value, flag) (VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(field, (value)) ? ((flag) = true, true) : false)
+#define VD_SET_PRIMITIVE_FIELD_WITH_FLAG(field, value, flag) \
+    (VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(field, (value)) ? ((flag) = true, true) : false)
 #define VD_SET_PROP(field, value) ((value) != (field) ? ((field) = (value), true) : false)
-#define VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(field, value) ({ bool retVal = VD_SET_PROP((mPrimitiveFields.field), (value));\
-    onPropertyChanged(); retVal;})
-#define UPDATE_SKPROP(field, value) ({bool retVal = ((field) != (value)); if ((field) != (value)) SkRefCnt_SafeAssign((field), (value)); retVal;})
+#define VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(field, value)               \
+    ({                                                                \
+        bool retVal = VD_SET_PROP((mPrimitiveFields.field), (value)); \
+        onPropertyChanged();                                          \
+        retVal;                                                       \
+    })
 
 /* A VectorDrawable is composed of a tree of nodes.
  * Each node can be a group node, or a path.
@@ -83,57 +90,52 @@ class PropertyChangedListener {
 public:
     PropertyChangedListener(bool* dirty, bool* stagingDirty)
             : mDirty(dirty), mStagingDirty(stagingDirty) {}
-    void onPropertyChanged() {
-            *mDirty = true;
-    }
-    void onStagingPropertyChanged() {
-            *mStagingDirty = true;
-    }
+    void onPropertyChanged() { *mDirty = true; }
+    void onStagingPropertyChanged() { *mStagingDirty = true; }
+
 private:
     bool* mDirty;
     bool* mStagingDirty;
 };
 
-class ANDROID_API Node {
+class Node {
 public:
     class Properties {
     public:
         explicit Properties(Node* node) : mNode(node) {}
-        inline void onPropertyChanged() {
-            mNode->onPropertyChanged(this);
-        }
+        inline void onPropertyChanged() { mNode->onPropertyChanged(this); }
+
     private:
         Node* mNode;
     };
-    Node(const Node& node) {
-        mName = node.mName;
-    }
+    Node(const Node& node) { mName = node.mName; }
     Node() {}
     virtual void draw(SkCanvas* outCanvas, bool useStagingData) = 0;
     virtual void dump() = 0;
-    void setName(const char* name) {
-        mName = name;
-    }
+    void setName(const char* name) { mName = name; }
     virtual void setPropertyChangedListener(PropertyChangedListener* listener) {
         mPropertyChangedListener = listener;
     }
     virtual void onPropertyChanged(Properties* properties) = 0;
-    virtual ~Node(){}
+    virtual ~Node() {}
     virtual void syncProperties() = 0;
+    virtual void setAntiAlias(bool aa) = 0;
+
+    virtual void forEachFillColor(const std::function<void(SkColor)>& func) const { }
+
 protected:
     std::string mName;
     PropertyChangedListener* mPropertyChangedListener = nullptr;
 };
 
-class ANDROID_API Path : public Node {
+class Path : public Node {
 public:
-    struct ANDROID_API Data {
+    struct Data {
         std::vector<char> verbs;
         std::vector<size_t> verbSizes;
         std::vector<float> points;
         bool operator==(const Data& data) const {
-            return verbs == data.verbs && verbSizes == data.verbSizes
-                    && points == data.points;
+            return verbs == data.verbs && verbSizes == data.verbSizes && points == data.points;
         }
     };
 
@@ -154,11 +156,9 @@ public:
             }
             mData = data;
             onPropertyChanged();
+        }
+        const Data& getData() const { return mData; }
 
-        }
-        const Data& getData() const {
-            return mData;
-        }
     private:
         Data mData;
     };
@@ -175,7 +175,7 @@ public:
             if (mPropertyChangedListener) {
                 mPropertyChangedListener->onStagingPropertyChanged();
             }
-        } else if (prop == &mProperties){
+        } else if (prop == &mProperties) {
             mSkPathDirty = true;
             if (mPropertyChangedListener) {
                 mPropertyChangedListener->onPropertyChanged();
@@ -201,7 +201,7 @@ private:
     bool mStagingPropertiesDirty = true;
 };
 
-class ANDROID_API FullPath: public Path {
+class FullPath : public Path {
 public:
     class FullPathProperties : public Properties {
     public:
@@ -220,99 +220,70 @@ public:
             int fillType = 0; /* non-zero or kWinding_FillType in Skia */
         };
         explicit FullPathProperties(Node* mNode) : Properties(mNode), mTrimDirty(false) {}
-        ~FullPathProperties() {
-            SkSafeUnref(fillGradient);
-            SkSafeUnref(strokeGradient);
-        }
+        ~FullPathProperties() {}
         void syncProperties(const FullPathProperties& prop) {
             mPrimitiveFields = prop.mPrimitiveFields;
             mTrimDirty = true;
-            UPDATE_SKPROP(fillGradient, prop.fillGradient);
-            UPDATE_SKPROP(strokeGradient, prop.strokeGradient);
+            fillGradient = prop.fillGradient;
+            strokeGradient = prop.strokeGradient;
             onPropertyChanged();
         }
         void setFillGradient(SkShader* gradient) {
-            if(UPDATE_SKPROP(fillGradient, gradient)) {
+            if (fillGradient.get() != gradient) {
+                fillGradient = sk_ref_sp(gradient);
                 onPropertyChanged();
             }
         }
         void setStrokeGradient(SkShader* gradient) {
-            if(UPDATE_SKPROP(strokeGradient, gradient)) {
+            if (strokeGradient.get() != gradient) {
+                strokeGradient = sk_ref_sp(gradient);
                 onPropertyChanged();
             }
         }
-        SkShader* getFillGradient() const {
-            return fillGradient;
-        }
-        SkShader* getStrokeGradient() const {
-            return strokeGradient;
-        }
-        float getStrokeWidth() const{
-            return mPrimitiveFields.strokeWidth;
-        }
+        SkShader* getFillGradient() const { return fillGradient.get(); }
+        SkShader* getStrokeGradient() const { return strokeGradient.get(); }
+        float getStrokeWidth() const { return mPrimitiveFields.strokeWidth; }
         void setStrokeWidth(float strokeWidth) {
             VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(strokeWidth, strokeWidth);
         }
-        SkColor getStrokeColor() const{
-            return mPrimitiveFields.strokeColor;
-        }
+        SkColor getStrokeColor() const { return mPrimitiveFields.strokeColor; }
         void setStrokeColor(SkColor strokeColor) {
             VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(strokeColor, strokeColor);
         }
-        float getStrokeAlpha() const{
-            return mPrimitiveFields.strokeAlpha;
-        }
+        float getStrokeAlpha() const { return mPrimitiveFields.strokeAlpha; }
         void setStrokeAlpha(float strokeAlpha) {
             VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(strokeAlpha, strokeAlpha);
         }
-        SkColor getFillColor() const {
-            return mPrimitiveFields.fillColor;
-        }
+        SkColor getFillColor() const { return mPrimitiveFields.fillColor; }
         void setFillColor(SkColor fillColor) {
             VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(fillColor, fillColor);
         }
-        float getFillAlpha() const{
-            return mPrimitiveFields.fillAlpha;
-        }
+        float getFillAlpha() const { return mPrimitiveFields.fillAlpha; }
         void setFillAlpha(float fillAlpha) {
             VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(fillAlpha, fillAlpha);
         }
-        float getTrimPathStart() const{
-            return mPrimitiveFields.trimPathStart;
-        }
+        float getTrimPathStart() const { return mPrimitiveFields.trimPathStart; }
         void setTrimPathStart(float trimPathStart) {
             VD_SET_PRIMITIVE_FIELD_WITH_FLAG(trimPathStart, trimPathStart, mTrimDirty);
         }
-        float getTrimPathEnd() const{
-            return mPrimitiveFields.trimPathEnd;
-        }
+        float getTrimPathEnd() const { return mPrimitiveFields.trimPathEnd; }
         void setTrimPathEnd(float trimPathEnd) {
             VD_SET_PRIMITIVE_FIELD_WITH_FLAG(trimPathEnd, trimPathEnd, mTrimDirty);
         }
-        float getTrimPathOffset() const{
-            return mPrimitiveFields.trimPathOffset;
-        }
+        float getTrimPathOffset() const { return mPrimitiveFields.trimPathOffset; }
         void setTrimPathOffset(float trimPathOffset) {
             VD_SET_PRIMITIVE_FIELD_WITH_FLAG(trimPathOffset, trimPathOffset, mTrimDirty);
         }
 
-        float getStrokeMiterLimit() const {
-            return mPrimitiveFields.strokeMiterLimit;
-        }
-        float getStrokeLineCap() const {
-            return mPrimitiveFields.strokeLineCap;
-        }
-        float getStrokeLineJoin() const {
-            return mPrimitiveFields.strokeLineJoin;
-        }
-        float getFillType() const {
-            return mPrimitiveFields.fillType;
-        }
+        float getStrokeMiterLimit() const { return mPrimitiveFields.strokeMiterLimit; }
+        float getStrokeLineCap() const { return mPrimitiveFields.strokeLineCap; }
+        float getStrokeLineJoin() const { return mPrimitiveFields.strokeLineJoin; }
+        float getFillType() const { return mPrimitiveFields.fillType; }
         bool copyProperties(int8_t* outProperties, int length) const;
         void updateProperties(float strokeWidth, SkColor strokeColor, float strokeAlpha,
-                SkColor fillColor, float fillAlpha, float trimPathStart, float trimPathEnd,
-                float trimPathOffset, float strokeMiterLimit, int strokeLineCap, int strokeLineJoin,
-                int fillType) {
+                              SkColor fillColor, float fillAlpha, float trimPathStart,
+                              float trimPathEnd, float trimPathOffset, float strokeMiterLimit,
+                              int strokeLineCap, int strokeLineJoin, int fillType) {
             mPrimitiveFields.strokeWidth = strokeWidth;
             mPrimitiveFields.strokeColor = strokeColor;
             mPrimitiveFields.strokeAlpha = strokeAlpha;
@@ -332,6 +303,7 @@ public:
         void setColorPropertyValue(int propertyId, int32_t value);
         void setPropertyValue(int propertyId, float value);
         bool mTrimDirty;
+
     private:
         enum class Property {
             strokeWidth = 0,
@@ -349,12 +321,12 @@ public:
             count,
         };
         PrimitiveFields mPrimitiveFields;
-        SkShader* fillGradient = nullptr;
-        SkShader* strokeGradient = nullptr;
+        sk_sp<SkShader> fillGradient;
+        sk_sp<SkShader> strokeGradient;
     };
 
     // Called from UI thread
-    FullPath(const FullPath& path); // for cloning
+    FullPath(const FullPath& path);  // for cloning
     FullPath(const char* path, size_t strLength) : Path(path, strLength) {}
     FullPath() : Path() {}
     void draw(SkCanvas* outCanvas, bool useStagingData) override;
@@ -379,29 +351,35 @@ public:
             }
         }
     }
+    virtual void setAntiAlias(bool aa) { mAntiAlias = aa; }
+    void forEachFillColor(const std::function<void(SkColor)>& func) const override {
+        func(mStagingProperties.getFillColor());
+    }
 
 protected:
     const SkPath& getUpdatedPath(bool useStagingData, SkPath* tempStagingPath) override;
-private:
 
+private:
     FullPathProperties mProperties = FullPathProperties(this);
     FullPathProperties mStagingProperties = FullPathProperties(this);
     bool mStagingPropertiesDirty = true;
 
     // Intermediate data for drawing, render thread only
     SkPath mTrimmedSkPath;
-
+    // Default to use AntiAlias
+    bool mAntiAlias = true;
 };
 
-class ANDROID_API ClipPath: public Path {
+class ClipPath : public Path {
 public:
     ClipPath(const ClipPath& path) : Path(path) {}
     ClipPath(const char* path, size_t strLength) : Path(path, strLength) {}
     ClipPath() : Path() {}
     void draw(SkCanvas* outCanvas, bool useStagingData) override;
+    virtual void setAntiAlias(bool aa) {}
 };
 
-class ANDROID_API Group: public Node {
+class Group : public Node {
 public:
     class GroupProperties : public Properties {
     public:
@@ -419,50 +397,26 @@ public:
             mPrimitiveFields = prop.mPrimitiveFields;
             onPropertyChanged();
         }
-        float getRotation() const {
-            return mPrimitiveFields.rotate;
-        }
-        void setRotation(float rotation) {
-            VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(rotate, rotation);
-        }
-        float getPivotX() const {
-            return mPrimitiveFields.pivotX;
-        }
-        void setPivotX(float pivotX) {
-            VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(pivotX, pivotX);
-        }
-        float getPivotY() const {
-            return mPrimitiveFields.pivotY;
-        }
-        void setPivotY(float pivotY) {
-            VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(pivotY, pivotY);
-        }
-        float getScaleX() const {
-            return mPrimitiveFields.scaleX;
-        }
-        void setScaleX(float scaleX) {
-            VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(scaleX, scaleX);
-        }
-        float getScaleY() const {
-            return mPrimitiveFields.scaleY;
-        }
-        void setScaleY(float scaleY) {
-            VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(scaleY, scaleY);
-        }
-        float getTranslateX() const {
-            return mPrimitiveFields.translateX;
-        }
+        float getRotation() const { return mPrimitiveFields.rotate; }
+        void setRotation(float rotation) { VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(rotate, rotation); }
+        float getPivotX() const { return mPrimitiveFields.pivotX; }
+        void setPivotX(float pivotX) { VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(pivotX, pivotX); }
+        float getPivotY() const { return mPrimitiveFields.pivotY; }
+        void setPivotY(float pivotY) { VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(pivotY, pivotY); }
+        float getScaleX() const { return mPrimitiveFields.scaleX; }
+        void setScaleX(float scaleX) { VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(scaleX, scaleX); }
+        float getScaleY() const { return mPrimitiveFields.scaleY; }
+        void setScaleY(float scaleY) { VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(scaleY, scaleY); }
+        float getTranslateX() const { return mPrimitiveFields.translateX; }
         void setTranslateX(float translateX) {
             VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(translateX, translateX);
         }
-        float getTranslateY() const {
-            return mPrimitiveFields.translateY;
-        }
+        float getTranslateY() const { return mPrimitiveFields.translateY; }
         void setTranslateY(float translateY) {
             VD_SET_PRIMITIVE_FIELD_AND_NOTIFY(translateY, translateY);
         }
-        void updateProperties(float rotate, float pivotX, float pivotY,
-                float scaleX, float scaleY, float translateX, float translateY) {
+        void updateProperties(float rotate, float pivotX, float pivotY, float scaleX, float scaleY,
+                              float translateX, float translateY) {
             mPrimitiveFields.rotate = rotate;
             mPrimitiveFields.pivotX = pivotX;
             mPrimitiveFields.pivotY = pivotY;
@@ -476,6 +430,7 @@ public:
         float getPropertyValue(int propertyId) const;
         bool copyProperties(float* outProperties, int length) const;
         static bool isValidProperty(int propertyId);
+
     private:
         enum class Property {
             rotate = 0,
@@ -496,7 +451,7 @@ public:
     virtual void setPropertyChangedListener(PropertyChangedListener* listener) override {
         Node::setPropertyChangedListener(listener);
         for (auto& child : mChildren) {
-             child->setPropertyChangedListener(listener);
+            child->setPropertyChangedListener(listener);
         }
     }
     virtual void syncProperties() override;
@@ -525,14 +480,26 @@ public:
         }
     }
 
+    virtual void setAntiAlias(bool aa) {
+        for (auto& child : mChildren) {
+            child->setAntiAlias(aa);
+        }
+    }
+
+    void forEachFillColor(const std::function<void(SkColor)>& func) const override {
+        for (auto& child : mChildren) {
+            child->forEachFillColor(func);
+        }
+    }
+
 private:
     GroupProperties mProperties = GroupProperties(this);
     GroupProperties mStagingProperties = GroupProperties(this);
     bool mStagingPropertiesDirty = true;
-    std::vector< std::unique_ptr<Node> > mChildren;
+    std::vector<std::unique_ptr<Node> > mChildren;
 };
 
-class ANDROID_API Tree : public VirtualLightRefBase {
+class Tree : public VirtualLightRefBase {
 public:
     explicit Tree(Group* rootNode) : mRootNode(rootNode) {
         mRootNode->setPropertyChangedListener(&mPropertyChangedListener);
@@ -540,22 +507,29 @@ public:
 
     // Copy properties from the tree and use the give node as the root node
     Tree(const Tree* copy, Group* rootNode) : Tree(rootNode) {
-        mStagingProperties.syncAnimatableProperties(*copy->stagingProperties());
-        mStagingProperties.syncNonAnimatableProperties(*copy->stagingProperties());
+        mStagingProperties.syncAnimatableProperties(copy->stagingProperties());
+        mStagingProperties.syncNonAnimatableProperties(copy->stagingProperties());
     }
     // Draws the VD onto a bitmap cache, then the bitmap cache will be rendered onto the input
     // canvas. Returns the number of pixels needed for the bitmap cache.
-    int draw(Canvas* outCanvas, SkColorFilter* colorFilter,
-            const SkRect& bounds, bool needsMirroring, bool canReuseCache);
+    int draw(Canvas* outCanvas, SkColorFilter* colorFilter, const SkRect& bounds,
+             bool needsMirroring, bool canReuseCache);
     void drawStaging(Canvas* canvas);
 
     Bitmap& getBitmapUpdateIfDirty();
-    void setAllowCaching(bool allowCaching) {
-        mAllowCaching = allowCaching;
-    }
-    SkPaint* getPaint();
+    void setAllowCaching(bool allowCaching) { mAllowCaching = allowCaching; }
     void syncProperties() {
         if (mStagingProperties.mNonAnimatablePropertiesDirty) {
+            mCache.dirty |= (mProperties.mNonAnimatableProperties.viewportWidth !=
+                             mStagingProperties.mNonAnimatableProperties.viewportWidth) ||
+                            (mProperties.mNonAnimatableProperties.viewportHeight !=
+                             mStagingProperties.mNonAnimatableProperties.viewportHeight) ||
+                            (mProperties.mNonAnimatableProperties.scaledWidth !=
+                             mStagingProperties.mNonAnimatableProperties.scaledWidth) ||
+                            (mProperties.mNonAnimatableProperties.scaledHeight !=
+                             mStagingProperties.mNonAnimatableProperties.scaledHeight) ||
+                            (mProperties.mNonAnimatableProperties.bounds !=
+                             mStagingProperties.mNonAnimatableProperties.bounds);
             mProperties.syncNonAnimatableProperties(mStagingProperties);
             mStagingProperties.mNonAnimatablePropertiesDirty = false;
         }
@@ -580,10 +554,7 @@ public:
             SkRect bounds;
             int scaledWidth = 0;
             int scaledHeight = 0;
-            SkColorFilter* colorFilter = nullptr;
-            ~NonAnimatableProperties() {
-                SkSafeUnref(colorFilter);
-            }
+            sk_sp<SkColorFilter> colorFilter;
         } mNonAnimatableProperties;
         bool mNonAnimatablePropertiesDirty = true;
 
@@ -593,15 +564,14 @@ public:
         void syncNonAnimatableProperties(const TreeProperties& prop) {
             // Copy over the data that can only be changed in UI thread
             if (mNonAnimatableProperties.colorFilter != prop.mNonAnimatableProperties.colorFilter) {
-                SkRefCnt_SafeAssign(mNonAnimatableProperties.colorFilter,
-                        prop.mNonAnimatableProperties.colorFilter);
+                mNonAnimatableProperties.colorFilter = prop.mNonAnimatableProperties.colorFilter;
             }
             mNonAnimatableProperties = prop.mNonAnimatableProperties;
         }
 
         void setViewportSize(float width, float height) {
-            if (mNonAnimatableProperties.viewportWidth != width
-                    || mNonAnimatableProperties.viewportHeight != height) {
+            if (mNonAnimatableProperties.viewportWidth != width ||
+                mNonAnimatableProperties.viewportHeight != height) {
                 mNonAnimatablePropertiesDirty = true;
                 mNonAnimatableProperties.viewportWidth = width;
                 mNonAnimatableProperties.viewportHeight = height;
@@ -620,41 +590,30 @@ public:
             // If the requested size is bigger than what the bitmap was, then
             // we increase the bitmap size to match. The width and height
             // are bound by MAX_CACHED_BITMAP_SIZE.
-            if (mNonAnimatableProperties.scaledWidth < width
-                    || mNonAnimatableProperties.scaledHeight < height) {
-                mNonAnimatableProperties.scaledWidth = std::max(width,
-                        mNonAnimatableProperties.scaledWidth);
-                mNonAnimatableProperties.scaledHeight = std::max(height,
-                        mNonAnimatableProperties.scaledHeight);
+            if (mNonAnimatableProperties.scaledWidth < width ||
+                mNonAnimatableProperties.scaledHeight < height) {
+                mNonAnimatableProperties.scaledWidth =
+                        std::max(width, mNonAnimatableProperties.scaledWidth);
+                mNonAnimatableProperties.scaledHeight =
+                        std::max(height, mNonAnimatableProperties.scaledHeight);
                 mNonAnimatablePropertiesDirty = true;
                 mTree->onPropertyChanged(this);
             }
         }
         void setColorFilter(SkColorFilter* filter) {
-            if (UPDATE_SKPROP(mNonAnimatableProperties.colorFilter, filter)) {
+            if (mNonAnimatableProperties.colorFilter.get() != filter) {
+                mNonAnimatableProperties.colorFilter = sk_ref_sp(filter);
                 mNonAnimatablePropertiesDirty = true;
                 mTree->onPropertyChanged(this);
             }
         }
-        SkColorFilter* getColorFilter() const{
-            return mNonAnimatableProperties.colorFilter;
-        }
+        SkColorFilter* getColorFilter() const { return mNonAnimatableProperties.colorFilter.get(); }
 
-        float getViewportWidth() const {
-            return mNonAnimatableProperties.viewportWidth;
-        }
-        float getViewportHeight() const {
-            return mNonAnimatableProperties.viewportHeight;
-        }
-        float getScaledWidth() const {
-            return mNonAnimatableProperties.scaledWidth;
-        }
-        float getScaledHeight() const {
-            return mNonAnimatableProperties.scaledHeight;
-        }
-        void syncAnimatableProperties(const TreeProperties& prop) {
-            mRootAlpha = prop.mRootAlpha;
-        }
+        float getViewportWidth() const { return mNonAnimatableProperties.viewportWidth; }
+        float getViewportHeight() const { return mNonAnimatableProperties.viewportHeight; }
+        float getScaledWidth() const { return mNonAnimatableProperties.scaledWidth; }
+        float getScaledHeight() const { return mNonAnimatableProperties.scaledHeight; }
+        void syncAnimatableProperties(const TreeProperties& prop) { mRootAlpha = prop.mRootAlpha; }
         bool setRootAlpha(float rootAlpha) {
             if (rootAlpha != mRootAlpha) {
                 mAnimatablePropertiesDirty = true;
@@ -664,18 +623,19 @@ public:
             }
             return false;
         }
-        float getRootAlpha() const { return mRootAlpha;}
-        const SkRect& getBounds() const {
-            return mNonAnimatableProperties.bounds;
-        }
+        float getRootAlpha() const { return mRootAlpha; }
+        const SkRect& getBounds() const { return mNonAnimatableProperties.bounds; }
         Tree* mTree;
     };
     void onPropertyChanged(TreeProperties* prop);
     TreeProperties* mutateStagingProperties() { return &mStagingProperties; }
-    const TreeProperties* stagingProperties() const { return &mStagingProperties; }
+    const TreeProperties& stagingProperties() const { return mStagingProperties; }
 
     // This should only be called from animations on RT
     TreeProperties* mutateProperties() { return &mProperties; }
+
+    // called from RT only
+    const TreeProperties& properties() const { return mProperties; }
 
     // This should always be called from RT.
     void markDirty() { mCache.dirty = true; }
@@ -683,16 +643,28 @@ public:
     bool getPropertyChangeWillBeConsumed() const { return mWillBeConsumed; }
     void setPropertyChangeWillBeConsumed(bool willBeConsumed) { mWillBeConsumed = willBeConsumed; }
 
+    /**
+     * Draws VD cache into a canvas. This should always be called from RT and it works with Skia
+     * pipelines only.
+     */
+    void draw(SkCanvas* canvas, const SkRect& bounds, const SkPaint& paint);
+
+    void getPaintFor(Paint* outPaint, const TreeProperties &props) const;
+    BitmapPalette computePalette();
+
+    void setAntiAlias(bool aa) { mRootNode->setAntiAlias(aa); }
+
 private:
-    struct Cache {
-        sk_sp<Bitmap> bitmap;
+    class Cache {
+    public:
+        sk_sp<Bitmap> bitmap;  // used by HWUI pipeline and software
         bool dirty = true;
     };
 
-    SkPaint* updatePaint(SkPaint* outPaint, TreeProperties* prop);
     bool allocateBitmapIfNeeded(Cache& cache, int width, int height);
     bool canReuseBitmap(Bitmap*, int width, int height);
     void updateBitmapCache(Bitmap& outCache, bool useStagingData);
+
     // Cap the bitmap size, such that it won't hurt the performance too much
     // and it won't crash due to a very large scale.
     // The drawable will look blurry above this size.
@@ -704,21 +676,21 @@ private:
     TreeProperties mProperties = TreeProperties(this);
     TreeProperties mStagingProperties = TreeProperties(this);
 
-    SkPaint mPaint;
-
     Cache mStagingCache;
     Cache mCache;
 
-    PropertyChangedListener mPropertyChangedListener
-            = PropertyChangedListener(&mCache.dirty, &mStagingCache.dirty);
+    PropertyChangedListener mPropertyChangedListener =
+            PropertyChangedListener(&mCache.dirty, &mStagingCache.dirty);
 
     mutable bool mWillBeConsumed = false;
 };
 
-} // namespace VectorDrawable
+}  // namespace VectorDrawable
 
 typedef VectorDrawable::Path::Data PathData;
-} // namespace uirenderer
-} // namespace android
+typedef uirenderer::VectorDrawable::Tree VectorDrawableRoot;
 
-#endif // ANDROID_HWUI_VPATH_H
+}  // namespace uirenderer
+}  // namespace android
+
+#endif  // ANDROID_HWUI_VPATH_H

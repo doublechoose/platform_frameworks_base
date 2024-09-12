@@ -17,78 +17,89 @@
 package com.android.server.audio;
 
 import android.content.Context;
-import android.media.AudioSystem;
+import android.hardware.devicestate.DeviceStateManager;
+import android.hardware.devicestate.DeviceStateManager.FoldStateListener;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.DisplayManagerGlobal;
 import android.os.Handler;
+import android.os.HandlerExecutor;
 import android.util.Log;
-import android.view.OrientationEventListener;
+import android.view.Display;
 import android.view.Surface;
-import android.view.WindowManager;
 
-import com.android.server.policy.WindowOrientationListener;
+import java.util.function.Consumer;
 
 /**
  * Class to handle device rotation events for AudioService, and forward device rotation
- * to the audio HALs through AudioSystem.
+ * and folded state to the audio HALs through AudioSystem.
  *
  * The role of this class is to monitor device orientation changes, and upon rotation,
  * verify the UI orientation. In case of a change, send the new orientation, in increments
  * of 90deg, through AudioSystem.
  *
+ * Another role of this class is to track device folded state changes. In case of a
+ * change, send the new folded state through AudioSystem.
+ *
  * Note that even though we're responding to device orientation events, we always
  * query the display rotation so audio stays in sync with video/dialogs. This is
  * done with .getDefaultDisplay().getRotation() from WINDOW_SERVICE.
+ *
+ * We also monitor current display ID and audio is able to know which display is active.
  */
 class RotationHelper {
 
     private static final String TAG = "AudioService.RotationHelper";
 
-    private static AudioOrientationListener sOrientationListener;
-    private static AudioWindowOrientationListener sWindowOrientationListener;
+    private static final boolean DEBUG_ROTATION = false;
+
+    private static AudioDisplayListener sDisplayListener;
+    private static FoldStateListener sFoldStateListener;
+    /** callback to send rotation updates to AudioSystem */
+    private static Consumer<Integer> sRotationCallback;
+    /** callback to send folded state updates to AudioSystem */
+    private static Consumer<Boolean> sFoldStateCallback;
 
     private static final Object sRotationLock = new Object();
-    private static int sDeviceRotation = Surface.ROTATION_0; // R/W synchronized on sRotationLock
+    private static final Object sFoldStateLock = new Object();
+    private static Integer sRotation = null; // R/W synchronized on sRotationLock
+    private static Boolean sFoldState = null; // R/W synchronized on sFoldStateLock
 
     private static Context sContext;
+    private static Handler sHandler;
 
     /**
      * post conditions:
-     * - (sWindowOrientationListener != null) xor (sOrientationListener != null)
-     * - sWindowOrientationListener xor sOrientationListener is enabled
+     * - sDisplayListener != null
      * - sContext != null
      */
-    static void init(Context context, Handler handler) {
+    static void init(Context context, Handler handler,
+            Consumer<Integer> rotationCallback, Consumer<Boolean> foldStateCallback) {
         if (context == null) {
             throw new IllegalArgumentException("Invalid null context");
         }
         sContext = context;
-        sWindowOrientationListener = new AudioWindowOrientationListener(context, handler);
-        sWindowOrientationListener.enable();
-        if (!sWindowOrientationListener.canDetectOrientation()) {
-            // cannot use com.android.server.policy.WindowOrientationListener, revert to public
-            // orientation API
-            Log.i(TAG, "Not using WindowOrientationListener, reverting to OrientationListener");
-            sWindowOrientationListener.disable();
-            sWindowOrientationListener = null;
-            sOrientationListener = new AudioOrientationListener(context);
-            sOrientationListener.enable();
-        }
+        sHandler = handler;
+        sDisplayListener = new AudioDisplayListener();
+        sFoldStateListener = new FoldStateListener(sContext, RotationHelper::updateFoldState);
+        sRotationCallback = rotationCallback;
+        sFoldStateCallback = foldStateCallback;
+        enable();
     }
 
     static void enable() {
-        if (sWindowOrientationListener != null) {
-            sWindowOrientationListener.enable();
-        } else {
-            sOrientationListener.enable();
-        }
+        ((DisplayManager) sContext.getSystemService(Context.DISPLAY_SERVICE))
+                .registerDisplayListener(sDisplayListener, sHandler);
         updateOrientation();
+
+        sContext.getSystemService(DeviceStateManager.class)
+                .registerCallback(new HandlerExecutor(sHandler), sFoldStateListener);
     }
 
     static void disable() {
-        if (sWindowOrientationListener != null) {
-            sWindowOrientationListener.disable();
-        } else {
-            sOrientationListener.disable();
-        }
+        ((DisplayManager) sContext.getSystemService(Context.DISPLAY_SERVICE))
+                .unregisterDisplayListener(sDisplayListener);
+        sContext.getSystemService(DeviceStateManager.class)
+                .unregisterCallback(sFoldStateListener);
     }
 
     /**
@@ -97,115 +108,90 @@ class RotationHelper {
     static void updateOrientation() {
         // Even though we're responding to device orientation events,
         // use display rotation so audio stays in sync with video/dialogs
-        int newRotation = ((WindowManager) sContext.getSystemService(
-                Context.WINDOW_SERVICE)).getDefaultDisplay().getRotation();
+        // TODO(b/148458001): Support multi-display
+        int newRotation = DisplayManagerGlobal.getInstance()
+                .getDisplayInfo(Display.DEFAULT_DISPLAY).rotation;
         synchronized(sRotationLock) {
-            if (newRotation != sDeviceRotation) {
-                sDeviceRotation = newRotation;
-                publishRotation(sDeviceRotation);
+            if (sRotation == null || sRotation != newRotation) {
+                sRotation = newRotation;
+                publishRotation(sRotation);
             }
         }
     }
 
     private static void publishRotation(int rotation) {
-        Log.v(TAG, "publishing device rotation =" + rotation + " (x90deg)");
+        if (DEBUG_ROTATION) {
+            Log.i(TAG, "publishing device rotation =" + rotation + " (x90deg)");
+        }
+        int rotationDegrees;
         switch (rotation) {
             case Surface.ROTATION_0:
-                AudioSystem.setParameters("rotation=0");
+                rotationDegrees = 0;
                 break;
             case Surface.ROTATION_90:
-                AudioSystem.setParameters("rotation=90");
+                rotationDegrees = 90;
                 break;
             case Surface.ROTATION_180:
-                AudioSystem.setParameters("rotation=180");
+                rotationDegrees = 180;
                 break;
             case Surface.ROTATION_270:
-                AudioSystem.setParameters("rotation=270");
+                rotationDegrees = 270;
                 break;
             default:
                 Log.e(TAG, "Unknown device rotation");
+                rotationDegrees = -1;
+        }
+        if (rotationDegrees != -1) {
+            sRotationCallback.accept(rotationDegrees);
         }
     }
 
     /**
-     * Uses android.view.OrientationEventListener
+     * publish the change of device folded state if any.
      */
-    final static class AudioOrientationListener extends OrientationEventListener {
-        AudioOrientationListener(Context context) {
-            super(context);
+    static void updateFoldState(boolean foldState) {
+        synchronized (sFoldStateLock) {
+            if (sFoldState == null || sFoldState != foldState) {
+                sFoldState = foldState;
+                sFoldStateCallback.accept(foldState);
+            }
+        }
+    }
+
+    /**
+     *  forceUpdate is called when audioserver restarts.
+     */
+    static void forceUpdate() {
+        synchronized (sRotationLock) {
+            sRotation = null;
+        }
+        updateOrientation(); // We will get at least one orientation update now.
+        synchronized (sFoldStateLock) {
+            if (sFoldState  != null) {
+                sFoldStateCallback.accept(sFoldState);
+            }
+        }
+    }
+
+    /**
+     * Uses android.hardware.display.DisplayManager.DisplayListener
+     */
+    final static class AudioDisplayListener implements DisplayManager.DisplayListener {
+
+        @Override
+        public void onDisplayAdded(int displayId) {
         }
 
         @Override
-        public void onOrientationChanged(int orientation) {
+        public void onDisplayRemoved(int displayId) {
+        }
+
+        @Override
+        public void onDisplayChanged(int displayId) {
+            if (DEBUG_ROTATION) {
+                Log.i(TAG, "onDisplayChanged diplayId:" + displayId);
+            }
             updateOrientation();
-        }
-    }
-
-    /**
-     * Uses com.android.server.policy.WindowOrientationListener
-     */
-    final static class AudioWindowOrientationListener extends WindowOrientationListener {
-        private static RotationCheckThread sRotationCheckThread;
-
-        AudioWindowOrientationListener(Context context, Handler handler) {
-            super(context, handler);
-        }
-
-        public void onProposedRotationChanged(int rotation) {
-            updateOrientation();
-            if (sRotationCheckThread != null) {
-                sRotationCheckThread.endCheck();
-            }
-            sRotationCheckThread = new RotationCheckThread();
-            sRotationCheckThread.beginCheck();
-        }
-    }
-
-    /**
-     * When com.android.server.policy.WindowOrientationListener report an orientation change,
-     * the UI may not have rotated yet. This thread polls with gradually increasing delays
-     * the new orientation.
-     */
-    final static class RotationCheckThread extends Thread {
-        // how long to wait between each rotation check
-        private final int[] WAIT_TIMES_MS = { 10, 20, 50, 100, 100, 200, 200, 500 };
-        private int mWaitCounter;
-        private final Object mCounterLock = new Object();
-
-        RotationCheckThread() {
-            super("RotationCheck");
-        }
-
-        void beginCheck() {
-            synchronized(mCounterLock) {
-                mWaitCounter = 0;
-            }
-            try {
-                start();
-            } catch (IllegalStateException e) { }
-        }
-
-        void endCheck() {
-            synchronized(mCounterLock) {
-                mWaitCounter = WAIT_TIMES_MS.length;
-            }
-        }
-
-        public void run() {
-            while (mWaitCounter < WAIT_TIMES_MS.length) {
-                int waitTimeMs;
-                synchronized(mCounterLock) {
-                    waitTimeMs = mWaitCounter < WAIT_TIMES_MS.length ?
-                            WAIT_TIMES_MS[mWaitCounter] : 0;
-                    mWaitCounter++;
-                }
-                try {
-                    if (waitTimeMs > 0) {
-                        sleep(waitTimeMs);
-                        updateOrientation();
-                    }
-                } catch (InterruptedException e) { }
-            }
         }
     }
 }

@@ -14,12 +14,12 @@
 
 package android.testing;
 
-import android.support.test.internal.runner.junit4.statement.RunAfters;
-import android.support.test.internal.runner.junit4.statement.RunBefores;
-import android.support.test.internal.runner.junit4.statement.UiThreadStatement;
-
 import android.testing.TestableLooper.LooperFrameworkMethod;
 import android.testing.TestableLooper.RunWithLooper;
+
+import androidx.test.internal.runner.junit4.statement.RunAfters;
+import androidx.test.internal.runner.junit4.statement.RunBefores;
+import androidx.test.internal.runner.junit4.statement.UiThreadStatement;
 
 import org.junit.After;
 import org.junit.Before;
@@ -35,6 +35,8 @@ import java.util.List;
 
 /**
  * A runner with support for extra annotations provided by the Testables library.
+ * @see UiThreadTest
+ * @see TestableLooper.RunWithLooper
  */
 public class AndroidTestingRunner extends BlockJUnit4ClassRunner {
 

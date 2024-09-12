@@ -16,9 +16,6 @@
 
 package com.android.server.devicepolicy;
 
-import com.google.android.collect.Lists;
-import com.google.android.collect.Sets;
-
 import android.content.Context;
 import android.os.Bundle;
 import android.os.FileUtils;
@@ -28,21 +25,26 @@ import android.test.AndroidTestCase;
 import android.util.Log;
 import android.util.Printer;
 
+import com.android.server.pm.RestrictionsSet;
+
+import libcore.io.Streams;
+
+import com.google.android.collect.Lists;
+
+import junit.framework.AssertionFailedError;
+
 import org.junit.Assert;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
-import java.util.Set;
-
-import junit.framework.AssertionFailedError;
 
 public class DpmTestUtils extends AndroidTestCase {
     public static void clearDir(File dir) {
@@ -57,12 +59,30 @@ public class DpmTestUtils extends AndroidTestCase {
         return list == null ? 0 : list.size();
     }
 
+    public static RestrictionsSet newRestrictions(int userId, String... restrictions) {
+        Bundle localRestrictionsBundle = newRestrictions(restrictions);
+        RestrictionsSet localRestrictions = new RestrictionsSet();
+        localRestrictions.updateRestrictions(userId, localRestrictionsBundle);
+        return localRestrictions;
+    }
+
     public static Bundle newRestrictions(String... restrictions) {
         final Bundle ret = new Bundle();
         for (String restriction : restrictions) {
             ret.putBoolean(restriction, true);
         }
         return ret;
+    }
+
+    public static void assertRestrictions(RestrictionsSet expected, RestrictionsSet actual) {
+        assertEquals(expected.size(), actual.size());
+
+        for (int i = 0; i < expected.size(); i++) {
+            int originatingUserId = expected.keyAt(i);
+            Bundle actualRestrictions = actual.getRestrictions(originatingUserId);
+            assertFalse(actualRestrictions.isEmpty());
+            assertRestrictions(expected.getRestrictions(originatingUserId), actualRestrictions);
+        }
     }
 
     public static void assertRestrictions(Bundle expected, Bundle actual) {
@@ -134,6 +154,11 @@ public class DpmTestUtils extends AndroidTestCase {
             Log.i(DpmTestBase.TAG, content);
             writer.write(content);
         }
+    }
+
+    public static void writeInputStreamToFile(InputStream stream, File file)
+            throws IOException {
+        Streams.copy(stream, new FileOutputStream(file));
     }
 
     private static boolean checkAssertRestrictions(Bundle a, Bundle b) {

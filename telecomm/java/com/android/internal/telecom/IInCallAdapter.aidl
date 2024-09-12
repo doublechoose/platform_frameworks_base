@@ -16,8 +16,11 @@
 
 package com.android.internal.telecom;
 
+import android.net.Uri;
 import android.os.Bundle;
+import android.os.ResultReceiver;
 import android.telecom.PhoneAccountHandle;
+import android.telecom.CallEndpoint;
 
 /**
  * Internal remote callback interface for in-call services.
@@ -29,7 +32,15 @@ import android.telecom.PhoneAccountHandle;
 oneway interface IInCallAdapter {
     void answerCall(String callId, int videoState);
 
+    void deflectCall(String callId, in Uri address);
+
     void rejectCall(String callId, boolean rejectWithMessage, String textMessage);
+
+    void rejectCallWithReason(String callId, int rejectReason);
+
+    void transferCall(String callId, in Uri targetNumber, boolean isConfirmationRequired);
+
+    void consultativeTransfer(String callId, String otherCallId);
 
     void disconnectCall(String callId);
 
@@ -39,7 +50,13 @@ oneway interface IInCallAdapter {
 
     void mute(boolean shouldMute);
 
-    void setAudioRoute(int route);
+    void setAudioRoute(int route, String bluetoothAddress);
+
+    void requestCallEndpointChange(in CallEndpoint endpoint, in ResultReceiver callback);
+
+    void enterBackgroundAudioProcessing(String callId);
+
+    void exitBackgroundAudioProcessing(String callId, boolean shouldRing);
 
     void playDtmfTone(String callId, char digit);
 
@@ -58,13 +75,15 @@ oneway interface IInCallAdapter {
 
     void swapConference(String callId);
 
+    void addConferenceParticipants(String callId, in List<Uri> participants);
+
     void turnOnProximitySensor();
 
     void turnOffProximitySensor(boolean screenOnImmediately);
 
     void pullExternalCall(String callId);
 
-    void sendCallEvent(String callId, String event, in Bundle extras);
+    void sendCallEvent(String callId, String event, int targetSdkVer, in Bundle extras);
 
     void putExtras(String callId, in Bundle extras);
 
@@ -77,4 +96,7 @@ oneway interface IInCallAdapter {
     void stopRtt(String callId);
 
     void setRttMode(String callId, int mode);
+
+    void handoverTo(String callId, in PhoneAccountHandle destAcct, int videoState,
+            in Bundle extras);
 }

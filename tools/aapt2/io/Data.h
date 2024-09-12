@@ -20,20 +20,23 @@
 #include <memory>
 
 #include "android-base/macros.h"
+#include "androidfw/Streams.h"
 #include "utils/FileMap.h"
-
-#include "io/Io.h"
 
 namespace aapt {
 namespace io {
 
 // Interface for a block of contiguous memory. An instance of this interface owns the data.
-class IData : public InputStream {
+class IData : public android::KnownSizeInputStream {
  public:
   virtual ~IData() = default;
 
   virtual const void* data() const = 0;
   virtual size_t size() const = 0;
+
+  virtual size_t TotalSize() const override {
+    return size();
+  }
 };
 
 class DataSegment : public IData {

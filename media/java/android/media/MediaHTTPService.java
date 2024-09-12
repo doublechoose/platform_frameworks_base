@@ -16,8 +16,12 @@
 
 package android.media;
 
+import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.os.IBinder;
 import android.util.Log;
+
+import com.android.internal.annotations.GuardedBy;
 
 import java.net.CookieHandler;
 import java.net.CookieManager;
@@ -28,54 +32,63 @@ import java.util.List;
 /** @hide */
 public class MediaHTTPService extends IMediaHTTPService.Stub {
     private static final String TAG = "MediaHTTPService";
-    private List<HttpCookie> mCookies;
-    private Boolean mCookieStoreInitialized = new Boolean(false);
+    @Nullable private List<HttpCookie> mCookies;
+    private final Object mCookieStoreInitializedLock = new Object();
+    @GuardedBy("mCookieStoreInitializedLock")
+    private boolean mCookieStoreInitialized = false;
 
-    public MediaHTTPService(List<HttpCookie> cookies) {
+    public MediaHTTPService(@Nullable List<HttpCookie> cookies) {
         mCookies = cookies;
         Log.v(TAG, "MediaHTTPService(" + this + "): Cookies: " + cookies);
     }
 
     public IMediaHTTPConnection makeHTTPConnection() {
 
-        synchronized (mCookieStoreInitialized) {
+        synchronized (mCookieStoreInitializedLock) {
             // Only need to do it once for all connections
             if ( !mCookieStoreInitialized )  {
-                CookieManager cookieManager = (CookieManager)CookieHandler.getDefault();
-                if (cookieManager == null) {
-                    cookieManager = new CookieManager();
-                    CookieHandler.setDefault(cookieManager);
-                    Log.v(TAG, "makeHTTPConnection: CookieManager created: " + cookieManager);
-                }
-                else {
-                    Log.v(TAG, "makeHTTPConnection: CookieManager(" + cookieManager + ") exists.");
+                CookieHandler cookieHandler = CookieHandler.getDefault();
+                if (cookieHandler == null) {
+                    cookieHandler = new CookieManager();
+                    CookieHandler.setDefault(cookieHandler);
+                    Log.v(TAG, "makeHTTPConnection: CookieManager created: " + cookieHandler);
+                } else {
+                    Log.v(TAG, "makeHTTPConnection: CookieHandler (" + cookieHandler + ") exists.");
                 }
 
                 // Applying the bootstrapping cookies
                 if ( mCookies != null ) {
-                    CookieStore store = cookieManager.getCookieStore();
-                    for ( HttpCookie cookie : mCookies ) {
-                        try {
-                            store.add(null, cookie);
-                        } catch ( Exception e ) {
-                            Log.v(TAG, "makeHTTPConnection: CookieStore.add" + e);
+                    if ( cookieHandler instanceof CookieManager ) {
+                        CookieManager cookieManager = (CookieManager)cookieHandler;
+                        CookieStore store = cookieManager.getCookieStore();
+                        for ( HttpCookie cookie : mCookies ) {
+                            try {
+                                store.add(null, cookie);
+                            } catch ( Exception e ) {
+                                Log.v(TAG, "makeHTTPConnection: CookieStore.add" + e);
+                            }
+                            //for extended debugging when needed
+                            //Log.v(TAG, "MediaHTTPConnection adding Cookie[" + cookie.getName() +
+                            //        "]: " + cookie);
                         }
-                        //for extended debugging when needed
-                        //Log.v(TAG, "MediaHTTPConnection adding Cookie[" + cookie.getName() +
-                        //        "]: " + cookie);
+                    } else {
+                        Log.w(TAG, "makeHTTPConnection: The installed CookieHandler is not a "
+                                + "CookieManager. Can’t add the provided cookies to the cookie "
+                                + "store.");
                     }
                 }   // mCookies
 
                 mCookieStoreInitialized = true;
 
-                Log.v(TAG, "makeHTTPConnection(" + this + "): cookieManager: " + cookieManager +
+                Log.v(TAG, "makeHTTPConnection(" + this + "): cookieHandler: " + cookieHandler +
                         " Cookies: " + mCookies);
-            }   // mCookieStoreInitialized
-        }   // synchronized
+            }
+        }
 
         return new MediaHTTPConnection();
     }
 
+    @UnsupportedAppUsage
     /* package private */static IBinder createHttpServiceBinderIfNecessary(
             String path) {
         return createHttpServiceBinderIfNecessary(path, null);
@@ -92,5 +105,4 @@ public class MediaHTTPService extends IMediaHTTPService.Stub {
 
         return null;
     }
-
 }

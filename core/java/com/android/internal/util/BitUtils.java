@@ -18,18 +18,20 @@
 package com.android.internal.util;
 
 import android.annotation.Nullable;
-
-import libcore.util.Objects;
+import android.text.TextUtils;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.function.IntFunction;
 
 /**
  * A utility class for handling unsigned integers and unsigned arithmetics, as well as syntactic
- * sugar methods for ByteBuffer. Useful for networking and packet manipulations.
+ * sugar methods for {@link ByteBuffer}. Useful for networking and packet manipulations.
  * {@hide}
  */
+@android.ravenwood.annotation.RavenwoodKeepWholeClass
 public final class BitUtils {
     private BitUtils() {}
 
@@ -54,7 +56,7 @@ public final class BitUtils {
 
     public static boolean maskedEquals(UUID a, UUID b, @Nullable UUID mask) {
         if (mask == null) {
-            return Objects.equal(a, b);
+            return Objects.equals(a, b);
         }
         return maskedEquals(a.getLeastSignificantBits(), b.getLeastSignificantBits(),
                     mask.getLeastSignificantBits())
@@ -67,9 +69,9 @@ public final class BitUtils {
         int[] result = new int[size];
         int index = 0;
         int bitPos = 0;
-        while (val > 0) {
+        while (val != 0) {
             if ((val & 1) == 1) result[index++] = bitPos;
-            val = val >> 1;
+            val = val >>> 1;
             bitPos++;
         }
         return result;
@@ -78,7 +80,7 @@ public final class BitUtils {
     public static long packBits(int[] bits) {
         long packed = 0;
         for (int b : bits) {
-            packed |= (1 << b);
+            packed |= (1L << b);
         }
         return packed;
     }
@@ -127,5 +129,48 @@ public final class BitUtils {
         buffer.position(position);
         buffer.put(bytes);
         buffer.position(original);
+    }
+
+    public static boolean isBitSet(long flags, int bitIndex) {
+        return (flags & bitAt(bitIndex)) != 0;
+    }
+
+    public static long bitAt(int bitIndex) {
+        return 1L << bitIndex;
+    }
+
+    public static String flagsToString(int flags, IntFunction<String> getFlagName) {
+        StringBuilder builder = new StringBuilder();
+        int count = 0;
+        while (flags != 0) {
+            final int flag = 1 << Integer.numberOfTrailingZeros(flags);
+            flags &= ~flag;
+            if (count > 0) builder.append(", ");
+            builder.append(getFlagName.apply(flag));
+            count++;
+        }
+        TextUtils.wrap(builder, "[", "]");
+        return builder.toString();
+    }
+
+    /**
+     * Converts long to byte array
+     */
+    public static byte[] toBytes(long l) {
+        return ByteBuffer.allocate(8).putLong(l).array();
+    }
+
+    /**
+     * 0b01000 -> 0b01111
+     */
+    public static int flagsUpTo(int lastFlag) {
+        return lastFlag <= 0 ? 0 : lastFlag | flagsUpTo(lastFlag >> 1);
+    }
+
+    /**
+     * 0b00010, 0b01000 -> 0b01110
+     */
+    public static int flagsWithin(int firstFlag, int lastFlag) {
+        return (flagsUpTo(lastFlag) & ~flagsUpTo(firstFlag)) | firstFlag;
     }
 }

@@ -16,6 +16,7 @@
 
 package com.android.server.accessibility;
 
+import android.accessibilityservice.AccessibilityTrace;
 import android.annotation.NonNull;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -23,15 +24,12 @@ import android.database.ContentObserver;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.SystemClock;
-import android.os.UserHandle;
 import android.provider.Settings;
-import android.util.Slog;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.MotionEvent.PointerCoords;
 import android.view.MotionEvent.PointerProperties;
-import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityManager;
 
 /**
@@ -55,11 +53,11 @@ import android.view.accessibility.AccessibilityManager;
  *
  * Each instance is associated to a single user (and it does not handle user switch itself).
  */
-public class AutoclickController implements EventStreamTransformation {
+public class AutoclickController extends BaseEventStreamTransformation {
 
     private static final String LOG_TAG = AutoclickController.class.getSimpleName();
 
-    private EventStreamTransformation mNext;
+    private final AccessibilityTraceManager mTrace;
     private final Context mContext;
     private final int mUserId;
 
@@ -67,13 +65,18 @@ public class AutoclickController implements EventStreamTransformation {
     private ClickScheduler mClickScheduler;
     private ClickDelayObserver mClickDelayObserver;
 
-    public AutoclickController(Context context, int userId) {
+    public AutoclickController(Context context, int userId, AccessibilityTraceManager trace) {
+        mTrace = trace;
         mContext = context;
         mUserId = userId;
     }
 
     @Override
     public void onMotionEvent(MotionEvent event, MotionEvent rawEvent, int policyFlags) {
+        if (mTrace.isA11yTracingEnabledForTypes(AccessibilityTrace.FLAGS_INPUT_FILTER)) {
+            mTrace.logTrace(LOG_TAG + ".onMotionEvent", AccessibilityTrace.FLAGS_INPUT_FILTER,
+                    "event=" + event + ";rawEvent=" + rawEvent + ";policyFlags=" + policyFlags);
+        }
         if (event.isFromSource(InputDevice.SOURCE_MOUSE)) {
             if (mClickScheduler == null) {
                 Handler handler = new Handler(mContext.getMainLooper());
@@ -88,13 +91,15 @@ public class AutoclickController implements EventStreamTransformation {
             mClickScheduler.cancel();
         }
 
-        if (mNext != null) {
-            mNext.onMotionEvent(event, rawEvent, policyFlags);
-        }
+        super.onMotionEvent(event, rawEvent, policyFlags);
     }
 
     @Override
     public void onKeyEvent(KeyEvent event, int policyFlags) {
+        if (mTrace.isA11yTracingEnabledForTypes(AccessibilityTrace.FLAGS_INPUT_FILTER)) {
+            mTrace.logTrace(LOG_TAG + ".onKeyEvent", AccessibilityTrace.FLAGS_INPUT_FILTER,
+                    "event=" + event + ";policyFlags=" + policyFlags);
+        }
         if (mClickScheduler != null) {
             if (KeyEvent.isModifierKey(event.getKeyCode())) {
                 mClickScheduler.updateMetaState(event.getMetaState());
@@ -103,21 +108,7 @@ public class AutoclickController implements EventStreamTransformation {
             }
         }
 
-        if (mNext != null) {
-          mNext.onKeyEvent(event, policyFlags);
-        }
-    }
-
-    @Override
-    public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (mNext != null) {
-            mNext.onAccessibilityEvent(event);
-        }
-    }
-
-    @Override
-    public void setNext(EventStreamTransformation next) {
-        mNext = next;
+        super.onKeyEvent(event, policyFlags);
     }
 
     @Override
@@ -126,9 +117,7 @@ public class AutoclickController implements EventStreamTransformation {
             mClickScheduler.cancel();
         }
 
-        if (mNext != null) {
-            mNext.clearEvents(inputSource);
-        }
+        super.clearEvents(inputSource);
     }
 
     @Override
@@ -418,7 +407,7 @@ public class AutoclickController implements EventStreamTransformation {
          * Creates and forwards click event sequence.
          */
         private void sendClick() {
-            if (mLastMotionEvent == null || mNext == null) {
+            if (mLastMotionEvent == null || getNext() == null) {
                 return;
             }
 
@@ -444,14 +433,29 @@ public class AutoclickController implements EventStreamTransformation {
                     MotionEvent.BUTTON_PRIMARY, 1.0f, 1.0f, mLastMotionEvent.getDeviceId(), 0,
                     mLastMotionEvent.getSource(), mLastMotionEvent.getFlags());
 
-            // The only real difference between these two events is the action flag.
+            MotionEvent pressEvent = MotionEvent.obtain(downEvent);
+            pressEvent.setAction(MotionEvent.ACTION_BUTTON_PRESS);
+            pressEvent.setActionButton(MotionEvent.BUTTON_PRIMARY);
+
+            MotionEvent releaseEvent = MotionEvent.obtain(downEvent);
+            releaseEvent.setAction(MotionEvent.ACTION_BUTTON_RELEASE);
+            releaseEvent.setActionButton(MotionEvent.BUTTON_PRIMARY);
+            releaseEvent.setButtonState(0);
+
             MotionEvent upEvent = MotionEvent.obtain(downEvent);
             upEvent.setAction(MotionEvent.ACTION_UP);
+            upEvent.setButtonState(0);
 
-            mNext.onMotionEvent(downEvent, downEvent, mEventPolicyFlags);
+            AutoclickController.super.onMotionEvent(downEvent, downEvent, mEventPolicyFlags);
             downEvent.recycle();
 
-            mNext.onMotionEvent(upEvent, upEvent, mEventPolicyFlags);
+            AutoclickController.super.onMotionEvent(pressEvent, pressEvent, mEventPolicyFlags);
+            pressEvent.recycle();
+
+            AutoclickController.super.onMotionEvent(releaseEvent, releaseEvent, mEventPolicyFlags);
+            releaseEvent.recycle();
+
+            AutoclickController.super.onMotionEvent(upEvent, upEvent, mEventPolicyFlags);
             upEvent.recycle();
         }
 

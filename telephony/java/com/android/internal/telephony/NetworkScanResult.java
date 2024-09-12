@@ -19,7 +19,7 @@ package com.android.internal.telephony;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.telephony.CellInfo;
-import java.util.Arrays;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -76,17 +76,15 @@ public final class NetworkScanResult implements Parcelable {
     public void writeToParcel(Parcel dest, int flags) {
         dest.writeInt(scanStatus);
         dest.writeInt(scanError);
-        CellInfo[] ci = networkInfos.toArray(new CellInfo[networkInfos.size()]);
-        dest.writeParcelableArray(ci, flags);
+        dest.writeParcelableList(networkInfos, flags);
     }
 
     private NetworkScanResult(Parcel in) {
         scanStatus = in.readInt();
         scanError = in.readInt();
-        CellInfo[] ci = (CellInfo[]) in.readParcelableArray(
-                Object.class.getClassLoader(),
-                CellInfo.class);
-        networkInfos = Arrays.asList(ci);
+        List<CellInfo> ni = new ArrayList<>();
+        in.readParcelableList(ni, Object.class.getClassLoader(), android.telephony.CellInfo.class);
+        networkInfos = ni;
     }
 
     @Override
@@ -106,6 +104,17 @@ public final class NetworkScanResult implements Parcelable {
         return (scanStatus == nsr.scanStatus
                 && scanError == nsr.scanError
                 && networkInfos.equals(nsr.networkInfos));
+    }
+
+    @Override
+    public String toString() {
+        return new StringBuilder()
+            .append("{")
+            .append("scanStatus=" + scanStatus)
+            .append(", scanError=" + scanError)
+            .append(", networkInfos=" + networkInfos)
+            .append("}")
+            .toString();
     }
 
     @Override

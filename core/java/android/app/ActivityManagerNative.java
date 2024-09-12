@@ -15,6 +15,7 @@
  */
 
 package android.app;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Intent;
 import android.os.IBinder;
 
@@ -24,12 +25,18 @@ import android.os.IBinder;
  */
 @Deprecated
 public abstract class ActivityManagerNative {
+
+    @UnsupportedAppUsage
+    public ActivityManagerNative() {
+    }
+
     /**
      * Cast a Binder object into an activity manager interface, generating
      * a proxy if needed.
      *
      * @deprecated use IActivityManager.Stub.asInterface instead.
      */
+    @UnsupportedAppUsage
     static public IActivityManager asInterface(IBinder obj) {
         return IActivityManager.Stub.asInterface(obj);
     }
@@ -39,6 +46,7 @@ public abstract class ActivityManagerNative {
      *
      * @deprecated use ActivityManager.getService instead.
      */
+    @UnsupportedAppUsage
     static public IActivityManager getDefault() {
         return ActivityManager.getService();
     }
@@ -48,6 +56,7 @@ public abstract class ActivityManagerNative {
      *
      * @deprecated use ActivityManagerInternal.isSystemReady instead.
      */
+    @UnsupportedAppUsage
     static public boolean isSystemReady() {
         return ActivityManager.isSystemReady();
     }
@@ -55,6 +64,7 @@ public abstract class ActivityManagerNative {
     /**
      * @deprecated use ActivityManager.broadcastStickyIntent instead.
      */
+    @UnsupportedAppUsage
     static public void broadcastStickyIntent(Intent intent, String permission, int userId) {
         broadcastStickyIntent(intent, permission, AppOpsManager.OP_NONE, userId);
     }
@@ -75,20 +85,20 @@ public abstract class ActivityManagerNative {
      */
     static public void noteWakeupAlarm(PendingIntent ps, int sourceUid, String sourcePkg,
             String tag) {
-        ActivityManager.noteWakeupAlarm(ps, sourceUid, sourcePkg, tag);
+        ActivityManager.noteWakeupAlarm(ps, null, sourceUid, sourcePkg, tag);
     }
 
     /**
      * @deprecated use ActivityManager.noteAlarmStart instead.
      */
     static public void noteAlarmStart(PendingIntent ps, int sourceUid, String tag) {
-        ActivityManager.noteAlarmStart(ps, sourceUid, tag);
+        ActivityManager.noteAlarmStart(ps, null, sourceUid, tag);
     }
 
     /**
      * @deprecated use ActivityManager.noteAlarmFinish instead.
      */
     static public void noteAlarmFinish(PendingIntent ps, int sourceUid, String tag) {
-        ActivityManager.noteAlarmFinish(ps, sourceUid, tag);
+        ActivityManager.noteAlarmFinish(ps, null, sourceUid, tag);
     }
 }

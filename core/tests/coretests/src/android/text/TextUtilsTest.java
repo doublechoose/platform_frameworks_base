@@ -16,34 +16,42 @@
 
 package android.text;
 
+import static android.text.TextUtils.formatSimple;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
-import android.support.test.runner.AndroidJUnit4;
-import com.google.android.collect.Lists;
-
 import android.os.Parcel;
-import android.support.test.filters.LargeTest;
-import android.support.test.filters.SmallTest;
+import android.platform.test.annotations.Presubmit;
 import android.test.MoreAsserts;
 import android.text.style.StyleSpan;
 import android.text.util.Rfc822Token;
 import android.text.util.Rfc822Tokenizer;
 import android.view.View;
 
+import androidx.test.filters.LargeTest;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
+
+import com.google.android.collect.Lists;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import org.junit.Test;
-import org.junit.runner.RunWith;
 
 /**
  * TextUtilsTest tests {@link TextUtils}.
  */
+@Presubmit
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class TextUtilsTest {
@@ -339,6 +347,66 @@ public class TextUtilsTest {
     }
 
     @Test
+    public void testEllipsize_multiCodepoint() {
+        final TextPaint paint = new TextPaint();
+        final float wordWidth = paint.measureText("MMMM");
+
+        // Establish the ground rules first, for single-codepoint cases.
+        final String ellipsis = "."; // one full stop character
+        assertEquals(
+                "MM.\uFEFF",
+                TextUtils.ellipsize("MMMM", paint, 0.7f * wordWidth,
+                        TextUtils.TruncateAt.END, true /* preserve length */,
+                        null /* no callback */, TextDirectionHeuristics.LTR,
+                        ellipsis));
+        assertEquals(
+                "MM.",
+                TextUtils.ellipsize("MMMM", paint, 0.7f * wordWidth,
+                        TextUtils.TruncateAt.END, false /* preserve length */,
+                        null /* no callback */, TextDirectionHeuristics.LTR,
+                        ellipsis));
+        assertEquals(
+                "M.",
+                TextUtils.ellipsize("MM", paint, 0.45f * wordWidth,
+                        TextUtils.TruncateAt.END, true /* preserve length */,
+                        null /* no callback */, TextDirectionHeuristics.LTR,
+                        ellipsis));
+        assertEquals(
+                "M.",
+                TextUtils.ellipsize("MM", paint, 0.45f * wordWidth,
+                        TextUtils.TruncateAt.END, false /* preserve length */,
+                        null /* no callback */, TextDirectionHeuristics.LTR,
+                        ellipsis));
+
+        // Now check the differences for multi-codepoint ellipsis.
+        final String longEllipsis = ".."; // two full stop characters
+        assertEquals(
+                "MM..",
+                TextUtils.ellipsize("MMMM", paint, 0.7f * wordWidth,
+                        TextUtils.TruncateAt.END, true /* preserve length */,
+                        null /* no callback */, TextDirectionHeuristics.LTR,
+                        longEllipsis));
+        assertEquals(
+                "MM..",
+                TextUtils.ellipsize("MMMM", paint, 0.7f * wordWidth,
+                        TextUtils.TruncateAt.END, false /* preserve length */,
+                        null /* no callback */, TextDirectionHeuristics.LTR,
+                        longEllipsis));
+        assertEquals(
+                "M\uFEFF",
+                TextUtils.ellipsize("MM", paint, 0.45f * wordWidth,
+                        TextUtils.TruncateAt.END, true /* preserve length */,
+                        null /* no callback */, TextDirectionHeuristics.LTR,
+                        longEllipsis));
+        assertEquals(
+                "M..",
+                TextUtils.ellipsize("MM", paint, 0.45f * wordWidth,
+                        TextUtils.TruncateAt.END, false /* preserve length */,
+                        null /* no callback */, TextDirectionHeuristics.LTR,
+                        longEllipsis));
+    }
+
+    @Test
     public void testDelimitedStringContains() {
         assertFalse(TextUtils.delimitedStringContains("", ',', null));
         assertFalse(TextUtils.delimitedStringContains(null, ',', ""));
@@ -361,14 +429,23 @@ public class TextUtilsTest {
     @Test
     public void testCharSequenceCreator() {
         Parcel p = Parcel.obtain();
-        TextUtils.writeToParcel(null, p, 0);
-        CharSequence text = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(p);
-        assertNull("null CharSequence should generate null from parcel", text);
+        CharSequence text;
+        try {
+            TextUtils.writeToParcel(null, p, 0);
+            text = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(p);
+            assertNull("null CharSequence should generate null from parcel", text);
+        } finally {
+            p.recycle();
+        }
         p = Parcel.obtain();
-        TextUtils.writeToParcel("test", p, 0);
-        p.setDataPosition(0);
-        text = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(p);
-        assertEquals("conversion to/from parcel failed", "test", text);
+        try {
+            TextUtils.writeToParcel("test", p, 0);
+            p.setDataPosition(0);
+            text = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(p);
+            assertEquals("conversion to/from parcel failed", "test", text);
+        } finally {
+            p.recycle();
+        }
     }
 
     @Test
@@ -376,10 +453,14 @@ public class TextUtilsTest {
         Parcel p;
         CharSequence text;
         p = Parcel.obtain();
-        TextUtils.writeToParcel(null, p, 0);
-        p.setDataPosition(0);
-        text = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(p);
-        assertNull("null CharSequence should generate null from parcel", text);
+        try {
+            TextUtils.writeToParcel(null, p, 0);
+            p.setDataPosition(0);
+            text = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(p);
+            assertNull("null CharSequence should generate null from parcel", text);
+        } finally {
+            p.recycle();
+        }
     }
 
     @Test
@@ -387,10 +468,14 @@ public class TextUtilsTest {
         Parcel p;
         CharSequence text;
         p = Parcel.obtain();
-        TextUtils.writeToParcel(new SpannableString("test"), p, 0);
-        p.setDataPosition(0);
-        text = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(p);
-        assertEquals("conversion to/from parcel failed", "test", text.toString());
+        try {
+            TextUtils.writeToParcel(new SpannableString("test"), p, 0);
+            p.setDataPosition(0);
+            text = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(p);
+            assertEquals("conversion to/from parcel failed", "test", text.toString());
+        } finally {
+            p.recycle();
+        }
     }
 
     @Test
@@ -398,10 +483,14 @@ public class TextUtilsTest {
         Parcel p;
         CharSequence text;
         p = Parcel.obtain();
-        TextUtils.writeToParcel("test", p, 0);
-        p.setDataPosition(0);
-        text = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(p);
-        assertEquals("conversion to/from parcel failed", "test", text.toString());
+        try {
+            TextUtils.writeToParcel("test", p, 0);
+            p.setDataPosition(0);
+            text = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(p);
+            assertEquals("conversion to/from parcel failed", "test", text.toString());
+        } finally {
+            p.recycle();
+        }
     }
 
     /**
@@ -579,5 +668,285 @@ public class TextUtilsTest {
                 TextUtils.getLayoutDirectionFromLocale(Locale.forLanguageTag("fa-US")));
         assertEquals(View.LAYOUT_DIRECTION_RTL,
                 TextUtils.getLayoutDirectionFromLocale(Locale.forLanguageTag("tr-Arab")));
+    }
+
+    @Test
+    public void testToUpperCase() {
+        {
+            final CharSequence result = TextUtils.toUpperCase(null, "abc", false);
+            assertEquals(StringBuilder.class, result.getClass());
+            assertEquals("ABC", result.toString());
+        }
+        {
+            final SpannableString str = new SpannableString("abc");
+            Object span = new Object();
+            str.setSpan(span, 1, 2, Spanned.SPAN_INCLUSIVE_INCLUSIVE);
+
+            final CharSequence result = TextUtils.toUpperCase(null, str, true /* copySpans */);
+            assertEquals(SpannableStringBuilder.class, result.getClass());
+            assertEquals("ABC", result.toString());
+            final Spanned spanned = (Spanned) result;
+            final Object[] resultSpans = spanned.getSpans(0, result.length(), Object.class);
+            assertEquals(1, resultSpans.length);
+            assertSame(span, resultSpans[0]);
+            assertEquals(1, spanned.getSpanStart(span));
+            assertEquals(2, spanned.getSpanEnd(span));
+            assertEquals(Spanned.SPAN_INCLUSIVE_INCLUSIVE, spanned.getSpanFlags(span));
+        }
+        {
+            final Locale turkish = new Locale("tr", "TR");
+            final CharSequence result = TextUtils.toUpperCase(turkish, "i", false);
+            assertEquals(StringBuilder.class, result.getClass());
+            assertEquals("İ", result.toString());
+        }
+        {
+            final String str = "ABC";
+            assertSame(str, TextUtils.toUpperCase(null, str, false));
+        }
+        {
+            final SpannableString str = new SpannableString("ABC");
+            str.setSpan(new Object(), 1, 2, Spanned.SPAN_INCLUSIVE_INCLUSIVE);
+            assertSame(str, TextUtils.toUpperCase(null, str, true /* copySpans */));
+        }
+    }
+
+    // Copied from cts/tests/tests/widget/src/android/widget/cts/TextViewTest.java and modified
+    // for the TextUtils.toUpperCase method.
+    @Test
+    public void testToUpperCase_SpansArePreserved() {
+        final Locale greek = new Locale("el", "GR");
+        final String lowerString = "ι\u0301ριδα";  // ίριδα with first letter decomposed
+        final String upperString = "ΙΡΙΔΑ";  // uppercased
+        // expected lowercase to uppercase index map
+        final int[] indexMap = {0, 1, 1, 2, 3, 4, 5};
+        final int flags = Spanned.SPAN_INCLUSIVE_INCLUSIVE;
+
+        final Spannable source = new SpannableString(lowerString);
+        source.setSpan(new Object(), 0, 1, flags);
+        source.setSpan(new Object(), 1, 2, flags);
+        source.setSpan(new Object(), 2, 3, flags);
+        source.setSpan(new Object(), 3, 4, flags);
+        source.setSpan(new Object(), 4, 5, flags);
+        source.setSpan(new Object(), 5, 6, flags);
+        source.setSpan(new Object(), 0, 2, flags);
+        source.setSpan(new Object(), 1, 3, flags);
+        source.setSpan(new Object(), 2, 4, flags);
+        source.setSpan(new Object(), 0, 6, flags);
+        final Object[] sourceSpans = source.getSpans(0, source.length(), Object.class);
+
+        final CharSequence uppercase = TextUtils.toUpperCase(greek, source, true /* copySpans */);
+        assertEquals(SpannableStringBuilder.class, uppercase.getClass());
+        final Spanned result = (Spanned) uppercase;
+
+        assertEquals(upperString, result.toString());
+        final Object[] resultSpans = result.getSpans(0, result.length(), Object.class);
+        assertEquals(sourceSpans.length, resultSpans.length);
+        for (int i = 0; i < sourceSpans.length; i++) {
+            assertSame(sourceSpans[i], resultSpans[i]);
+            final Object span = sourceSpans[i];
+            assertEquals(indexMap[source.getSpanStart(span)], result.getSpanStart(span));
+            assertEquals(indexMap[source.getSpanEnd(span)], result.getSpanEnd(span));
+            assertEquals(source.getSpanFlags(span), result.getSpanFlags(span));
+        }
+    }
+
+    @Test
+    public void testTrimToSize() {
+        final String testString = "a\uD800\uDC00a";
+        assertEquals("Should return text as it is if size is longer than length",
+                testString, TextUtils.trimToSize(testString, 5));
+        assertEquals("Should return text as it is if size is equal to length",
+                testString, TextUtils.trimToSize(testString, 4));
+        assertEquals("Should trim text",
+                "a\uD800\uDC00", TextUtils.trimToSize(testString, 3));
+        assertEquals("Should trim surrogate pairs if size is in the middle of a pair",
+                "a", TextUtils.trimToSize(testString, 2));
+        assertEquals("Should trim text",
+                "a", TextUtils.trimToSize(testString, 1));
+        assertEquals("Should handle null",
+                null, TextUtils.trimToSize(null, 1));
+
+        assertEquals("Should trim high surrogate if invalid surrogate",
+                "a\uD800", TextUtils.trimToSize("a\uD800\uD800", 2));
+        assertEquals("Should trim low surrogate if invalid surrogate",
+                "a\uDC00", TextUtils.trimToSize("a\uDC00\uDC00", 2));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testTrimToSizeThrowsExceptionForNegativeSize() {
+        TextUtils.trimToSize("", -1);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testTrimToSizeThrowsExceptionForZeroSize() {
+        TextUtils.trimToSize("abc", 0);
+    }
+
+    @Test
+    public void truncateStringForUtf8Storage() {
+        assertEquals("", TextUtils.truncateStringForUtf8Storage("abc", 0));
+
+        //================ long normal case ================
+        StringBuilder builder = new StringBuilder();
+
+        int n = 50;
+        for (int i = 0; i < 2 * n; i++) {
+            builder.append("哈");
+        }
+        String initial = builder.toString();
+        String result = TextUtils.truncateStringForUtf8Storage(initial, n);
+
+        // Result should be the beginning of initial
+        assertTrue(initial.startsWith(result));
+
+        // Result should take less than n bytes in UTF-8
+        assertTrue(result.getBytes(StandardCharsets.UTF_8).length <= n);
+
+        // result + the next codePoint should take strictly more than
+        // n bytes in UTF-8
+        assertTrue(initial.substring(0, initial.offsetByCodePoints(result.length(), 1))
+                .getBytes(StandardCharsets.UTF_8).length > n);
+
+        // =================== short normal case =====================
+        String s = "sf\u20ACgk\u00E9ls\u00E9fg";
+        result = TextUtils.truncateStringForUtf8Storage(s, 100);
+        assertEquals(s, result);
+    }
+
+    @Test
+    public void testTruncateInMiddleOfSurrogate() {
+        StringBuilder builder = new StringBuilder();
+        String beginning = "a";
+        builder.append(beginning);
+        builder.append(Character.toChars(0x1D11E));
+
+        String result = TextUtils.truncateStringForUtf8Storage(builder.toString(), 3);
+
+        // \u1D11E is a surrogate and needs 4 bytes in UTF-8. beginning == "a" uses
+        // only 1 bytes in UTF8
+        // As we allow only 3 bytes for the whole string, so just 2 for this
+        // codePoint, there is not enough place and the string will be truncated
+        // just before it
+        assertEquals(beginning, result);
+    }
+
+    @Test
+    public void testTruncateInMiddleOfChar() {
+        StringBuilder builder = new StringBuilder();
+        String beginning = "a";
+        builder.append(beginning);
+        builder.append(Character.toChars(0x20AC));
+
+        String result = TextUtils.truncateStringForUtf8Storage(builder.toString(), 3);
+
+        // Like above, \u20AC uses 3 bytes in UTF-8, with "beginning", that makes
+        // 4 bytes so it is too big and should be truncated
+        assertEquals(beginning, result);
+    }
+
+    @Test
+    public void testTruncateSubString() {
+        String test = "sdgkl;hjsl;gjhdgkljdfhglkdj";
+        String sub = test.substring(10, 20);
+        String res = TextUtils.truncateStringForUtf8Storage(sub, 255);
+        assertEquals(sub, res);
+    }
+
+    @Test(expected = IndexOutOfBoundsException.class)
+    public void truncateStringForUtf8StorageThrowsExceptionForNegativeSize() {
+        TextUtils.truncateStringForUtf8Storage("abc", -1);
+    }
+
+    @Test
+    public void length() {
+        assertEquals(0, TextUtils.length(null));
+        assertEquals(0, TextUtils.length(""));
+        assertEquals(2, TextUtils.length("  "));
+        assertEquals(6, TextUtils.length("Hello!"));
+    }
+
+    @Test
+    public void testTrimToLengthWithEllipsis() {
+        assertEquals("ABC...", TextUtils.trimToLengthWithEllipsis("ABCDEF", 3));
+        assertEquals("ABC", TextUtils.trimToLengthWithEllipsis("ABC", 3));
+        assertEquals("", TextUtils.trimToLengthWithEllipsis("", 3));
+        assertNull(TextUtils.trimToLengthWithEllipsis(null, 3));
+    }
+
+    @Test
+    public void testFormatSimple_Types() {
+        assertEquals("true", formatSimple("%b", true));
+        assertEquals("false", formatSimple("%b", false));
+        assertEquals("true", formatSimple("%b", this));
+        assertEquals("false", formatSimple("%b", new Object[] { null }));
+
+        assertEquals("!", formatSimple("%c", '!'));
+
+        assertEquals("42", formatSimple("%d", 42));
+        assertEquals("281474976710656", formatSimple("%d", 281474976710656L));
+
+        assertEquals("3.14159", formatSimple("%f", 3.14159));
+        assertEquals("NaN", formatSimple("%f", Float.NaN));
+
+        assertEquals("example", formatSimple("%s", "example"));
+        assertEquals("null", formatSimple("%s", new Object[] { null }));
+
+        assertEquals("2a", formatSimple("%x", 42));
+        assertEquals("1000000000000", formatSimple("%x", 281474976710656L));
+
+        assertEquals("%", formatSimple("%%"));
+    }
+
+    @Test
+    public void testFormatSimple_Width() {
+        assertEquals("42", formatSimple("%1d", 42));
+        assertEquals("42", formatSimple("%2d", 42));
+        assertEquals(" 42", formatSimple("%3d", 42));
+        assertEquals("  42", formatSimple("%4d", 42));
+        assertEquals("  42  42", formatSimple("%4d%4d", 42, 42));
+        assertEquals(" -42", formatSimple("%4d", -42));
+        assertEquals("        42", formatSimple("%10d", 42));
+
+        assertEquals("42", formatSimple("%01d", 42));
+        assertEquals("42", formatSimple("%02d", 42));
+        assertEquals("042", formatSimple("%03d", 42));
+        assertEquals("0042", formatSimple("%04d", 42));
+        assertEquals("00420042", formatSimple("%04d%04d", 42, 42));
+        assertEquals("-042", formatSimple("%04d", -42));
+        assertEquals("0000000042", formatSimple("%010d", 42));
+    }
+
+    @Test
+    public void testFormatSimple_Empty() {
+        assertEquals("", formatSimple(""));
+    }
+
+    @Test
+    public void testFormatSimple_Typical() {
+        assertEquals("String foobar and %% number -42 together",
+                formatSimple("String %s%s and %%%% number %d%d together", "foo", "bar", -4, 2));
+    }
+
+    @Test
+    public void testFormatSimple_Advanced() {
+        assertEquals("000000000000002a.ext",
+                formatSimple("%016x.%s", 42, "ext"));
+        assertEquals("crtcl=0x002a:intrsv=Y:grnk=0x0018:gsmry=A:example:rnk=0x0000",
+                formatSimple("crtcl=0x%04x:intrsv=%c:grnk=0x%04x:gsmry=%c:%s:rnk=0x%04x",
+                        42, 'Y', 24, 'A', "example", 0));
+    }
+
+    @Test
+    public void testFormatSimple_Mismatch() {
+        try {
+            formatSimple("%s");
+            fail();
+        } catch (IllegalArgumentException expected) {
+        }
+        try {
+            formatSimple("%s", "foo", "bar");
+            fail();
+        } catch (IllegalArgumentException expected) {
+        }
     }
 }

@@ -16,6 +16,9 @@
 
 package com.android.internal.os;
 
+import android.compat.annotation.UnsupportedAppUsage;
+import android.os.Build;
+
 /**
  * Helper class for passing more arguments though a message
  * and avoiding allocation of a custom class for wrapping the
@@ -23,6 +26,7 @@ package com.android.internal.os;
  * it is responsibility of the client to recycle and instance
  * once it is no longer used.
  */
+@android.ravenwood.annotation.RavenwoodKeepWholeClass
 public final class SomeArgs {
 
     private static final int MAX_POOL_SIZE = 10;
@@ -40,25 +44,32 @@ public final class SomeArgs {
     static final int WAIT_FINISHED = 2;
     int mWaitState = WAIT_NONE;
 
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public Object arg1;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public Object arg2;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public Object arg3;
     public Object arg4;
     public Object arg5;
     public Object arg6;
     public Object arg7;
-    public Object arg8;
     public int argi1;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public int argi2;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public int argi3;
     public int argi4;
     public int argi5;
     public int argi6;
+    public long argl1;
+    public long argl2;
 
     private SomeArgs() {
         /* do nothing - reduce visibility */
     }
 
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static SomeArgs obtain() {
         synchronized (sPoolLock) {
             if (sPoolSize > 0) {
@@ -84,6 +95,7 @@ public final class SomeArgs {
         }
     }
 
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void recycle() {
         if (mInPool) {
             throw new IllegalStateException("Already recycled.");
@@ -116,5 +128,7 @@ public final class SomeArgs {
         argi4 = 0;
         argi5 = 0;
         argi6 = 0;
+        argl1 = 0;
+        argl2 = 0;
     }
 }

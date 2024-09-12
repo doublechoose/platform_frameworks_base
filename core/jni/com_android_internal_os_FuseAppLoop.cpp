@@ -142,14 +142,14 @@ void com_android_internal_os_FuseAppLoop_replyOpen(
 }
 
 void com_android_internal_os_FuseAppLoop_replyLookup(
-        JNIEnv* env, jobject self, jlong ptr, jlong unique, jlong inode, jint size) {
+        JNIEnv* env, jobject self, jlong ptr, jlong unique, jlong inode, jlong size) {
     if (!reinterpret_cast<fuse::FuseAppLoop*>(ptr)->ReplyLookup(unique, inode, size)) {
         reinterpret_cast<fuse::FuseAppLoop*>(ptr)->Break();
     }
 }
 
 void com_android_internal_os_FuseAppLoop_replyGetAttr(
-        JNIEnv* env, jobject self, jlong ptr, jlong unique, jlong inode, jint size) {
+        JNIEnv* env, jobject self, jlong ptr, jlong unique, jlong inode, jlong size) {
     if (!reinterpret_cast<fuse::FuseAppLoop*>(ptr)->ReplyGetAttr(
             unique, inode, size, S_IFREG | 0777)) {
         reinterpret_cast<fuse::FuseAppLoop*>(ptr)->Break();
@@ -166,8 +166,8 @@ void com_android_internal_os_FuseAppLoop_replyWrite(
 void com_android_internal_os_FuseAppLoop_replyRead(
         JNIEnv* env, jobject self, jlong ptr, jlong unique, jint size, jbyteArray data) {
     ScopedByteArrayRO array(env, data);
-    CHECK(size >= 0);
-    CHECK(static_cast<size_t>(size) < array.size());
+    CHECK_GE(size, 0);
+    CHECK_LE(static_cast<size_t>(size), array.size());
     if (!reinterpret_cast<fuse::FuseAppLoop*>(ptr)->ReplyRead(unique, size, array.get())) {
         reinterpret_cast<fuse::FuseAppLoop*>(ptr)->Break();
     }

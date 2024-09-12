@@ -16,6 +16,8 @@
 
 package com.google.android.collect;
 
+import android.compat.annotation.UnsupportedAppUsage;
+import android.os.Build;
 import android.util.ArraySet;
 
 import java.util.Collections;
@@ -29,6 +31,7 @@ import java.util.TreeSet;
  * other static methods for working with Sets.
  *
  */
+@android.ravenwood.annotation.RavenwoodKeepWholeClass
 public class Sets {
     
     /**
@@ -42,6 +45,7 @@ public class Sets {
      *
      * @return a newly-created, initially-empty {@code HashSet}
      */
+    @UnsupportedAppUsage
     public static <K> HashSet<K> newHashSet() {
         return new HashSet<K>();
     }
@@ -63,6 +67,7 @@ public class Sets {
      * @return a newly-created {@code HashSet} containing those elements (minus
      *     duplicates)
      */
+    @UnsupportedAppUsage
     public static <E> HashSet<E> newHashSet(E... elements) {
         int capacity = elements.length * 4 / 3 + 1;
         HashSet<E> set = new HashSet<E>(capacity);
@@ -75,6 +80,7 @@ public class Sets {
      *
      * @return a newly-created, initially-empty {@code SortedSet}.
      */
+    @UnsupportedAppUsage
     public static <E> SortedSet<E> newSortedSet() {
         return new TreeSet<E>();
     }
@@ -95,6 +101,7 @@ public class Sets {
     /**
      * Creates a {@code ArraySet} instance.
      */
+    @UnsupportedAppUsage
     public static <E> ArraySet<E> newArraySet() {
         return new ArraySet<E>();
     }
@@ -102,6 +109,7 @@ public class Sets {
     /**
      * Creates a {@code ArraySet} instance containing the given elements.
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static <E> ArraySet<E> newArraySet(E... elements) {
         int capacity = elements.length * 4 / 3 + 1;
         ArraySet<E> set = new ArraySet<E>(capacity);

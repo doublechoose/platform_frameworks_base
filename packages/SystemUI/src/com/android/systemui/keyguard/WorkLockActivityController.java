@@ -16,60 +16,72 @@
 
 package com.android.systemui.keyguard;
 
-import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.ActivityOptions;
-import android.app.IActivityManager;
+import android.app.ActivityTaskManager;
+import android.app.IActivityTaskManager;
 import android.app.KeyguardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.RemoteException;
-import android.os.UserHandle;
+import android.util.Log;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.systemui.recents.events.EventBus;
-import com.android.systemui.recents.misc.SystemServicesProxy;
-import com.android.systemui.recents.misc.SystemServicesProxy.TaskStackListener;
+import com.android.systemui.settings.UserTracker;
+import com.android.systemui.shared.system.TaskStackChangeListener;
+import com.android.systemui.shared.system.TaskStackChangeListeners;
 
 public class WorkLockActivityController {
-    private final Context mContext;
-    private final SystemServicesProxy mSsp;
-    private final IActivityManager mIam;
+    private static final String TAG = WorkLockActivityController.class.getSimpleName();
 
-    public WorkLockActivityController(Context context) {
-        this(context, SystemServicesProxy.getInstance(context), ActivityManager.getService());
+    private final Context mContext;
+    private final UserTracker mUserTracker;
+    private final IActivityTaskManager mIatm;
+
+    public WorkLockActivityController(Context context, UserTracker userTracker) {
+        this(context, userTracker, TaskStackChangeListeners.getInstance(),
+                ActivityTaskManager.getService());
     }
 
     @VisibleForTesting
-    WorkLockActivityController(Context context, SystemServicesProxy ssp, IActivityManager am) {
+    WorkLockActivityController(
+            Context context, UserTracker userTracker, TaskStackChangeListeners tscl,
+            IActivityTaskManager iAtm) {
         mContext = context;
-        mSsp = ssp;
-        mIam = am;
+        mUserTracker = userTracker;
+        mIatm = iAtm;
 
-        mSsp.registerTaskStackListener(mLockListener);
+        tscl.registerTaskStackListener(mLockListener);
     }
 
-    private void startWorkChallengeInTask(int taskId, int userId) {
+    private void startWorkChallengeInTask(ActivityManager.RunningTaskInfo info, int userId) {
+        String packageName = info.baseActivity != null ? info.baseActivity.getPackageName() : "";
         Intent intent = new Intent(KeyguardManager.ACTION_CONFIRM_DEVICE_CREDENTIAL_WITH_USER)
                 .setComponent(new ComponentName(mContext, WorkLockActivity.class))
                 .putExtra(Intent.EXTRA_USER_ID, userId)
-                .putExtra(WorkLockActivity.EXTRA_TASK_DESCRIPTION, mSsp.getTaskDescription(taskId))
+                .putExtra(Intent.EXTRA_PACKAGE_NAME, packageName)
                 .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
                         | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
         final ActivityOptions options = ActivityOptions.makeBasic();
-        options.setLaunchTaskId(taskId);
+        options.setLaunchTaskId(info.taskId);
         options.setTaskOverlay(true, false /* canResume */);
 
-        final int result = startActivityAsUser(intent, options.toBundle(), UserHandle.USER_CURRENT);
+        final int result = startActivityAsUser(intent, options.toBundle(),
+                mUserTracker.getUserId());
         if (ActivityManager.isStartResultSuccessful(result)) {
             // OK
         } else {
             // Starting the activity inside the task failed. We can't be sure why, so to be
             // safe just remove the whole task if it still exists.
-            mSsp.removeTask(taskId);
+            Log.w(TAG, "Failed to start work lock activity, will remove task=" + info.taskId);
+            try {
+                mIatm.removeTask(info.taskId);
+            } catch (RemoteException e) {
+                Log.e(TAG, "Failed to remove task=" + info.taskId);
+            }
         }
     }
 
@@ -79,9 +91,10 @@ public class WorkLockActivityController {
      */
     private int startActivityAsUser(Intent intent, Bundle options, int userId) {
         try {
-            return mIam.startActivityAsUser(
+            return mIatm.startActivityAsUser(
                     mContext.getIApplicationThread() /*caller*/,
                     mContext.getBasePackageName() /*callingPackage*/,
+                    mContext.getAttributionTag() /*callingAttributionTag*/,
                     intent /*intent*/,
                     intent.resolveTypeIfNeeded(mContext.getContentResolver()) /*resolvedType*/,
                     null /*resultTo*/,
@@ -98,10 +111,10 @@ public class WorkLockActivityController {
         }
     }
 
-    private final TaskStackListener mLockListener = new TaskStackListener() {
+    private final TaskStackChangeListener mLockListener = new TaskStackChangeListener() {
         @Override
-        public void onTaskProfileLocked(int taskId, int userId) {
-            startWorkChallengeInTask(taskId, userId);
+        public void onTaskProfileLocked(ActivityManager.RunningTaskInfo info, int userId) {
+            startWorkChallengeInTask(info, userId);
         }
     };
 }

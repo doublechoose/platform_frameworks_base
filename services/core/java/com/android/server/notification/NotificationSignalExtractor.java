@@ -17,11 +17,14 @@
 package com.android.server.notification;
 
 import android.content.Context;
+import com.android.internal.compat.IPlatformCompat;
 
 /**
  * Extracts signals that will be useful to the {@link NotificationComparator} and caches them
  *  on the {@link NotificationRecord} object. These annotations will
  *  not be passed on to {@link android.service.notification.NotificationListenerService}s.
+ *
+ *  If you add a new Extractor be sure to add it to R.array.config_notificationSignalExtractors.
  */
 public interface NotificationSignalExtractor {
 
@@ -44,4 +47,12 @@ public interface NotificationSignalExtractor {
      * @param config information about which signals are important.
      */
     void setConfig(RankingConfig config);
+
+    /**
+     * @param helper Helper to determine what components of notifications should be blocked due to
+     *               DND.
+     */
+    void setZenHelper(ZenModeHelper helper);
+
+    default void setCompatChangeLogger(IPlatformCompat platformCompat){};
 }

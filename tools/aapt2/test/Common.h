@@ -21,11 +21,11 @@
 
 #include "android-base/logging.h"
 #include "android-base/macros.h"
+#include "androidfw/ConfigDescription.h"
 #include "androidfw/StringPiece.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
-#include "ConfigDescription.h"
 #include "Debug.h"
 #include "ResourceTable.h"
 #include "ResourceUtils.h"
@@ -34,37 +34,28 @@
 #include "io/File.h"
 #include "process/IResourceTableConsumer.h"
 
-//
-// GTEST 1.7 doesn't explicitly cast to bool, which causes explicit operators to
-// fail to compile.
-//
-#define AAPT_ASSERT_TRUE(v) ASSERT_TRUE(bool(v))
-#define AAPT_ASSERT_FALSE(v) ASSERT_FALSE(bool(v))
-#define AAPT_EXPECT_TRUE(v) EXPECT_TRUE(bool(v))
-#define AAPT_EXPECT_FALSE(v) EXPECT_FALSE(bool(v))
-
 namespace aapt {
 namespace test {
 
-IDiagnostics* GetDiagnostics();
+android::IDiagnostics* GetDiagnostics();
 
-inline ResourceName ParseNameOrDie(const android::StringPiece& str) {
+inline ResourceName ParseNameOrDie(android::StringPiece str) {
   ResourceNameRef ref;
-  CHECK(ResourceUtils::ParseResourceName(str, &ref)) << "invalid resource name";
+  CHECK(ResourceUtils::ParseResourceName(str, &ref)) << "invalid resource name: " << str;
   return ref.ToResourceName();
 }
 
-inline ConfigDescription ParseConfigOrDie(const android::StringPiece& str) {
-  ConfigDescription config;
-  CHECK(ConfigDescription::Parse(str, &config)) << "invalid configuration";
+inline android::ConfigDescription ParseConfigOrDie(android::StringPiece str) {
+  android::ConfigDescription config;
+  CHECK(android::ConfigDescription::Parse(str, &config)) << "invalid configuration: " << str;
   return config;
 }
 
 template <typename T = Value>
-T* GetValueForConfigAndProduct(ResourceTable* table, const android::StringPiece& res_name,
-                               const ConfigDescription& config,
-                               const android::StringPiece& product) {
-  Maybe<ResourceTable::SearchResult> result = table->FindResource(ParseNameOrDie(res_name));
+T* GetValueForConfigAndProduct(ResourceTable* table, android::StringPiece res_name,
+                               const android::ConfigDescription& config,
+                               android::StringPiece product) {
+  std::optional<ResourceTable::SearchResult> result = table->FindResource(ParseNameOrDie(res_name));
   if (result) {
     ResourceConfigValue* config_value = result.value().entry->FindValue(config, product);
     if (config_value) {
@@ -75,38 +66,46 @@ T* GetValueForConfigAndProduct(ResourceTable* table, const android::StringPiece&
 }
 
 template <>
-Value* GetValueForConfigAndProduct<Value>(ResourceTable* table,
-                                          const android::StringPiece& res_name,
-                                          const ConfigDescription& config,
-                                          const android::StringPiece& product);
+Value* GetValueForConfigAndProduct<Value>(ResourceTable* table, android::StringPiece res_name,
+                                          const android::ConfigDescription& config,
+                                          android::StringPiece product);
 
 template <typename T = Value>
-T* GetValueForConfig(ResourceTable* table, const android::StringPiece& res_name,
-                     const ConfigDescription& config) {
+T* GetValueForConfig(ResourceTable* table, android::StringPiece res_name,
+                     const android::ConfigDescription& config) {
   return GetValueForConfigAndProduct<T>(table, res_name, config, {});
 }
 
 template <typename T = Value>
-T* GetValue(ResourceTable* table, const android::StringPiece& res_name) {
+T* GetValue(ResourceTable* table, android::StringPiece res_name) {
   return GetValueForConfig<T>(table, res_name, {});
 }
 
 class TestFile : public io::IFile {
  public:
-  explicit TestFile(const android::StringPiece& path) : source_(path) {}
+  explicit TestFile(android::StringPiece path) : source_(path) {
+  }
 
   std::unique_ptr<io::IData> OpenAsData() override {
     return {};
   }
 
-  const Source& GetSource() const override {
+  std::unique_ptr<android::InputStream> OpenInputStream() override {
+    return OpenAsData();
+  }
+
+  const android::Source& GetSource() const override {
     return source_;
   }
+
+  bool GetModificationTime(struct tm* buf) const override {
+    return false;
+  };
 
  private:
   DISALLOW_COPY_AND_ASSIGN(TestFile);
 
-  Source source_;
+  android::Source source_;
 };
 
 }  // namespace test
@@ -135,7 +134,7 @@ template std::ostream& operator<<<Plural>(std::ostream&, const Plural&);
 
 // Add a print method to Maybe.
 template <typename T>
-void PrintTo(const Maybe<T>& value, std::ostream* out) {
+void PrintTo(const std::optional<T>& value, std::ostream* out) {
   if (value) {
     *out << ::testing::PrintToString(value.value());
   } else {
@@ -151,9 +150,90 @@ MATCHER_P(StrEq, a,
   return android::StringPiece16(arg) == a;
 }
 
-MATCHER_P(ValueEq, a,
+template <typename T>
+class ValueEqImpl : public ::testing::MatcherInterface<T> {
+ public:
+  explicit ValueEqImpl(const Value* expected) : expected_(expected) {
+  }
+
+  bool MatchAndExplain(T x, ::testing::MatchResultListener* listener) const override {
+    return expected_->Equals(&x);
+  }
+
+  void DescribeTo(::std::ostream* os) const override {
+    *os << "is equal to " << *expected_;
+  }
+
+  void DescribeNegationTo(::std::ostream* os) const override {
+    *os << "is not equal to " << *expected_;
+  }
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(ValueEqImpl);
+
+  const Value* expected_;
+};
+
+template <typename TValue>
+class ValueEqMatcher {
+ public:
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  ValueEqMatcher(TValue expected) : expected_(std::move(expected)) {
+  }
+
+  template <typename T>
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  operator ::testing::Matcher<T>() const {
+    return ::testing::Matcher<T>(new ValueEqImpl<T>(&expected_));
+  }
+
+ private:
+  TValue expected_;
+};
+
+template <typename TValue>
+class ValueEqPointerMatcher {
+ public:
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  ValueEqPointerMatcher(const TValue* expected) : expected_(expected) {
+  }
+
+  template <typename T>
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  operator ::testing::Matcher<T>() const {
+    return ::testing::Matcher<T>(new ValueEqImpl<T>(expected_));
+  }
+
+ private:
+  const TValue* expected_;
+};
+
+template <typename TValue,
+          typename = typename std::enable_if<!std::is_pointer<TValue>::value, void>::type>
+inline ValueEqMatcher<TValue> ValueEq(TValue value) {
+  return ValueEqMatcher<TValue>(std::move(value));
+}
+
+template <typename TValue>
+inline ValueEqPointerMatcher<TValue> ValueEq(const TValue* value) {
+  return ValueEqPointerMatcher<TValue>(value);
+}
+
+MATCHER_P(StrValueEq, a,
           std::string(negation ? "isn't" : "is") + " equal to " + ::testing::PrintToString(a)) {
-  return arg.Equals(&a);
+  return *(arg.value) == a;
+}
+
+MATCHER_P(HasValue, name,
+          std::string(negation ? "does not have" : "has") + " value " +
+              ::testing::PrintToString(name)) {
+  return GetValueForConfig<Value>(&(*arg), name, {}) != nullptr;
+}
+
+MATCHER_P2(HasValue, name, config,
+           std::string(negation ? "does not have" : "has") + " value " +
+               ::testing::PrintToString(name) + " for config " + ::testing::PrintToString(config)) {
+  return GetValueForConfig<Value>(&(*arg), name, config) != nullptr;
 }
 
 }  // namespace test

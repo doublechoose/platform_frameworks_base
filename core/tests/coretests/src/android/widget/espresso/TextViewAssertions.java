@@ -16,23 +16,27 @@
 
 package android.widget.espresso;
 
-import static android.support.test.espresso.matcher.ViewMatchers.assertThat;
+import static androidx.test.espresso.matcher.ViewMatchers.assertThat;
+
 import static com.android.internal.util.Preconditions.checkNotNull;
+
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.number.IsCloseTo.closeTo;
 
 import android.annotation.IntDef;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
-import android.support.test.espresso.NoMatchingViewException;
-import android.support.test.espresso.ViewAssertion;
 import android.text.Spanned;
 import android.text.TextUtils;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.TextView;
 
+import androidx.test.espresso.NoMatchingViewException;
+import androidx.test.espresso.ViewAssertion;
+
 import junit.framework.AssertionFailedError;
+
 import org.hamcrest.Matcher;
 
 import java.lang.annotation.Retention;
@@ -202,7 +206,7 @@ public final class TextViewAssertions {
                 throw new AssertionFailedError("View should be an instance of EditText");
             }
             EditText editText = (EditText) view;
-            Drawable drawable = editText.getEditorForTesting().getCursorDrawable()[0];
+            Drawable drawable = editText.getEditorForTesting().getCursorDrawable();
             Rect drawableBounds = drawable.getBounds();
             Rect drawablePadding = new Rect();
             drawable.getPadding(drawablePadding);

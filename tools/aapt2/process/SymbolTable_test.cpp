@@ -16,7 +16,15 @@
 
 #include "process/SymbolTable.h"
 
+#include "SdkConstants.h"
+#include "androidfw/BigBuffer.h"
+#include "format/binary/TableFlattener.h"
 #include "test/Test.h"
+
+using ::testing::Eq;
+using ::testing::IsNull;
+using ::testing::Ne;
+using ::testing::NotNull;
 
 namespace aapt {
 
@@ -30,13 +38,13 @@ TEST(ResourceTableSymbolSourceTest, FindSymbols) {
           .Build();
 
   ResourceTableSymbolSource symbol_source(table.get());
-  EXPECT_NE(nullptr, symbol_source.FindByName(test::ParseNameOrDie("android:id/foo")));
-  EXPECT_NE(nullptr, symbol_source.FindByName(test::ParseNameOrDie("android:id/bar")));
+  EXPECT_THAT(symbol_source.FindByName(test::ParseNameOrDie("android:id/foo")), NotNull());
+  EXPECT_THAT(symbol_source.FindByName(test::ParseNameOrDie("android:id/bar")), NotNull());
 
   std::unique_ptr<SymbolTable::Symbol> s =
       symbol_source.FindByName(test::ParseNameOrDie("android:attr/foo"));
-  ASSERT_NE(nullptr, s);
-  EXPECT_NE(nullptr, s->attribute);
+  ASSERT_THAT(s, NotNull());
+  EXPECT_THAT(s->attribute, NotNull());
 }
 
 TEST(ResourceTableSymbolSourceTest, FindPrivateAttrSymbol) {
@@ -49,8 +57,8 @@ TEST(ResourceTableSymbolSourceTest, FindPrivateAttrSymbol) {
   ResourceTableSymbolSource symbol_source(table.get());
   std::unique_ptr<SymbolTable::Symbol> s =
       symbol_source.FindByName(test::ParseNameOrDie("android:attr/foo"));
-  ASSERT_NE(nullptr, s);
-  EXPECT_NE(nullptr, s->attribute);
+  ASSERT_THAT(s, NotNull());
+  EXPECT_THAT(s->attribute, NotNull());
 }
 
 TEST(SymbolTableTest, FindByName) {
@@ -64,8 +72,66 @@ TEST(SymbolTableTest, FindByName) {
   SymbolTable symbol_table(&mangler);
   symbol_table.AppendSource(util::make_unique<ResourceTableSymbolSource>(table.get()));
 
-  EXPECT_NE(nullptr, symbol_table.FindByName(test::ParseNameOrDie("id/foo")));
-  EXPECT_NE(nullptr, symbol_table.FindByName(test::ParseNameOrDie("com.android.lib:id/foo")));
+  EXPECT_THAT(symbol_table.FindByName(test::ParseNameOrDie("id/foo")), NotNull());
+  EXPECT_THAT(symbol_table.FindByName(test::ParseNameOrDie("com.android.lib:id/foo")), NotNull());
+}
+
+using SymbolTableTestFixture = CommandTestFixture;
+TEST_F(SymbolTableTestFixture, FindByNameWhenSymbolIsMangledInResTable) {
+  using namespace android;
+  StdErrDiagnostics diag;
+
+  // Create a static library.
+  const std::string static_lib_compiled_files_dir = GetTestPath("static-lib-compiled");
+  ASSERT_TRUE(CompileFile(GetTestPath("res/values/values.xml"),
+         R"(<?xml version="1.0" encoding="utf-8"?>
+         <resources>
+             <item type="id" name="foo"/>
+        </resources>)",
+         static_lib_compiled_files_dir, &diag));
+
+  const std::string static_lib_apk = GetTestPath("static_lib.apk");
+  std::vector<std::string> link_args = {
+      "--manifest", GetDefaultManifest("com.android.lib"),
+      "--min-sdk-version", "22",
+      "--static-lib",
+      "-o", static_lib_apk,
+  };
+  ASSERT_TRUE(Link(link_args, static_lib_compiled_files_dir, &diag));
+
+  // Merge the static library into the main application package. The static library resources will
+  // be mangled with the library package name.
+  const std::string app_compiled_files_dir = GetTestPath("app-compiled");
+  ASSERT_TRUE(CompileFile(GetTestPath("res/values/values.xml"),
+      R"(<?xml version="1.0" encoding="utf-8"?>
+         <resources>
+             <item type="id" name="bar"/>
+        </resources>)",
+        app_compiled_files_dir, &diag));
+
+  const std::string out_apk = GetTestPath("out.apk");
+  link_args = {
+      "--manifest", GetDefaultManifest("com.android.app"),
+      "--min-sdk-version", "22",
+      "-o", out_apk,
+      static_lib_apk
+  };
+  ASSERT_TRUE(Link(link_args, app_compiled_files_dir, &diag));
+
+  // Construct the test AssetManager.
+  auto asset_manager_source = util::make_unique<AssetManagerSymbolSource>();
+  asset_manager_source->AddAssetPath(out_apk);
+
+  NameMangler name_mangler(NameManglerPolicy{"com.android.app"});
+  SymbolTable symbol_table(&name_mangler);
+  symbol_table.AppendSource(std::move(asset_manager_source));
+
+  EXPECT_THAT(symbol_table.FindByName(test::ParseNameOrDie("com.android.lib:id/foo")), NotNull());
+  EXPECT_THAT(symbol_table.FindByName(test::ParseNameOrDie("com.android.app:id/bar")), NotNull());
+
+  EXPECT_THAT(symbol_table.FindByName(test::ParseNameOrDie("com.android.app:id/foo")), IsNull());
+  EXPECT_THAT(symbol_table.FindByName(test::ParseNameOrDie("com.android.lib:id/bar")), IsNull());
+  EXPECT_THAT(symbol_table.FindByName(test::ParseNameOrDie("com.android.other:id/foo")), IsNull());
 }
 
 }  // namespace aapt

@@ -14,17 +14,17 @@
  * limitations under the License.
  */
 
+#include <android-base/macros.h>
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
-
-#include "service/GraphicsStatsService.h"
-
-#include <frameworks/base/core/proto/android/service/graphicsstats.pb.h>
-
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
+
+#include "protos/graphicsstats.pb.h"
+#include "service/GraphicsStatsService.h"
 
 using namespace android;
 using namespace android::uirenderer;
@@ -35,8 +35,8 @@ std::string findRootPath() {
     // < 1023 because we need room for the null terminator
     if (r <= 0 || r > 1023) {
         int err = errno;
-        fprintf(stderr, "Failed to read from /proc/self/exe; r=%zd, err=%d (%s)\n",
-                r, err, strerror(err));
+        fprintf(stderr, "Failed to read from /proc/self/exe; r=%zd, err=%d (%s)\n", r, err,
+                strerror(err));
         exit(EXIT_FAILURE);
     }
     while (--r > 0) {
@@ -50,27 +50,33 @@ std::string findRootPath() {
 
 // No code left untested
 TEST(GraphicsStats, findRootPath) {
-    std::string expected = "/data/nativetest/hwui_unit_tests";
-    EXPECT_EQ(expected, findRootPath());
+    // Different tools/infrastructure seem to push this to different locations. It shouldn't really
+    // matter where the binary is, so add new locations here as needed. This test still seems good
+    // as it's nice to understand the possibility space, and ensure findRootPath continues working
+    // as expected.
+    std::string acceptableLocations[] = {"/data/nativetest/hwui_unit_tests",
+                                         "/data/nativetest64/hwui_unit_tests",
+                                         "/data/local/tmp/nativetest/hwui_unit_tests/" ABI_STRING};
+    EXPECT_THAT(acceptableLocations, ::testing::Contains(findRootPath()));
 }
 
 TEST(GraphicsStats, saveLoad) {
     std::string path = findRootPath() + "/test_saveLoad";
     std::string packageName = "com.test.saveLoad";
-    ProfileData mockData;
-    mockData.jankFrameCount = 20;
-    mockData.totalFrameCount = 100;
-    mockData.statStartTime = 10000;
+    MockProfileData mockData;
+    mockData.editJankFrameCount() = 20;
+    mockData.editTotalFrameCount() = 100;
+    mockData.editStatStartTime() = 10000;
     // Fill with patterned data we can recognize but which won't map to a
     // memset or basic for iteration count
-    for (size_t i = 0; i < mockData.frameCounts.size(); i++) {
-        mockData.frameCounts[i] = ((i % 10) + 1) * 2;
+    for (size_t i = 0; i < mockData.editFrameCounts().size(); i++) {
+        mockData.editFrameCounts()[i] = ((i % 10) + 1) * 2;
     }
-    for (size_t i = 0; i < mockData.slowFrameCounts.size(); i++) {
-        mockData.slowFrameCounts[i] = (i % 5) + 1;
+    for (size_t i = 0; i < mockData.editSlowFrameCounts().size(); i++) {
+        mockData.editSlowFrameCounts()[i] = (i % 5) + 1;
     }
     GraphicsStatsService::saveBuffer(path, packageName, 5, 3000, 7000, &mockData);
-    service::GraphicsStatsProto loadedProto;
+    protos::GraphicsStatsProto loadedProto;
     EXPECT_TRUE(GraphicsStatsService::parseFromFile(path, &loadedProto));
     // Clean up the file
     unlink(path.c_str());
@@ -83,17 +89,17 @@ TEST(GraphicsStats, saveLoad) {
     ASSERT_TRUE(loadedProto.has_summary());
     EXPECT_EQ(20, loadedProto.summary().janky_frames());
     EXPECT_EQ(100, loadedProto.summary().total_frames());
-    EXPECT_EQ(mockData.frameCounts.size() + mockData.slowFrameCounts.size(),
-            (size_t) loadedProto.histogram_size());
-    for (size_t i = 0; i < (size_t) loadedProto.histogram_size(); i++) {
+    EXPECT_EQ(mockData.editFrameCounts().size() + mockData.editSlowFrameCounts().size(),
+              (size_t)loadedProto.histogram_size());
+    for (size_t i = 0; i < (size_t)loadedProto.histogram_size(); i++) {
         int expectedCount, expectedBucket;
-        if (i < mockData.frameCounts.size()) {
+        if (i < mockData.editFrameCounts().size()) {
             expectedCount = ((i % 10) + 1) * 2;
-            expectedBucket = JankTracker::frameTimeForFrameCountIndex(i);
+            expectedBucket = ProfileData::frameTimeForFrameCountIndex(i);
         } else {
-            int temp = i - mockData.frameCounts.size();
+            int temp = i - mockData.editFrameCounts().size();
             expectedCount = (temp % 5) + 1;
-            expectedBucket = JankTracker::frameTimeForSlowFrameCountIndex(temp);
+            expectedBucket = ProfileData::frameTimeForSlowFrameCountIndex(temp);
         }
         EXPECT_EQ(expectedCount, loadedProto.histogram().Get(i).frame_count());
         EXPECT_EQ(expectedBucket, loadedProto.histogram().Get(i).render_millis());
@@ -103,30 +109,30 @@ TEST(GraphicsStats, saveLoad) {
 TEST(GraphicsStats, merge) {
     std::string path = findRootPath() + "/test_merge";
     std::string packageName = "com.test.merge";
-    ProfileData mockData;
-    mockData.jankFrameCount = 20;
-    mockData.totalFrameCount = 100;
-    mockData.statStartTime = 10000;
+    MockProfileData mockData;
+    mockData.editJankFrameCount() = 20;
+    mockData.editTotalFrameCount() = 100;
+    mockData.editStatStartTime() = 10000;
     // Fill with patterned data we can recognize but which won't map to a
     // memset or basic for iteration count
-    for (size_t i = 0; i < mockData.frameCounts.size(); i++) {
-        mockData.frameCounts[i] = ((i % 10) + 1) * 2;
+    for (size_t i = 0; i < mockData.editFrameCounts().size(); i++) {
+        mockData.editFrameCounts()[i] = ((i % 10) + 1) * 2;
     }
-    for (size_t i = 0; i < mockData.slowFrameCounts.size(); i++) {
-        mockData.slowFrameCounts[i] = (i % 5) + 1;
+    for (size_t i = 0; i < mockData.editSlowFrameCounts().size(); i++) {
+        mockData.editSlowFrameCounts()[i] = (i % 5) + 1;
     }
     GraphicsStatsService::saveBuffer(path, packageName, 5, 3000, 7000, &mockData);
-    mockData.jankFrameCount = 50;
-    mockData.totalFrameCount = 500;
-    for (size_t i = 0; i < mockData.frameCounts.size(); i++) {
-        mockData.frameCounts[i] = (i % 5) + 1;
+    mockData.editJankFrameCount() = 50;
+    mockData.editTotalFrameCount() = 500;
+    for (size_t i = 0; i < mockData.editFrameCounts().size(); i++) {
+        mockData.editFrameCounts()[i] = (i % 5) + 1;
     }
-    for (size_t i = 0; i < mockData.slowFrameCounts.size(); i++) {
-        mockData.slowFrameCounts[i] = ((i % 10) + 1) * 2;
+    for (size_t i = 0; i < mockData.editSlowFrameCounts().size(); i++) {
+        mockData.editSlowFrameCounts()[i] = ((i % 10) + 1) * 2;
     }
     GraphicsStatsService::saveBuffer(path, packageName, 5, 7050, 10000, &mockData);
 
-    service::GraphicsStatsProto loadedProto;
+    protos::GraphicsStatsProto loadedProto;
     EXPECT_TRUE(GraphicsStatsService::parseFromFile(path, &loadedProto));
     // Clean up the file
     unlink(path.c_str());
@@ -139,19 +145,19 @@ TEST(GraphicsStats, merge) {
     ASSERT_TRUE(loadedProto.has_summary());
     EXPECT_EQ(20 + 50, loadedProto.summary().janky_frames());
     EXPECT_EQ(100 + 500, loadedProto.summary().total_frames());
-    EXPECT_EQ(mockData.frameCounts.size() + mockData.slowFrameCounts.size(),
-            (size_t) loadedProto.histogram_size());
-    for (size_t i = 0; i < (size_t) loadedProto.histogram_size(); i++) {
+    EXPECT_EQ(mockData.editFrameCounts().size() + mockData.editSlowFrameCounts().size(),
+              (size_t)loadedProto.histogram_size());
+    for (size_t i = 0; i < (size_t)loadedProto.histogram_size(); i++) {
         int expectedCount, expectedBucket;
-        if (i < mockData.frameCounts.size()) {
+        if (i < mockData.editFrameCounts().size()) {
             expectedCount = ((i % 10) + 1) * 2;
             expectedCount += (i % 5) + 1;
-            expectedBucket = JankTracker::frameTimeForFrameCountIndex(i);
+            expectedBucket = ProfileData::frameTimeForFrameCountIndex(i);
         } else {
-            int temp = i - mockData.frameCounts.size();
+            int temp = i - mockData.editFrameCounts().size();
             expectedCount = (temp % 5) + 1;
             expectedCount += ((temp % 10) + 1) * 2;
-            expectedBucket = JankTracker::frameTimeForSlowFrameCountIndex(temp);
+            expectedBucket = ProfileData::frameTimeForSlowFrameCountIndex(temp);
         }
         EXPECT_EQ(expectedCount, loadedProto.histogram().Get(i).frame_count());
         EXPECT_EQ(expectedBucket, loadedProto.histogram().Get(i).render_millis());

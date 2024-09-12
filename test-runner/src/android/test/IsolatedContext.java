@@ -17,28 +17,23 @@
 package android.test;
 
 import android.accounts.AccountManager;
-import android.accounts.AccountManagerCallback;
-import android.accounts.AccountManagerFuture;
-import android.accounts.AuthenticatorException;
-import android.accounts.OnAccountsUpdateListener;
-import android.accounts.OperationCanceledException;
-import android.accounts.Account;
-import android.content.ContextWrapper;
-import android.content.ContentResolver;
-import android.content.Intent;
-import android.content.Context;
-import android.content.ServiceConnection;
+import android.content.AttributionSource;
 import android.content.BroadcastReceiver;
+import android.content.ContentResolver;
+import android.content.Context;
+import android.content.ContextWrapper;
+import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.net.Uri;
-import android.os.Handler;
+import android.os.Process;
+import android.test.mock.MockAccountManager;
 
 import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
-import java.util.concurrent.TimeUnit;
 import java.util.List;
+import java.util.concurrent.Executor;
 
 
 /**
@@ -52,7 +47,7 @@ import java.util.List;
 public class IsolatedContext extends ContextWrapper {
 
     private ContentResolver mResolver;
-    private final MockAccountManager mMockAccountManager;
+    private final AccountManager mMockAccountManager;
 
     private List<Intent> mBroadcastIntents = new ArrayList<>();
 
@@ -60,7 +55,7 @@ public class IsolatedContext extends ContextWrapper {
             ContentResolver resolver, Context targetContext) {
         super(targetContext);
         mResolver = resolver;
-        mMockAccountManager = new MockAccountManager();
+        mMockAccountManager = MockAccountManager.newMockAccountManager(IsolatedContext.this);
     }
 
     /** Returns the list of intents that were broadcast since the last call to this method. */
@@ -68,6 +63,15 @@ public class IsolatedContext extends ContextWrapper {
         List<Intent> intents = mBroadcastIntents;
         mBroadcastIntents = new ArrayList<>();
         return intents;
+    }
+
+    @Override
+    public AttributionSource getAttributionSource() {
+        AttributionSource attributionSource = super.getAttributionSource();
+        if (attributionSource == null) {
+            return new AttributionSource.Builder(Process.myUid()).build();
+        }
+        return attributionSource;
     }
 
     @Override
@@ -79,6 +83,18 @@ public class IsolatedContext extends ContextWrapper {
 
     @Override
     public boolean bindService(Intent service, ServiceConnection conn, int flags) {
+        return false;
+    }
+
+    @Override
+    public boolean bindService(Intent service, int flags, Executor executor,
+            ServiceConnection conn) {
+        return false;
+    }
+
+    @Override
+    public boolean bindIsolatedService(Intent service, int flags, String instanceName,
+            Executor executor, ServiceConnection conn) {
         return false;
     }
 
@@ -121,71 +137,6 @@ public class IsolatedContext extends ContextWrapper {
         }
         // No other services exist in this context.
         return null;
-    }
-
-    private class MockAccountManager extends AccountManager {
-        public MockAccountManager() {
-            super(IsolatedContext.this, null /* IAccountManager */, null /* handler */);
-        }
-
-        public void addOnAccountsUpdatedListener(OnAccountsUpdateListener listener,
-                Handler handler, boolean updateImmediately) {
-            // do nothing
-        }
-
-        public Account[] getAccounts() {
-            return new Account[]{};
-        }
-
-        public AccountManagerFuture<Account[]> getAccountsByTypeAndFeatures(
-                final String type, final String[] features,
-                AccountManagerCallback<Account[]> callback, Handler handler) {
-            return new MockAccountManagerFuture<Account[]>(new Account[0]);
-        }
-
-        public String blockingGetAuthToken(Account account, String authTokenType,
-                boolean notifyAuthFailure)
-                throws OperationCanceledException, IOException, AuthenticatorException {
-            return null;
-        }
-
-
-        /**
-         * A very simple AccountManagerFuture class
-         * that returns what ever was passed in
-         */
-        private class MockAccountManagerFuture<T>
-                implements AccountManagerFuture<T> {
-
-            T mResult;
-
-            public MockAccountManagerFuture(T result) {
-                mResult = result;
-            }
-
-            public boolean cancel(boolean mayInterruptIfRunning) {
-                return false;
-            }
-
-            public boolean isCancelled() {
-                return false;
-            }
-
-            public boolean isDone() {
-                return true;
-            }
-
-            public T getResult()
-                    throws OperationCanceledException, IOException, AuthenticatorException {
-                return mResult;
-            }
-
-            public T getResult(long timeout, TimeUnit unit)
-                    throws OperationCanceledException, IOException, AuthenticatorException {
-                return getResult();
-            }
-        }
-
     }
 
     @Override

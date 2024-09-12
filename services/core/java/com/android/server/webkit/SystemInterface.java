@@ -17,9 +17,9 @@
 package com.android.server.webkit;
 
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager.NameNotFoundException;
-import android.database.ContentObserver;
 import android.webkit.UserPackage;
 import android.webkit.WebViewProviderInfo;
 
@@ -36,18 +36,14 @@ import java.util.List;
 public interface SystemInterface {
     public WebViewProviderInfo[] getWebViewPackages();
     public int onWebViewProviderChanged(PackageInfo packageInfo);
-    public int getFactoryPackageVersion(String packageName) throws NameNotFoundException;
+    public long getFactoryPackageVersion(String packageName) throws NameNotFoundException;
 
     public String getUserChosenWebViewProvider(Context context);
     public void updateUserSetting(Context context, String newProviderName);
     public void killPackageDependents(String packageName);
 
-    public boolean isFallbackLogicEnabled();
-    public void enableFallbackLogic(boolean enable);
-
-    public void uninstallAndDisablePackageForAllUsers(Context context, String packageName);
     public void enablePackageForAllUsers(Context context, String packageName, boolean enable);
-    public void enablePackageForUser(String packageName, boolean enable, int userId);
+    public void installExistingPackageForAllUsers(Context context, String packageName);
 
     public boolean systemIsDebuggable();
     public PackageInfo getPackageInfoForProvider(WebViewProviderInfo configInfo)
@@ -64,5 +60,9 @@ public interface SystemInterface {
     public int getMultiProcessSetting(Context context);
     public void setMultiProcessSetting(Context context, int value);
     public void notifyZygote(boolean enableMultiProcess);
+    /** Start the zygote if it's not already running. */
+    public void ensureZygoteStarted();
     public boolean isMultiProcessDefaultEnabled();
+
+    public void pinWebviewIfRequired(ApplicationInfo appInfo);
 }

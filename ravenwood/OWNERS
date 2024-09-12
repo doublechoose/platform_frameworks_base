@@ -1,0 +1,8 @@
+set noparent
+
+topjohnwu@google.com
+hackbod@google.com  #{LAST_RESORT_SUGGESTION}
+
+
+per-file ravenwood-annotation-allowed-classes.txt = dplotnikov@google.com
+per-file texts/ravenwood-annotation-allowed-classes.txt = dplotnikov@google.com

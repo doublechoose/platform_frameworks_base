@@ -16,14 +16,17 @@
 
 package android.content.res;
 
+import android.platform.test.annotations.Presubmit;
 import android.test.ActivityInstrumentationTestCase2;
-import android.test.suitebuilder.annotation.SmallTest;
 import android.util.TypedValue;
+
+import androidx.test.filters.SmallTest;
 
 import com.android.frameworks.coretests.R;
 
 import java.lang.reflect.InvocationTargetException;
 
+@Presubmit
 public class ConfigurationBoundResourceCacheTest
         extends ActivityInstrumentationTestCase2<ResourceCacheActivity> {
 
@@ -47,7 +50,8 @@ public class ConfigurationBoundResourceCacheTest
 
     @SmallTest
     public void testSetGet() {
-        mCache.put(1, null, new DummyFloatConstantState(5f));
+        mCache.put(1, null, new DummyFloatConstantState(5f),
+                ThemedResourceCache.UNDEFINED_GENERATION);
         final Resources res = getActivity().getResources();
         assertEquals(5f, mCache.getInstance(1, res, null));
         assertNotSame(5f, mCache.getInstance(1, res, null));
@@ -56,7 +60,8 @@ public class ConfigurationBoundResourceCacheTest
 
     @SmallTest
     public void testSetGetThemed() {
-        mCache.put(1, getActivity().getTheme(), new DummyFloatConstantState(5f));
+        mCache.put(1, getActivity().getTheme(), new DummyFloatConstantState(5f),
+                ThemedResourceCache.UNDEFINED_GENERATION);
         final Resources res = getActivity().getResources();
         assertEquals(null, mCache.getInstance(1, res, null));
         assertEquals(5f, mCache.getInstance(1, res, getActivity().getTheme()));
@@ -65,8 +70,10 @@ public class ConfigurationBoundResourceCacheTest
 
     @SmallTest
     public void testMultiThreadPutGet() {
-        mCache.put(1, getActivity().getTheme(), new DummyFloatConstantState(5f));
-        mCache.put(1, null, new DummyFloatConstantState(10f));
+        mCache.put(1, getActivity().getTheme(), new DummyFloatConstantState(5f),
+                ThemedResourceCache.UNDEFINED_GENERATION);
+        mCache.put(1, null, new DummyFloatConstantState(10f),
+                ThemedResourceCache.UNDEFINED_GENERATION);
         final Resources res = getActivity().getResources();
         assertEquals(10f, mCache.getInstance(1, res, null));
         assertNotSame(10f, mCache.getInstance(1, res, null));
@@ -83,7 +90,8 @@ public class ConfigurationBoundResourceCacheTest
         res.getValue(R.dimen.resource_cache_test_generic, staticValue, true);
         float staticDim = TypedValue.complexToDimension(staticValue.data, res.getDisplayMetrics());
         mCache.put(key, getActivity().getTheme(),
-                new DummyFloatConstantState(staticDim, staticValue.changingConfigurations));
+                new DummyFloatConstantState(staticDim, staticValue.changingConfigurations),
+                ThemedResourceCache.UNDEFINED_GENERATION);
         final Configuration cfg = res.getConfiguration();
         Configuration newCnf = new Configuration(cfg);
         newCnf.orientation = cfg.orientation == Configuration.ORIENTATION_LANDSCAPE ?
@@ -105,7 +113,8 @@ public class ConfigurationBoundResourceCacheTest
         float changingDim = TypedValue.complexToDimension(changingValue.data,
                 res.getDisplayMetrics());
         mCache.put(key, getActivity().getTheme(),
-                new DummyFloatConstantState(changingDim, changingValue.changingConfigurations));
+                new DummyFloatConstantState(changingDim, changingValue.changingConfigurations),
+                ThemedResourceCache.UNDEFINED_GENERATION);
 
         final Configuration cfg = res.getConfiguration();
         Configuration newCnf = new Configuration(cfg);
@@ -113,7 +122,8 @@ public class ConfigurationBoundResourceCacheTest
                 Configuration.ORIENTATION_PORTRAIT
                 : Configuration.ORIENTATION_LANDSCAPE;
         int changes = calcConfigChanges(res, newCnf);
-        assertEquals(changingDim, mCache.getInstance(key, res, getActivity().getTheme()));
+        assertEquals(changingDim,
+                mCache.getInstance(key, res, getActivity().getTheme()));
         mCache.onConfigurationChange(changes);
         assertNull(mCache.get(key, getActivity().getTheme()));
     }
@@ -130,9 +140,11 @@ public class ConfigurationBoundResourceCacheTest
         float changingDim = TypedValue.complexToDimension(changingValue.data,
                 res.getDisplayMetrics());
         mCache.put(R.dimen.resource_cache_test_generic, getActivity().getTheme(),
-                new DummyFloatConstantState(staticDim, staticValue.changingConfigurations));
+                new DummyFloatConstantState(staticDim, staticValue.changingConfigurations),
+                ThemedResourceCache.UNDEFINED_GENERATION);
         mCache.put(R.dimen.resource_cache_test_orientation_dependent, getActivity().getTheme(),
-                new DummyFloatConstantState(changingDim, changingValue.changingConfigurations));
+                new DummyFloatConstantState(changingDim, changingValue.changingConfigurations),
+                ThemedResourceCache.UNDEFINED_GENERATION);
         final Configuration cfg = res.getConfiguration();
         Configuration newCnf = new Configuration(cfg);
         newCnf.orientation = cfg.orientation == Configuration.ORIENTATION_LANDSCAPE ?
@@ -170,10 +182,12 @@ public class ConfigurationBoundResourceCacheTest
                     res.getDisplayMetrics());
             final Resources.Theme theme = i == 0 ? getActivity().getTheme() : null;
             mCache.put(R.dimen.resource_cache_test_generic, theme,
-                    new DummyFloatConstantState(staticDim, staticValues[i].changingConfigurations));
+                    new DummyFloatConstantState(staticDim, staticValues[i].changingConfigurations),
+                    ThemedResourceCache.UNDEFINED_GENERATION);
             mCache.put(R.dimen.resource_cache_test_orientation_dependent, theme,
                     new DummyFloatConstantState(changingDim,
-                            changingValues[i].changingConfigurations));
+                            changingValues[i].changingConfigurations),
+                    ThemedResourceCache.UNDEFINED_GENERATION);
         }
         final Configuration cfg = res.getConfiguration();
         Configuration newCnf = new Configuration(cfg);

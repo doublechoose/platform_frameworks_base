@@ -16,11 +16,19 @@
 
 package android.database.sqlite;
 
+import android.annotation.IntRange;
+import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.database.DatabaseErrorHandler;
+import android.database.SQLException;
 import android.database.sqlite.SQLiteDatabase.CursorFactory;
+import android.os.FileUtils;
 import android.util.Log;
+
 import java.io.File;
+import java.util.Objects;
 
 /**
  * A helper class to manage database creation and version management.
@@ -39,28 +47,22 @@ import java.io.File;
  *
  * <p class="note"><strong>Note:</strong> this class assumes
  * monotonically increasing version numbers for upgrades.</p>
+ *
+ * <p class="note"><strong>Note:</strong> the {@link AutoCloseable} interface was
+ * first added in the {@link android.os.Build.VERSION_CODES#Q} release.</p>
  */
-public abstract class SQLiteOpenHelper {
+public abstract class SQLiteOpenHelper implements AutoCloseable {
     private static final String TAG = SQLiteOpenHelper.class.getSimpleName();
 
-    // When true, getReadableDatabase returns a read-only database if it is just being opened.
-    // The database handle is reopened in read/write mode when getWritableDatabase is called.
-    // We leave this behavior disabled in production because it is inefficient and breaks
-    // many applications.  For debugging purposes it can be useful to turn on strict
-    // read-only semantics to catch applications that call getReadableDatabase when they really
-    // wanted getWritableDatabase.
-    private static final boolean DEBUG_STRICT_READONLY = false;
-
     private final Context mContext;
+    @UnsupportedAppUsage
     private final String mName;
-    private final CursorFactory mFactory;
     private final int mNewVersion;
     private final int mMinimumSupportedVersion;
 
     private SQLiteDatabase mDatabase;
     private boolean mIsInitializing;
-    private boolean mEnableWriteAheadLogging;
-    private final DatabaseErrorHandler mErrorHandler;
+    private SQLiteDatabase.OpenParams.Builder mOpenParamsBuilder;
 
     /**
      * Create a helper object to create, open, and/or manage a database.
@@ -68,14 +70,15 @@ public abstract class SQLiteOpenHelper {
      * created or opened until one of {@link #getWritableDatabase} or
      * {@link #getReadableDatabase} is called.
      *
-     * @param context to use to open or create the database
+     * @param context to use for locating paths to the the database
      * @param name of the database file, or null for an in-memory database
      * @param factory to use for creating cursor objects, or null for the default
      * @param version number of the database (starting at 1); if the database is older,
      *     {@link #onUpgrade} will be used to upgrade the database; if the database is
      *     newer, {@link #onDowngrade} will be used to downgrade the database
      */
-    public SQLiteOpenHelper(Context context, String name, CursorFactory factory, int version) {
+    public SQLiteOpenHelper(@Nullable Context context, @Nullable String name,
+            @Nullable CursorFactory factory, int version) {
         this(context, name, factory, version, null);
     }
 
@@ -87,7 +90,7 @@ public abstract class SQLiteOpenHelper {
      * <p>Accepts input param: a concrete instance of {@link DatabaseErrorHandler} to be
      * used to handle corruption when sqlite reports database corruption.</p>
      *
-     * @param context to use to open or create the database
+     * @param context to use for locating paths to the the database
      * @param name of the database file, or null for an in-memory database
      * @param factory to use for creating cursor objects, or null for the default
      * @param version number of the database (starting at 1); if the database is older,
@@ -96,9 +99,30 @@ public abstract class SQLiteOpenHelper {
      * @param errorHandler the {@link DatabaseErrorHandler} to be used when sqlite reports database
      * corruption, or null to use the default error handler.
      */
-    public SQLiteOpenHelper(Context context, String name, CursorFactory factory, int version,
-            DatabaseErrorHandler errorHandler) {
+    public SQLiteOpenHelper(@Nullable Context context, @Nullable String name,
+            @Nullable CursorFactory factory, int version,
+            @Nullable DatabaseErrorHandler errorHandler) {
         this(context, name, factory, version, 0, errorHandler);
+    }
+
+    /**
+     * Create a helper object to create, open, and/or manage a database.
+     * This method always returns very quickly.  The database is not actually
+     * created or opened until one of {@link #getWritableDatabase} or
+     * {@link #getReadableDatabase} is called.
+     *
+     * @param context to use for locating paths to the the database
+     * @param name of the database file, or null for an in-memory database
+     * @param version number of the database (starting at 1); if the database is older,
+     *     {@link #onUpgrade} will be used to upgrade the database; if the database is
+     *     newer, {@link #onDowngrade} will be used to downgrade the database
+     * @param openParams configuration parameters that are used for opening {@link SQLiteDatabase}.
+     *        Please note that {@link SQLiteDatabase#CREATE_IF_NECESSARY} flag will always be
+     *        set when the helper opens the database
+     */
+    public SQLiteOpenHelper(@Nullable Context context, @Nullable String name, int version,
+            @NonNull SQLiteDatabase.OpenParams openParams) {
+        this(context, name, version, 0, openParams.toBuilder());
     }
 
     /**
@@ -108,7 +132,7 @@ public abstract class SQLiteOpenHelper {
      * minimumSupportedVersion is found, it is simply deleted and a new database is created with the
      * given name and version
      *
-     * @param context to use to open or create the database
+     * @param context to use for locating paths to the the database
      * @param name the name of the database file, null for a temporary in-memory database
      * @param factory to use for creating cursor objects, null for default
      * @param version the required version of the database
@@ -124,16 +148,26 @@ public abstract class SQLiteOpenHelper {
      * @see #onUpgrade(SQLiteDatabase, int, int)
      * @hide
      */
-    public SQLiteOpenHelper(Context context, String name, CursorFactory factory, int version,
-            int minimumSupportedVersion, DatabaseErrorHandler errorHandler) {
+    public SQLiteOpenHelper(@Nullable Context context, @Nullable String name,
+            @Nullable CursorFactory factory, int version,
+            int minimumSupportedVersion, @Nullable DatabaseErrorHandler errorHandler) {
+        this(context, name, version, minimumSupportedVersion,
+                new SQLiteDatabase.OpenParams.Builder());
+        mOpenParamsBuilder.setCursorFactory(factory);
+        mOpenParamsBuilder.setErrorHandler(errorHandler);
+    }
+
+    private SQLiteOpenHelper(@Nullable Context context, @Nullable String name, int version,
+            int minimumSupportedVersion,
+            @NonNull SQLiteDatabase.OpenParams.Builder openParamsBuilder) {
+        Objects.requireNonNull(openParamsBuilder);
         if (version < 1) throw new IllegalArgumentException("Version must be >= 1, was " + version);
 
         mContext = context;
         mName = name;
-        mFactory = factory;
         mNewVersion = version;
-        mErrorHandler = errorHandler;
         mMinimumSupportedVersion = Math.max(0, minimumSupportedVersion);
+        setOpenParamsBuilder(openParamsBuilder);
     }
 
     /**
@@ -157,7 +191,7 @@ public abstract class SQLiteOpenHelper {
      */
     public void setWriteAheadLoggingEnabled(boolean enabled) {
         synchronized (this) {
-            if (mEnableWriteAheadLogging != enabled) {
+            if (mOpenParamsBuilder.isWriteAheadLoggingEnabled() != enabled) {
                 if (mDatabase != null && mDatabase.isOpen() && !mDatabase.isReadOnly()) {
                     if (enabled) {
                         mDatabase.enableWriteAheadLogging();
@@ -165,8 +199,96 @@ public abstract class SQLiteOpenHelper {
                         mDatabase.disableWriteAheadLogging();
                     }
                 }
-                mEnableWriteAheadLogging = enabled;
+                mOpenParamsBuilder.setWriteAheadLoggingEnabled(enabled);
             }
+
+            // Compatibility WAL is disabled if an app disables or enables WAL
+            mOpenParamsBuilder.removeOpenFlags(SQLiteDatabase.ENABLE_LEGACY_COMPATIBILITY_WAL);
+        }
+    }
+
+    /**
+     * Configures <a href="https://sqlite.org/malloc.html#lookaside">lookaside memory allocator</a>
+     *
+     * <p>This method should be called from the constructor of the subclass,
+     * before opening the database, since lookaside memory configuration can only be changed
+     * when no connection is using it
+     *
+     * <p>SQLite default settings will be used, if this method isn't called.
+     * Use {@code setLookasideConfig(0,0)} to disable lookaside
+     *
+     * <p><strong>Note:</strong> Provided slotSize/slotCount configuration is just a recommendation.
+     * The system may choose different values depending on a device, e.g. lookaside allocations
+     * can be disabled on low-RAM devices
+     *
+     * @param slotSize The size in bytes of each lookaside slot.
+     * @param slotCount The total number of lookaside memory slots per database connection.
+     */
+    public void setLookasideConfig(@IntRange(from = 0) final int slotSize,
+            @IntRange(from = 0) final int slotCount) {
+        synchronized (this) {
+            if (mDatabase != null && mDatabase.isOpen()) {
+                throw new IllegalStateException(
+                        "Lookaside memory config cannot be changed after opening the database");
+            }
+            mOpenParamsBuilder.setLookasideConfig(slotSize, slotCount);
+        }
+    }
+
+    /**
+     * Sets configuration parameters that are used for opening {@link SQLiteDatabase}.
+     * <p>Please note that {@link SQLiteDatabase#CREATE_IF_NECESSARY} flag will always be set when
+     * opening the database
+     *
+     * @param openParams configuration parameters that are used for opening {@link SQLiteDatabase}.
+     * @throws IllegalStateException if the database is already open
+     */
+    public void setOpenParams(@NonNull SQLiteDatabase.OpenParams openParams) {
+        Objects.requireNonNull(openParams);
+        synchronized (this) {
+            if (mDatabase != null && mDatabase.isOpen()) {
+                throw new IllegalStateException(
+                        "OpenParams cannot be set after opening the database");
+            }
+            setOpenParamsBuilder(new SQLiteDatabase.OpenParams.Builder(openParams));
+        }
+    }
+
+    private void setOpenParamsBuilder(SQLiteDatabase.OpenParams.Builder openParamsBuilder) {
+        mOpenParamsBuilder = openParamsBuilder;
+        mOpenParamsBuilder.addOpenFlags(SQLiteDatabase.CREATE_IF_NECESSARY);
+    }
+
+    /**
+     * Sets the maximum number of milliseconds that SQLite connection is allowed to be idle
+     * before it is closed and removed from the pool.
+     *
+     * <p>This method should be called from the constructor of the subclass,
+     * before opening the database
+     *
+     * <p><b>DO NOT USE</b> this method.
+     * This feature has negative side effects that are very hard to foresee.
+     * See the javadoc of
+     * {@link SQLiteDatabase.OpenParams.Builder#setIdleConnectionTimeout(long)}
+     * for the details.
+     *
+     * @param idleConnectionTimeoutMs timeout in milliseconds. Use {@link Long#MAX_VALUE} value
+     * to allow unlimited idle connections.
+     *
+     * @see SQLiteDatabase.OpenParams.Builder#setIdleConnectionTimeout(long)
+     *
+     * @deprecated DO NOT USE this method. See the javadoc of
+     * {@link SQLiteDatabase.OpenParams.Builder#setIdleConnectionTimeout(long)}
+     * for the details.
+     */
+    @Deprecated
+    public void setIdleConnectionTimeout(@IntRange(from = 0) final long idleConnectionTimeoutMs) {
+        synchronized (this) {
+            if (mDatabase != null && mDatabase.isOpen()) {
+                throw new IllegalStateException(
+                        "Connection timeout setting cannot be changed after opening the database");
+            }
+            mOpenParamsBuilder.setIdleConnectionTimeout(idleConnectionTimeoutMs);
         }
     }
 
@@ -243,27 +365,21 @@ public abstract class SQLiteOpenHelper {
                     db.reopenReadWrite();
                 }
             } else if (mName == null) {
-                db = SQLiteDatabase.create(null);
+                db = SQLiteDatabase.createInMemory(mOpenParamsBuilder.build());
             } else {
+                final File filePath = mContext.getDatabasePath(mName);
+                SQLiteDatabase.OpenParams params = mOpenParamsBuilder.build();
                 try {
-                    if (DEBUG_STRICT_READONLY && !writable) {
-                        final String path = mContext.getDatabasePath(mName).getPath();
-                        db = SQLiteDatabase.openDatabase(path, mFactory,
-                                SQLiteDatabase.OPEN_READONLY, mErrorHandler);
-                    } else {
-                        db = mContext.openOrCreateDatabase(mName, mEnableWriteAheadLogging ?
-                                Context.MODE_ENABLE_WRITE_AHEAD_LOGGING : 0,
-                                mFactory, mErrorHandler);
-                    }
-                } catch (SQLiteException ex) {
+                    db = SQLiteDatabase.openDatabase(filePath, params);
+                    // Keep pre-O-MR1 behavior by resetting file permissions to 660
+                    setFilePermissionsForDb(filePath.getPath());
+                } catch (SQLException ex) {
                     if (writable) {
                         throw ex;
                     }
-                    Log.e(TAG, "Couldn't open " + mName
-                            + " for writing (will try read-only):", ex);
-                    final String path = mContext.getDatabasePath(mName).getPath();
-                    db = SQLiteDatabase.openDatabase(path, mFactory,
-                            SQLiteDatabase.OPEN_READONLY, mErrorHandler);
+                    Log.e(TAG, "Couldn't open database for writing (will try read-only):", ex);
+                    params = params.toBuilder().addOpenFlags(SQLiteDatabase.OPEN_READONLY).build();
+                    db = SQLiteDatabase.openDatabase(filePath, params);
                 }
             }
 
@@ -308,11 +424,6 @@ public abstract class SQLiteOpenHelper {
             }
 
             onOpen(db);
-
-            if (db.isReadOnly()) {
-                Log.w(TAG, "Opened " + mName + " in read-only mode");
-            }
-
             mDatabase = db;
             return db;
         } finally {
@@ -321,6 +432,11 @@ public abstract class SQLiteOpenHelper {
                 db.close();
             }
         }
+    }
+
+    private static void setFilePermissionsForDb(String dbPath) {
+        int perms = FileUtils.S_IRUSR | FileUtils.S_IWUSR | FileUtils.S_IRGRP | FileUtils.S_IWGRP;
+        FileUtils.setPermissions(dbPath, perms, -1, -1);
     }
 
     /**
@@ -391,6 +507,19 @@ public abstract class SQLiteOpenHelper {
      * This method executes within a transaction.  If an exception is thrown, all changes
      * will automatically be rolled back.
      * </p>
+     * <p>
+     * <em>Important:</em> You should NOT modify an existing migration step from version X to X+1
+     * once a build has been released containing that migration step.  If a migration step has an
+     * error and it runs on a device, the step will NOT re-run itself in the future if a fix is made
+     * to the migration step.</p>
+     * <p>For example, suppose a migration step renames a database column from {@code foo} to
+     * {@code bar} when the name should have been {@code baz}.  If that migration step is released
+     * in a build and runs on a user's device, the column will be renamed to {@code bar}.  If the
+     * developer subsequently edits this same migration step to change the name to {@code baz} as
+     * intended, the user devices which have already run this step will still have the name
+     * {@code bar}.  Instead, a NEW migration step should be created to correct the error and rename
+     * {@code bar} to {@code baz}, ensuring the error is corrected on devices which have already run
+     * the migration step with the error.</p>
      *
      * @param db The database.
      * @param oldVersion The old database version.

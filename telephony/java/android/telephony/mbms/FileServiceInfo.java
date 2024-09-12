@@ -42,7 +42,7 @@ public final class FileServiceInfo extends ServiceInfo implements Parcelable {
         files = new ArrayList<>(newFiles);
     }
 
-    public static final Parcelable.Creator<FileServiceInfo> CREATOR =
+    public static final @android.annotation.NonNull Parcelable.Creator<FileServiceInfo> CREATOR =
             new Parcelable.Creator<FileServiceInfo>() {
         @Override
         public FileServiceInfo createFromParcel(Parcel source) {
@@ -58,7 +58,7 @@ public final class FileServiceInfo extends ServiceInfo implements Parcelable {
     FileServiceInfo(Parcel in) {
         super(in);
         files = new ArrayList<FileInfo>();
-        in.readList(files, FileInfo.class.getClassLoader());
+        in.readList(files, FileInfo.class.getClassLoader(), android.telephony.mbms.FileInfo.class);
     }
 
     @Override

@@ -16,24 +16,43 @@ package android.testing;
 
 import android.content.pm.ApplicationInfo;
 import android.graphics.PixelFormat;
-import android.support.test.InstrumentationRegistry;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.WindowManager.LayoutParams;
 
+/**
+ * Utilities to make testing views easier.
+ */
 public class ViewUtils {
 
+    /**
+     * Causes the view (and its children) to have {@link View#onAttachedToWindow()} called.
+     *
+     * This is currently done by adding the view to a window.
+     */
     public static void attachView(View view) {
+        attachView(view, LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT);
+    }
+
+    /**
+     * Causes the view (and its children) to have {@link View#onAttachedToWindow()} called.
+     *
+     * This is currently done by adding the view to a window.
+     */
+    public static void attachView(View view, int width, int height) {
         // Make sure hardware acceleration isn't turned on.
         view.getContext().getApplicationInfo().flags &=
                 ~(ApplicationInfo.FLAG_HARDWARE_ACCELERATED);
-        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT,
-                LayoutParams.TYPE_APPLICATION_OVERLAY,
-                0, PixelFormat.TRANSLUCENT);
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(width, height,
+                LayoutParams.TYPE_APPLICATION_OVERLAY, 0, PixelFormat.TRANSLUCENT);
         view.getContext().getSystemService(WindowManager.class).addView(view, lp);
     }
 
+    /**
+     * Causes the view (and its children) to have {@link View#onDetachedFromWindow()} called.
+     *
+     * This is currently done by removing the view from a window.
+     */
     public static void detachView(View view) {
         view.getContext().getSystemService(WindowManager.class).removeViewImmediate(view);
     }

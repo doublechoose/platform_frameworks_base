@@ -45,15 +45,15 @@ namespace renderthread {
  * malloc/free churn of small objects?
  */
 
-class ANDROID_API RenderTask {
+class RenderTask {
 public:
-    ANDROID_API RenderTask() : mNext(nullptr), mRunAt(0) {}
-    ANDROID_API virtual ~RenderTask() {}
+    RenderTask() : mNext(nullptr), mRunAt(0) {}
+    virtual ~RenderTask() {}
 
-    ANDROID_API virtual void run() = 0;
+    virtual void run() = 0;
 
     RenderTask* mNext;
-    nsecs_t mRunAt; // nano-seconds on the SYSTEM_TIME_MONOTONIC clock
+    nsecs_t mRunAt;  // nano-seconds on the SYSTEM_TIME_MONOTONIC clock
 };
 
 class SignalingRenderTask : public RenderTask {
@@ -75,8 +75,7 @@ typedef void* (*RunnableMethod)(void* data);
 
 class MethodInvokeRenderTask : public RenderTask {
 public:
-    explicit MethodInvokeRenderTask(RunnableMethod method)
-        : mMethod(method), mReturnPtr(nullptr) {}
+    explicit MethodInvokeRenderTask(RunnableMethod method) : mMethod(method), mReturnPtr(nullptr) {}
 
     void* payload() { return mData; }
     void setReturnPtr(void** retptr) { mReturnPtr = retptr; }
@@ -89,6 +88,7 @@ public:
         // Commit suicide
         delete this;
     }
+
 private:
     RunnableMethod mMethod;
     char mData[METHOD_INVOKE_PAYLOAD_SIZE];

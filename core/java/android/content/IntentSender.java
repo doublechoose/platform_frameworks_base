@@ -16,16 +16,21 @@
 
 package android.content;
 
+import android.annotation.Nullable;
 import android.app.ActivityManager;
+import android.app.ActivityManager.PendingIntentInfo;
+import android.app.ActivityOptions;
+import android.app.ActivityThread;
+import android.app.IApplicationThread;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.os.Bundle;
-import android.os.RemoteException;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.os.RemoteException;
 import android.os.UserHandle;
 import android.util.AndroidException;
-
 
 /**
  * A description of an Intent and target action to perform with it.
@@ -55,8 +60,16 @@ import android.util.AndroidException;
  * {@link android.app.PendingIntent#getIntentSender() PendingIntent.getIntentSender()}.
  */
 public class IntentSender implements Parcelable {
+    private static final Bundle SEND_INTENT_DEFAULT_OPTIONS =
+            ActivityOptions.makeBasic().setPendingIntentBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_COMPAT).toBundle();
+
+    @UnsupportedAppUsage
     private final IIntentSender mTarget;
     IBinder mWhitelistToken;
+
+    // cached pending intent information
+    private @Nullable PendingIntentInfo mCachedInfo;
 
     /**
      * Exception thrown when trying to send through a PendingIntent that
@@ -152,7 +165,8 @@ public class IntentSender implements Parcelable {
      */
     public void sendIntent(Context context, int code, Intent intent,
             OnFinished onFinished, Handler handler) throws SendIntentException {
-        sendIntent(context, code, intent, onFinished, handler, null);
+        sendIntent(context, code, intent, onFinished, handler, null,
+                SEND_INTENT_DEFAULT_OPTIONS);
     }
 
     /**
@@ -184,16 +198,54 @@ public class IntentSender implements Parcelable {
     public void sendIntent(Context context, int code, Intent intent,
             OnFinished onFinished, Handler handler, String requiredPermission)
             throws SendIntentException {
+        sendIntent(context, code, intent, onFinished, handler, requiredPermission,
+                SEND_INTENT_DEFAULT_OPTIONS);
+    }
+
+    /**
+     * Perform the operation associated with this IntentSender, allowing the
+     * caller to specify information about the Intent to use and be notified
+     * when the send has completed.
+     *
+     * @param context The Context of the caller.  This may be null if
+     * <var>intent</var> is also null.
+     * @param code Result code to supply back to the IntentSender's target.
+     * @param intent Additional Intent data.  See {@link Intent#fillIn
+     * Intent.fillIn()} for information on how this is applied to the
+     * original Intent.  Use null to not modify the original Intent.
+     * @param onFinished The object to call back on when the send has
+     * completed, or null for no callback.
+     * @param handler Handler identifying the thread on which the callback
+     * should happen.  If null, the callback will happen from the thread
+     * pool of the process.
+     * @param requiredPermission Name of permission that a recipient of the PendingIntent
+     * is required to hold.  This is only valid for broadcast intents, and
+     * corresponds to the permission argument in
+     * {@link Context#sendBroadcast(Intent, String) Context.sendOrderedBroadcast(Intent, String)}.
+     * If null, no permission is required.
+     * @param options Additional options the caller would like to provide to modify the sending
+     * behavior.  May be built from an {@link ActivityOptions} to apply to an activity start.
+     *
+     * @throws SendIntentException Throws CanceledIntentException if the IntentSender
+     * is no longer allowing more intents to be sent through it.
+     * @hide
+     */
+    public void sendIntent(Context context, int code, Intent intent,
+            OnFinished onFinished, Handler handler, String requiredPermission,
+            @Nullable Bundle options)
+            throws SendIntentException {
         try {
             String resolvedType = intent != null ?
                     intent.resolveTypeIfNeeded(context.getContentResolver())
                     : null;
-            int res = ActivityManager.getService().sendIntentSender(mTarget, mWhitelistToken,
+            final IApplicationThread app = ActivityThread.currentActivityThread()
+                    .getApplicationThread();
+            int res = ActivityManager.getService().sendIntentSender(app, mTarget, mWhitelistToken,
                     code, intent, resolvedType,
                     onFinished != null
                             ? new FinishedDispatcher(this, onFinished, handler)
                             : null,
-                    requiredPermission, null);
+                    requiredPermission, options);
             if (res < 0) {
                 throw new SendIntentException();
             }
@@ -207,13 +259,7 @@ public class IntentSender implements Parcelable {
      */
     @Deprecated
     public String getTargetPackage() {
-        try {
-            return ActivityManager.getService()
-                .getPackageForIntentSender(mTarget);
-        } catch (RemoteException e) {
-            // Should never happen.
-            return null;
-        }
+        return getCreatorPackage();
     }
 
     /**
@@ -226,13 +272,7 @@ public class IntentSender implements Parcelable {
      * none associated with it.
      */
     public String getCreatorPackage() {
-        try {
-            return ActivityManager.getService()
-                .getPackageForIntentSender(mTarget);
-        } catch (RemoteException e) {
-            // Should never happen.
-            return null;
-        }
+        return getCachedInfo().getCreatorPackage();
     }
 
     /**
@@ -245,13 +285,7 @@ public class IntentSender implements Parcelable {
      * none associated with it.
      */
     public int getCreatorUid() {
-        try {
-            return ActivityManager.getService()
-                .getUidForIntentSender(mTarget);
-        } catch (RemoteException e) {
-            // Should never happen.
-            return -1;
-        }
+        return getCachedInfo().getCreatorUid();
     }
 
     /**
@@ -266,14 +300,8 @@ public class IntentSender implements Parcelable {
      * none associated with it.
      */
     public UserHandle getCreatorUserHandle() {
-        try {
-            int uid = ActivityManager.getService()
-                .getUidForIntentSender(mTarget);
-            return uid > 0 ? new UserHandle(UserHandle.getUserId(uid)) : null;
-        } catch (RemoteException e) {
-            // Should never happen.
-            return null;
-        }
+        int uid = getCachedInfo().getCreatorUid();
+        return uid > 0 ? new UserHandle(UserHandle.getUserId(uid)) : null;
     }
 
     /**
@@ -282,7 +310,7 @@ public class IntentSender implements Parcelable {
      * same package.
      */
     @Override
-    public boolean equals(Object otherObj) {
+    public boolean equals(@Nullable Object otherObj) {
         if (otherObj instanceof IntentSender) {
             return mTarget.asBinder().equals(((IntentSender)otherObj)
                     .mTarget.asBinder());
@@ -314,7 +342,7 @@ public class IntentSender implements Parcelable {
         out.writeStrongBinder(mTarget.asBinder());
     }
 
-    public static final Parcelable.Creator<IntentSender> CREATOR
+    public static final @android.annotation.NonNull Parcelable.Creator<IntentSender> CREATOR
             = new Parcelable.Creator<IntentSender>() {
         public IntentSender createFromParcel(Parcel in) {
             IBinder target = in.readStrongBinder();
@@ -356,6 +384,7 @@ public class IntentSender implements Parcelable {
     }
 
     /** @hide */
+    @UnsupportedAppUsage
     public IIntentSender getTarget() {
         return mTarget;
     }
@@ -366,18 +395,39 @@ public class IntentSender implements Parcelable {
     }
 
     /** @hide */
+    @UnsupportedAppUsage
     public IntentSender(IIntentSender target) {
         mTarget = target;
     }
 
     /** @hide */
-    public IntentSender(IIntentSender target, IBinder whitelistToken) {
+    public IntentSender(IIntentSender target, IBinder allowlistToken) {
         mTarget = target;
-        mWhitelistToken = whitelistToken;
+        mWhitelistToken = allowlistToken;
     }
 
     /** @hide */
     public IntentSender(IBinder target) {
         mTarget = IIntentSender.Stub.asInterface(target);
+    }
+
+    private PendingIntentInfo getCachedInfo() {
+        if (mCachedInfo == null) {
+            try {
+                mCachedInfo = ActivityManager.getService().getInfoForIntentSender(mTarget);
+            } catch (RemoteException e) {
+                throw e.rethrowFromSystemServer();
+            }
+        }
+
+        return mCachedInfo;
+    }
+
+    /**
+     * Check if the PendingIntent is marked with {@link android.app.PendingIntent#FLAG_IMMUTABLE}.
+     * @hide
+     */
+    public boolean isImmutable() {
+        return getCachedInfo().isImmutable();
     }
 }

@@ -13,9 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package android.metrics;
 
 import android.metrics.MetricsReader.Event;
+
+import androidx.test.filters.LargeTest;
 
 import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
 
@@ -23,6 +26,7 @@ import junit.framework.TestCase;
 
 import java.util.Collection;
 
+@LargeTest
 public class MetricsReaderTest extends TestCase {
     private static final int FULL_N = 10;
     private static final int CHECKPOINTED_N = 4;

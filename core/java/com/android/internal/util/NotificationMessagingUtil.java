@@ -16,6 +16,7 @@
 
 package com.android.internal.util;
 
+import android.annotation.Nullable;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.content.Context;
@@ -26,9 +27,9 @@ import android.os.Looper;
 import android.os.UserHandle;
 import android.provider.Settings;
 import android.service.notification.StatusBarNotification;
-import android.text.TextUtils;
-import android.util.ArrayMap;
+import android.util.SparseArray;
 
+import java.util.Collection;
 import java.util.Objects;
 
 /**
@@ -39,55 +40,63 @@ public class NotificationMessagingUtil {
 
     private static final String DEFAULT_SMS_APP_SETTING = Settings.Secure.SMS_DEFAULT_APPLICATION;
     private final Context mContext;
-    private ArrayMap<Integer, String> mDefaultSmsApp = new ArrayMap<>();
+    private final SparseArray<String> mDefaultSmsApp = new SparseArray<>();
+    private final Object mStateLock;
 
-    public NotificationMessagingUtil(Context context) {
+    public NotificationMessagingUtil(Context context, @Nullable Object stateLock) {
         mContext = context;
+        mStateLock = stateLock != null ? stateLock : new Object();
         mContext.getContentResolver().registerContentObserver(
                 Settings.Secure.getUriFor(DEFAULT_SMS_APP_SETTING), false, mSmsContentObserver);
     }
-
-    @SuppressWarnings("deprecation")
-    private boolean isDefaultMessagingApp(StatusBarNotification sbn) {
-        final int userId = sbn.getUserId();
-        if (userId == UserHandle.USER_NULL || userId == UserHandle.USER_ALL) return false;
-        if (mDefaultSmsApp.get(userId) == null) {
-            cacheDefaultSmsApp(userId);
-        }
-        return Objects.equals(mDefaultSmsApp.get(userId), sbn.getPackageName());
-    }
-
-    private void cacheDefaultSmsApp(int userId) {
-        mDefaultSmsApp.put(userId, Settings.Secure.getStringForUser(
-                mContext.getContentResolver(),
-                Settings.Secure.SMS_DEFAULT_APPLICATION, userId));
-    }
-
-    private final ContentObserver mSmsContentObserver = new ContentObserver(
-            new Handler(Looper.getMainLooper())) {
-        @Override
-        public void onChange(boolean selfChange, Uri uri, int userId) {
-            if (Settings.Secure.getUriFor(DEFAULT_SMS_APP_SETTING).equals(uri)) {
-                cacheDefaultSmsApp(userId);
-            }
-        }
-    };
 
     public boolean isImportantMessaging(StatusBarNotification sbn, int importance) {
         if (importance < NotificationManager.IMPORTANCE_LOW) {
             return false;
         }
 
-        Class<? extends Notification.Style> style = sbn.getNotification().getNotificationStyle();
-        if (Notification.MessagingStyle.class.equals(style)) {
-            return true;
-        }
+        return hasMessagingStyle(sbn) || (isCategoryMessage(sbn) && isDefaultMessagingApp(sbn));
+    }
 
-        if (Notification.CATEGORY_MESSAGE.equals(sbn.getNotification().category)
-                && isDefaultMessagingApp(sbn)) {
-            return true;
-        }
+    public boolean isMessaging(StatusBarNotification sbn) {
+        return hasMessagingStyle(sbn) || isDefaultMessagingApp(sbn) || isCategoryMessage(sbn);
+    }
 
-        return false;
+    @SuppressWarnings("deprecation")
+    private boolean isDefaultMessagingApp(StatusBarNotification sbn) {
+        final int userId = sbn.getUserId();
+        if (userId == UserHandle.USER_NULL || userId == UserHandle.USER_ALL) return false;
+        synchronized (mStateLock) {
+            if (mDefaultSmsApp.get(userId) == null) {
+                cacheDefaultSmsApp(userId);
+            }
+            return Objects.equals(mDefaultSmsApp.get(userId), sbn.getPackageName());
+        }
+    }
+
+    private void cacheDefaultSmsApp(int userId) {
+        String smsApp = Settings.Secure.getStringForUser(mContext.getContentResolver(),
+                Settings.Secure.SMS_DEFAULT_APPLICATION, userId);
+        synchronized (mStateLock) {
+            mDefaultSmsApp.put(userId, smsApp);
+        }
+    }
+
+    private final ContentObserver mSmsContentObserver = new ContentObserver(
+            new Handler(Looper.getMainLooper())) {
+        @Override
+        public void onChange(boolean selfChange, Collection<Uri> uris, int flags, int userId) {
+            if (uris.contains(Settings.Secure.getUriFor(DEFAULT_SMS_APP_SETTING))) {
+                cacheDefaultSmsApp(userId);
+            }
+        }
+    };
+
+    private boolean hasMessagingStyle(StatusBarNotification sbn) {
+        return sbn.getNotification().isStyle(Notification.MessagingStyle.class);
+    }
+
+    private boolean isCategoryMessage(StatusBarNotification sbn) {
+        return Notification.CATEGORY_MESSAGE.equals(sbn.getNotification().category);
     }
 }

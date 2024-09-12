@@ -16,8 +16,11 @@
 
 package android.content.pm;
 
+import android.annotation.Nullable;
 import android.os.Parcel;
 import android.os.Parcelable;
+
+import com.android.internal.annotations.VisibleForTesting;
 
 import java.io.UnsupportedEncodingException;
 import java.security.SecureRandom;
@@ -86,7 +89,8 @@ public class VerifierDeviceIdentity implements Parcelable {
      * @return verifier device identity based on the input from the provided
      *         random number generator
      */
-    static VerifierDeviceIdentity generate(Random rng) {
+    @VisibleForTesting(visibility = VisibleForTesting.Visibility.PRIVATE)
+    public static VerifierDeviceIdentity generate(Random rng) {
         long identity = rng.nextLong();
         return new VerifierDeviceIdentity(identity);
     }
@@ -191,7 +195,7 @@ public class VerifierDeviceIdentity implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object other) {
+    public boolean equals(@Nullable Object other) {
         if (!(other instanceof VerifierDeviceIdentity)) {
             return false;
         }
@@ -227,7 +231,7 @@ public class VerifierDeviceIdentity implements Parcelable {
         dest.writeLong(mIdentity);
     }
 
-    public static final Parcelable.Creator<VerifierDeviceIdentity> CREATOR
+    public static final @android.annotation.NonNull Parcelable.Creator<VerifierDeviceIdentity> CREATOR
             = new Parcelable.Creator<VerifierDeviceIdentity>() {
         public VerifierDeviceIdentity createFromParcel(Parcel source) {
             return new VerifierDeviceIdentity(source);

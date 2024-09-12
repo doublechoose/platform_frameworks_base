@@ -30,9 +30,9 @@ TEST(PrivateAttributeMoverTest, MovePrivateAttributes) {
           .AddSimple("android:attr/publicB")
           .AddSimple("android:attr/privateB")
           .SetSymbolState("android:attr/publicA", ResourceId(0x01010000),
-                          SymbolState::kPublic)
+                          Visibility::Level::kPublic)
           .SetSymbolState("android:attr/publicB", ResourceId(0x01010000),
-                          SymbolState::kPublic)
+                          Visibility::Level::kPublic)
           .Build();
 
   PrivateAttributeMover mover;
@@ -41,13 +41,13 @@ TEST(PrivateAttributeMoverTest, MovePrivateAttributes) {
   ResourceTablePackage* package = table->FindPackage("android");
   ASSERT_NE(package, nullptr);
 
-  ResourceTableType* type = package->FindType(ResourceType::kAttr);
+  ResourceTableType* type = package->FindTypeWithDefaultName(ResourceType::kAttr);
   ASSERT_NE(type, nullptr);
   ASSERT_EQ(type->entries.size(), 2u);
   EXPECT_NE(type->FindEntry("publicA"), nullptr);
   EXPECT_NE(type->FindEntry("publicB"), nullptr);
 
-  type = package->FindType(ResourceType::kAttrPrivate);
+  type = package->FindTypeWithDefaultName(ResourceType::kAttrPrivate);
   ASSERT_NE(type, nullptr);
   ASSERT_EQ(type->entries.size(), 2u);
   EXPECT_NE(type->FindEntry("privateA"), nullptr);
@@ -68,11 +68,11 @@ TEST(PrivateAttributeMoverTest, LeavePrivateAttributesWhenNoPublicAttributesDefi
   ResourceTablePackage* package = table->FindPackage("android");
   ASSERT_NE(package, nullptr);
 
-  ResourceTableType* type = package->FindType(ResourceType::kAttr);
+  ResourceTableType* type = package->FindTypeWithDefaultName(ResourceType::kAttr);
   ASSERT_NE(type, nullptr);
   ASSERT_EQ(type->entries.size(), 2u);
 
-  type = package->FindType(ResourceType::kAttrPrivate);
+  type = package->FindTypeWithDefaultName(ResourceType::kAttrPrivate);
   ASSERT_EQ(type, nullptr);
 }
 
@@ -81,18 +81,18 @@ TEST(PrivateAttributeMoverTest, DoNotCreatePrivateAttrsIfNoneExist) {
   std::unique_ptr<ResourceTable> table =
       test::ResourceTableBuilder()
           .AddSimple("android:attr/pub")
-          .SetSymbolState("android:attr/pub", ResourceId(0x01010000), SymbolState::kPublic)
+          .SetSymbolState("android:attr/pub", ResourceId(0x01010000), Visibility::Level::kPublic)
           .Build();
 
   ResourceTablePackage* package = table->FindPackage("android");
   ASSERT_NE(nullptr, package);
 
-  ASSERT_EQ(nullptr, package->FindType(ResourceType::kAttrPrivate));
+  ASSERT_EQ(nullptr, package->FindTypeWithDefaultName(ResourceType::kAttrPrivate));
 
   PrivateAttributeMover mover;
   ASSERT_TRUE(mover.Consume(context.get(), table.get()));
 
-  ASSERT_EQ(nullptr, package->FindType(ResourceType::kAttrPrivate));
+  ASSERT_EQ(nullptr, package->FindTypeWithDefaultName(ResourceType::kAttrPrivate));
 }
 
 }  // namespace aapt

@@ -1,8 +1,10 @@
 package android.app.assist;
 
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ClipData;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Parcel;
 import android.os.Parcelable;
@@ -13,12 +15,18 @@ import android.os.Parcelable;
  * {@link android.app.Activity#onProvideAssistContent Activity.onProvideAssistContent}.
  */
 public class AssistContent implements Parcelable {
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private boolean mIsAppProvidedIntent = false;
     private boolean mIsAppProvidedWebUri = false;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private Intent mIntent;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private String mStructuredData;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private ClipData mClipData;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private Uri mUri;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private final Bundle mExtras;
 
     public AssistContent() {
@@ -26,12 +34,22 @@ public class AssistContent implements Parcelable {
     }
 
     /**
+     * Create an AssistContent with extras initialized.
+     *
      * @hide
+     */
+    public AssistContent(@android.annotation.NonNull Bundle extras) {
+        mExtras = extras;
+    }
+
+    /**
      * Called by {@link android.app.ActivityThread} to set the default Intent based on
      * {@link android.app.Activity#getIntent Activity.getIntent}.
      *
      * <p>Automatically populates {@link #mUri} if that Intent is an {@link Intent#ACTION_VIEW}
      * of a web (http or https scheme) URI.</p>
+     *
+     * @hide
      */
     public void setDefaultIntent(Intent intent) {
         mIntent = intent;
@@ -148,6 +166,7 @@ public class AssistContent implements Parcelable {
         return mExtras;
     }
 
+    @UnsupportedAppUsage
     AssistContent(Parcel in) {
         if (in.readInt() != 0) {
             mIntent = Intent.CREATOR.createFromParcel(in);
@@ -166,6 +185,7 @@ public class AssistContent implements Parcelable {
         mIsAppProvidedWebUri = in.readInt() == 1;
     }
 
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     void writeToParcelInternal(Parcel dest, int flags) {
         if (mIntent != null) {
             dest.writeInt(1);
@@ -206,7 +226,7 @@ public class AssistContent implements Parcelable {
         writeToParcelInternal(dest, flags);
     }
 
-    public static final Parcelable.Creator<AssistContent> CREATOR
+    public static final @android.annotation.NonNull Parcelable.Creator<AssistContent> CREATOR
             = new Parcelable.Creator<AssistContent>() {
         public AssistContent createFromParcel(Parcel in) {
             return new AssistContent(in);

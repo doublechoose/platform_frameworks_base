@@ -1,0 +1,31 @@
+{
+    "presubmit": [
+        {
+            "name": "CtsPermissionTestCases_Platform"
+        }
+    ],
+    "postsubmit": [
+        {
+            "name": "CtsVirtualDevicesAudioTestCases",
+            "options": [
+                {
+                    "exclude-annotation": "androidx.test.filters.FlakyTest"
+                },
+                {
+                    "include-filter": "android.virtualdevice.cts.audio.VirtualAudioPermissionTest"
+                }
+            ]
+        },
+        {
+            "name": "CtsVirtualDevicesAppLaunchTestCases",
+            "options": [
+                {
+                    "exclude-annotation": "androidx.test.filters.FlakyTest"
+                },
+                {
+                    "include-filter": "android.virtualdevice.cts.applaunch.VirtualDevicePermissionTest"
+                }
+            ]
+        }
+    ]
+}

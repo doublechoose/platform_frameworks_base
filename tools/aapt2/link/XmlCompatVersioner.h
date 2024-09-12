@@ -45,7 +45,7 @@ class IDegradeRule {
 
   virtual std::vector<DegradeResult> Degrade(const xml::Element& src_el,
                                              const xml::Attribute& src_attr,
-                                             StringPool* out_string_pool) const = 0;
+                                             android::StringPool* out_string_pool) const = 0;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(IDegradeRule);
@@ -55,7 +55,7 @@ class XmlCompatVersioner {
  public:
   using Rules = std::unordered_map<ResourceId, std::unique_ptr<IDegradeRule>>;
 
-  XmlCompatVersioner(const Rules* rules);
+  explicit XmlCompatVersioner(const Rules* rules);
 
   std::vector<std::unique_ptr<xml::XmlResource>> Process(IAaptContext* context,
                                                          xml::XmlResource* doc,
@@ -70,7 +70,7 @@ class XmlCompatVersioner {
   void ProcessRule(const xml::Element& src_el, const xml::Attribute& src_attr,
                    const ApiVersion& src_attr_version, const IDegradeRule* rule,
                    const util::Range<ApiVersion>& api_range, bool generated, xml::Element* dst_el,
-                   std::set<ApiVersion>* out_apis_referenced, StringPool* out_string_pool);
+                   std::set<ApiVersion>* out_apis_referenced, android::StringPool* out_string_pool);
 
   const Rules* rules_;
 };
@@ -83,11 +83,11 @@ struct ReplacementAttr {
 
 class DegradeToManyRule : public IDegradeRule {
  public:
-  DegradeToManyRule(std::vector<ReplacementAttr> attrs);
+  explicit DegradeToManyRule(std::vector<ReplacementAttr> attrs);
   virtual ~DegradeToManyRule() = default;
 
   std::vector<DegradeResult> Degrade(const xml::Element& src_el, const xml::Attribute& src_attr,
-                                     StringPool* out_string_pool) const override;
+                                     android::StringPool* out_string_pool) const override;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(DegradeToManyRule);

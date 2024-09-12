@@ -16,26 +16,29 @@
 
 package com.android.internal.view.menu;
 
+import android.app.AppGlobals;
 import android.content.Context;
 import android.content.res.Resources;
 import android.os.Parcelable;
+import android.text.ClientFlags;
+import android.text.TextFlags;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.View.OnAttachStateChangeListener;
 import android.view.View.OnKeyListener;
-import android.view.ViewTreeObserver.OnGlobalLayoutListener;
 import android.view.ViewTreeObserver;
+import android.view.ViewTreeObserver.OnGlobalLayoutListener;
+import android.widget.AdapterView.OnItemClickListener;
 import android.widget.FrameLayout;
 import android.widget.ListView;
 import android.widget.MenuPopupWindow;
 import android.widget.PopupWindow;
-import android.widget.TextView;
-import android.widget.AdapterView.OnItemClickListener;
 import android.widget.PopupWindow.OnDismissListener;
+import android.widget.TextView;
 
-import com.android.internal.util.Preconditions;
+import java.util.Objects;
 
 /**
  * A standard menu popup in which when a submenu is opened, it replaces its parent menu in the
@@ -43,6 +46,9 @@ import com.android.internal.util.Preconditions;
  */
 final class StandardMenuPopup extends MenuPopup implements OnDismissListener, OnItemClickListener,
         MenuPresenter, OnKeyListener {
+    private static final int ITEM_LAYOUT = com.android.internal.R.layout.popup_menu_item_layout;
+    private static final int ITEM_LAYOUT_MATERIAL =
+            com.android.internal.R.layout.popup_menu_item_layout_material;
 
     private final Context mContext;
 
@@ -52,6 +58,7 @@ final class StandardMenuPopup extends MenuPopup implements OnDismissListener, On
     private final int mPopupMaxWidth;
     private final int mPopupStyleAttr;
     private final int mPopupStyleRes;
+
     // The popup window is final in order to couple its lifecycle to the lifecycle of the
     // StandardMenuPopup.
     private final MenuPopupWindow mPopup;
@@ -112,11 +119,17 @@ final class StandardMenuPopup extends MenuPopup implements OnDismissListener, On
 
     public StandardMenuPopup(Context context, MenuBuilder menu, View anchorView, int popupStyleAttr,
             int popupStyleRes, boolean overflowOnly) {
-        mContext = Preconditions.checkNotNull(context);
+        mContext = Objects.requireNonNull(context);
+        boolean useNewContextMenu = AppGlobals.getIntCoreSetting(
+                TextFlags.KEY_ENABLE_NEW_CONTEXT_MENU,
+                TextFlags.ENABLE_NEW_CONTEXT_MENU_DEFAULT ? 1 : 0) != 0;
+
         mMenu = menu;
         mOverflowOnly = overflowOnly;
         final LayoutInflater inflater = LayoutInflater.from(context);
-        mAdapter = new MenuAdapter(menu, inflater, mOverflowOnly);
+        mAdapter = new MenuAdapter(menu, inflater, mOverflowOnly,
+                ClientFlags.fixMisalignedContextMenu() && useNewContextMenu
+                        ? ITEM_LAYOUT_MATERIAL : ITEM_LAYOUT);
         mPopupStyleAttr = popupStyleAttr;
         mPopupStyleRes = popupStyleRes;
 
@@ -263,7 +276,6 @@ final class StandardMenuPopup extends MenuPopup implements OnDismissListener, On
                     mShownAnchorView, mOverflowOnly, mPopupStyleAttr, mPopupStyleRes);
             subPopup.setPresenterCallback(mPresenterCallback);
             subPopup.setForceShowIcon(MenuPopup.shouldPreserveIconSpacing(subMenu));
-            subPopup.setGravity(mDropDownGravity);
 
             // Pass responsibility for handling onDismiss to the submenu.
             subPopup.setOnDismissListener(mOnDismissListener);
@@ -273,8 +285,17 @@ final class StandardMenuPopup extends MenuPopup implements OnDismissListener, On
             mMenu.close(false /* closeAllMenus */);
 
             // Show the new sub-menu popup at the same location as this popup.
-            final int horizontalOffset = mPopup.getHorizontalOffset();
+            int horizontalOffset = mPopup.getHorizontalOffset();
             final int verticalOffset = mPopup.getVerticalOffset();
+
+            // As xOffset of parent menu popup is subtracted with Anchor width for Gravity.RIGHT,
+            // So, again to display sub-menu popup in same xOffset, add the Anchor width.
+            final int hgrav = Gravity.getAbsoluteGravity(mDropDownGravity,
+                mAnchorView.getLayoutDirection()) & Gravity.HORIZONTAL_GRAVITY_MASK;
+            if (hgrav == Gravity.RIGHT) {
+              horizontalOffset += mAnchorView.getWidth();
+            }
+
             if (subPopup.tryShow(horizontalOffset, verticalOffset)) {
                 if (mPresenterCallback != null) {
                     mPresenterCallback.onOpenSubMenu(subMenu);

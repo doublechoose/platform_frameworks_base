@@ -18,10 +18,13 @@ package android.app.usage;
 
 import android.app.usage.StorageStats;
 import android.app.usage.ExternalStorageStats;
+import android.content.pm.ParceledListSlice;
+import android.os.storage.CrateInfo;
 
 /** {@hide} */
 interface IStorageStatsManager {
     boolean isQuotaSupported(String volumeUuid, String callingPackage);
+    boolean isReservedSupported(String volumeUuid, String callingPackage);
     long getTotalBytes(String volumeUuid, String callingPackage);
     long getFreeBytes(String volumeUuid, String callingPackage);
     long getCacheBytes(String volumeUuid, String callingPackage);
@@ -30,4 +33,10 @@ interface IStorageStatsManager {
     StorageStats queryStatsForUid(String volumeUuid, int uid, String callingPackage);
     StorageStats queryStatsForUser(String volumeUuid, int userId, String callingPackage);
     ExternalStorageStats queryExternalStatsForUser(String volumeUuid, int userId, String callingPackage);
+    ParceledListSlice /* CrateInfo */ queryCratesForPackage(String volumeUuid, String packageName,
+            int userId, String callingPackage);
+    ParceledListSlice /* CrateInfo */ queryCratesForUid(String volumeUuid, int uid,
+            String callingPackage);
+    ParceledListSlice /* CrateInfo */ queryCratesForUser(String volumeUuid, int userId,
+            String callingPackage);
 }

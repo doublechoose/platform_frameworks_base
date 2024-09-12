@@ -16,32 +16,50 @@
 
 package android.content.pm;
 
+import static android.Manifest.permission;
+import static android.Manifest.permission.ACCESS_HIDDEN_PROFILES;
+import static android.Manifest.permission.ACCESS_HIDDEN_PROFILES_FULL;
+import static android.Manifest.permission.READ_FRAME_BUFFER;
+
+import android.annotation.CallbackExecutor;
+import android.annotation.FlaggedApi;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresPermission;
 import android.annotation.SdkConstant;
-import android.annotation.SystemService;
 import android.annotation.SdkConstant.SdkConstantType;
+import android.annotation.SuppressLint;
+import android.annotation.SystemApi;
+import android.annotation.SystemService;
 import android.annotation.TestApi;
 import android.app.PendingIntent;
 import android.appwidget.AppWidgetManager;
 import android.appwidget.AppWidgetProviderInfo;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentSender;
-import android.content.pm.PackageManager.ApplicationInfoFlags;
+import android.content.LocusId;
+import android.content.pm.PackageInstaller.SessionCallback;
+import android.content.pm.PackageInstaller.SessionCallbackDelegate;
+import android.content.pm.PackageInstaller.SessionInfo;
+import android.content.pm.PackageManager.ApplicationInfoFlagsBits;
 import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Rect;
+import android.graphics.drawable.AdaptiveIconDrawable;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.Icon;
-import android.graphics.drawable.AdaptiveIconDrawable;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Flags;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
@@ -52,18 +70,30 @@ import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.UserHandle;
 import android.os.UserManager;
+import android.util.ArrayMap;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.util.Pair;
+import android.window.IDumpCallback;
 
-import com.android.internal.util.Preconditions;
+import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.infra.AndroidFuture;
+import com.android.internal.util.function.pooled.PooledLambda;
 
 import java.io.IOException;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 
 /**
  * Class for retrieving a list of launchable activities for the current user and any associated
@@ -134,13 +164,45 @@ public class LauncherApps {
     public static final String EXTRA_PIN_ITEM_REQUEST =
             "android.content.pm.extra.PIN_ITEM_REQUEST";
 
+    /**
+     * Cache shortcuts which are used in notifications.
+     * @hide
+     */
+    public static final int FLAG_CACHE_NOTIFICATION_SHORTCUTS = 0;
+
+    /**
+     * Cache shortcuts which are used in bubbles.
+     * @hide
+     */
+    public static final int FLAG_CACHE_BUBBLE_SHORTCUTS = 1;
+
+    /**
+     * Cache shortcuts which are used in People Tile.
+     * @hide
+     */
+    public static final int FLAG_CACHE_PEOPLE_TILE_SHORTCUTS = 2;
+
+    /** @hide */
+    @IntDef(flag = false, prefix = { "FLAG_CACHE_" }, value = {
+            FLAG_CACHE_NOTIFICATION_SHORTCUTS,
+            FLAG_CACHE_BUBBLE_SHORTCUTS,
+            FLAG_CACHE_PEOPLE_TILE_SHORTCUTS
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface ShortcutCacheFlags {}
+
     private final Context mContext;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private final ILauncherApps mService;
+    @UnsupportedAppUsage
     private final PackageManager mPm;
     private final UserManager mUserManager;
 
-    private List<CallbackMessageHandler> mCallbacks
-            = new ArrayList<CallbackMessageHandler>();
+    private final List<CallbackMessageHandler> mCallbacks = new ArrayList<>();
+    private final List<SessionCallbackDelegate> mDelegates = new ArrayList<>();
+
+    private final Map<ShortcutChangeCallback, Pair<Executor, IShortcutChangeCallback>>
+            mShortcutChangeCallbacks = new HashMap<>();
 
     /**
      * Callbacks for package changes to this and related managed profiles.
@@ -211,11 +273,40 @@ public class LauncherApps {
          * example, this can happen when a Device Administrator suspends
          * an applicaton.
          *
+         * <p>Note: On devices running {@link android.os.Build.VERSION_CODES#P Android P} or higher,
+         * any apps that override {@link #onPackagesSuspended(String[], UserHandle, Bundle)} will
+         * not receive this callback.
+         *
          * @param packageNames The names of the packages that have just been
          *            suspended.
          * @param user The UserHandle of the profile that generated the change.
          */
         public void onPackagesSuspended(String[] packageNames, UserHandle user) {
+        }
+
+        /**
+         * Indicates that one or more packages have been suspended. A device administrator or an app
+         * with {@code android.permission.SUSPEND_APPS} can do this.
+         *
+         * <p>A suspending app with the permission {@code android.permission.SUSPEND_APPS} can
+         * optionally provide a {@link Bundle} of extra information that it deems helpful for the
+         * launcher to handle the suspended state of these packages. The contents of this
+         * {@link Bundle} are supposed to be a contract between the suspending app and the launcher.
+         *
+         * @param packageNames The names of the packages that have just been suspended.
+         * @param user the user for which the given packages were suspended.
+         * @param launcherExtras A {@link Bundle} of extras for the launcher, if provided to the
+         *                      system, {@code null} otherwise.
+         * @see PackageManager#isPackageSuspended()
+         * @see #getSuspendedPackageLauncherExtras(String, UserHandle)
+         * @deprecated {@code launcherExtras} should be obtained by using
+         * {@link #getSuspendedPackageLauncherExtras(String, UserHandle)}. For all other cases,
+         * {@link #onPackagesSuspended(String[], UserHandle)} should be used.
+         */
+        @Deprecated
+        public void onPackagesSuspended(String[] packageNames, UserHandle user,
+                @Nullable Bundle launcherExtras) {
+            onPackagesSuspended(packageNames, user);
         }
 
         /**
@@ -248,6 +339,16 @@ public class LauncherApps {
         public void onShortcutsChanged(@NonNull String packageName,
                 @NonNull List<ShortcutInfo> shortcuts, @NonNull UserHandle user) {
         }
+
+        /**
+         * Indicates that the loading progress of an installed package has changed.
+         *
+         * @param packageName The name of the package that has changed.
+         * @param user The UserHandle of the profile that generated the change.
+         * @param progress The new progress value, between [0, 1].
+         */
+        public void onPackageLoadingProgressChanged(@NonNull String packageName,
+                @NonNull UserHandle user, float progress) {}
     }
 
     /**
@@ -265,6 +366,14 @@ public class LauncherApps {
 
         /**
          * Include pinned shortcuts in the result.
+         *
+         * <p>If you are the selected assistant app, and wishes to fetch all shortcuts that the
+         * user owns on the launcher (or by other launchers, in case the user has multiple), use
+         * {@link #FLAG_MATCH_PINNED_BY_ANY_LAUNCHER} instead.
+         *
+         * <p>If you're a regular launcher app, there's no way to get shortcuts pinned by other
+         * launchers, and {@link #FLAG_MATCH_PINNED_BY_ANY_LAUNCHER} will be ignored. So use this
+         * flag to get own pinned shortcuts.
          */
         public static final int FLAG_MATCH_PINNED = 1 << 1;
 
@@ -277,17 +386,44 @@ public class LauncherApps {
          */
         public static final int FLAG_MATCH_MANIFEST = 1 << 3;
 
+        /**
+         * Include cached shortcuts in the result.
+         */
+        public static final int FLAG_MATCH_CACHED = 1 << 4;
+
         /** @hide kept for unit tests */
         @Deprecated
         public static final int FLAG_GET_MANIFEST = FLAG_MATCH_MANIFEST;
 
         /**
-         * Does not retrieve CHOOSER only shortcuts.
-         * TODO: Add another flag for MATCH_ALL_PINNED
+         * Include all pinned shortcuts by any launchers, not just by the caller,
+         * in the result.
+         *
+         * <p>The caller must be the selected assistant app to use this flag, or have the system
+         * {@code ACCESS_SHORTCUTS} permission.
+         *
+         * <p>If you are the selected assistant app, and wishes to fetch all shortcuts that the
+         * user owns on the launcher (or by other launchers, in case the user has multiple), use
+         * {@link #FLAG_MATCH_PINNED_BY_ANY_LAUNCHER} instead.
+         *
+         * <p>If you're a regular launcher app (or any app that's not the selected assistant app)
+         * then this flag will be ignored.
+         */
+        public static final int FLAG_MATCH_PINNED_BY_ANY_LAUNCHER = 1 << 10;
+
+        /**
+         * FLAG_MATCH_DYNAMIC | FLAG_MATCH_PINNED | FLAG_MATCH_MANIFEST | FLAG_MATCH_CACHED
          * @hide
          */
         public static final int FLAG_MATCH_ALL_KINDS =
-                FLAG_GET_DYNAMIC | FLAG_GET_PINNED | FLAG_GET_MANIFEST;
+                FLAG_MATCH_DYNAMIC | FLAG_MATCH_PINNED | FLAG_MATCH_MANIFEST | FLAG_MATCH_CACHED;
+
+        /**
+         * FLAG_MATCH_DYNAMIC | FLAG_MATCH_PINNED | FLAG_MATCH_MANIFEST | FLAG_MATCH_ALL_PINNED
+         * @hide
+         */
+        public static final int FLAG_MATCH_ALL_KINDS_WITH_ALL_PINNED =
+                FLAG_MATCH_ALL_KINDS | FLAG_MATCH_PINNED_BY_ANY_LAUNCHER;
 
         /** @hide kept for unit tests */
         @Deprecated
@@ -312,14 +448,39 @@ public class LauncherApps {
          */
         public static final int FLAG_GET_KEY_FIELDS_ONLY = 1 << 2;
 
+        /**
+         * Includes shortcuts from persistence layer in the search result.
+         *
+         * <p>The caller should make the query on a worker thread since accessing persistence layer
+         * is considered asynchronous.
+         *
+         * @hide
+         */
+        @SystemApi
+        public static final int FLAG_GET_PERSISTED_DATA = 1 << 12;
+
+        /**
+         * Populate the persons field in the result. See {@link ShortcutInfo#getPersons()}.
+         *
+         * <p>The caller must have the system {@code ACCESS_SHORTCUTS} permission.
+         *
+         * @hide
+         */
+        @SystemApi
+        @RequiresPermission(android.Manifest.permission.ACCESS_SHORTCUTS)
+        public static final int FLAG_GET_PERSONS_DATA = 1 << 11;
+
         /** @hide */
-        @IntDef(flag = true,
-                value = {
-                        FLAG_MATCH_DYNAMIC,
-                        FLAG_MATCH_PINNED,
-                        FLAG_MATCH_MANIFEST,
-                        FLAG_GET_KEY_FIELDS_ONLY,
-                })
+        @IntDef(flag = true, prefix = { "FLAG_" }, value = {
+                FLAG_MATCH_DYNAMIC,
+                FLAG_MATCH_PINNED,
+                FLAG_MATCH_MANIFEST,
+                FLAG_MATCH_CACHED,
+                FLAG_MATCH_PINNED_BY_ANY_LAUNCHER,
+                FLAG_GET_KEY_FIELDS_ONLY,
+                FLAG_GET_PERSONS_DATA,
+                FLAG_GET_PERSISTED_DATA
+        })
         @Retention(RetentionPolicy.SOURCE)
         public @interface QueryFlags {}
 
@@ -330,6 +491,9 @@ public class LauncherApps {
 
         @Nullable
         List<String> mShortcutIds;
+
+        @Nullable
+        List<LocusId> mLocusIds;
 
         @Nullable
         ComponentName mActivity;
@@ -368,6 +532,16 @@ public class LauncherApps {
         }
 
         /**
+         * If non-null, return only the specified shortcuts by locus ID.  When setting this field,
+         * a package name must also be set with {@link #setPackage}.
+         */
+        @NonNull
+        public ShortcutQuery setLocusIds(@Nullable List<LocusId> locusIds) {
+            mLocusIds = locusIds;
+            return this;
+        }
+
+        /**
          * If non-null, returns only shortcuts associated with the activity; i.e.
          * {@link ShortcutInfo}s whose {@link ShortcutInfo#getActivity()} are equal
          * to {@code activity}.
@@ -385,12 +559,104 @@ public class LauncherApps {
          *     <li>{@link #FLAG_MATCH_DYNAMIC}
          *     <li>{@link #FLAG_MATCH_PINNED}
          *     <li>{@link #FLAG_MATCH_MANIFEST}
+         *     <li>{@link #FLAG_MATCH_CACHED}
          *     <li>{@link #FLAG_GET_KEY_FIELDS_ONLY}
          * </ul>
          */
         public ShortcutQuery setQueryFlags(@QueryFlags int queryFlags) {
             mQueryFlags = queryFlags;
             return this;
+        }
+    }
+
+    /**
+     * Callbacks for shortcut changes to this and related managed profiles.
+     *
+     * @hide
+     */
+    public interface ShortcutChangeCallback {
+        /**
+         * Indicates that one or more shortcuts, that match the {@link ShortcutQuery} used to
+         * register this callback, have been added or updated.
+         * @see LauncherApps#registerShortcutChangeCallback(ShortcutChangeCallback, ShortcutQuery,
+         * Executor)
+         *
+         * <p>Only the applications that are allowed to access the shortcut information,
+         * as defined in {@link #hasShortcutHostPermission()}, will receive it.
+         *
+         * @param packageName The name of the package that has the shortcuts.
+         * @param shortcuts Shortcuts from the package that have updated or added. Only "key"
+         *    information will be provided, as defined in {@link ShortcutInfo#hasKeyFieldsOnly()}.
+         * @param user The UserHandle of the profile that generated the change.
+         *
+         * @see ShortcutManager
+         */
+        default void onShortcutsAddedOrUpdated(@NonNull String packageName,
+                @NonNull List<ShortcutInfo> shortcuts, @NonNull UserHandle user) {}
+
+        /**
+         * Indicates that one or more shortcuts, that match the {@link ShortcutQuery} used to
+         * register this callback, have been removed.
+         * @see LauncherApps#registerShortcutChangeCallback(ShortcutChangeCallback, ShortcutQuery,
+         * Executor)
+         *
+         * <p>Only the applications that are allowed to access the shortcut information,
+         * as defined in {@link #hasShortcutHostPermission()}, will receive it.
+         *
+         * @param packageName The name of the package that has the shortcuts.
+         * @param shortcuts Shortcuts from the package that have been removed. Only "key"
+         *    information will be provided, as defined in {@link ShortcutInfo#hasKeyFieldsOnly()}.
+         * @param user The UserHandle of the profile that generated the change.
+         *
+         * @see ShortcutManager
+         */
+        default void onShortcutsRemoved(@NonNull String packageName,
+                @NonNull List<ShortcutInfo> shortcuts, @NonNull UserHandle user) {}
+    }
+
+    /**
+     * Callback proxy class for {@link ShortcutChangeCallback}
+     *
+     * @hide
+     */
+    private static class ShortcutChangeCallbackProxy extends
+            android.content.pm.IShortcutChangeCallback.Stub {
+        private final WeakReference<Pair<Executor, ShortcutChangeCallback>> mRemoteReferences;
+
+        ShortcutChangeCallbackProxy(Executor executor, ShortcutChangeCallback callback) {
+            mRemoteReferences = new WeakReference<>(new Pair<>(executor, callback));
+        }
+
+        @Override
+        public void onShortcutsAddedOrUpdated(@NonNull String packageName,
+                @NonNull List<ShortcutInfo> shortcuts, @NonNull UserHandle user) {
+            Pair<Executor, ShortcutChangeCallback> remoteReferences = mRemoteReferences.get();
+            if (remoteReferences == null) {
+                // Binder is dead.
+                return;
+            }
+
+            final Executor executor = remoteReferences.first;
+            final ShortcutChangeCallback callback = remoteReferences.second;
+            executor.execute(
+                    PooledLambda.obtainRunnable(ShortcutChangeCallback::onShortcutsAddedOrUpdated,
+                            callback, packageName, shortcuts, user).recycleOnUse());
+        }
+
+        @Override
+        public void onShortcutsRemoved(@NonNull String packageName,
+                @NonNull List<ShortcutInfo> shortcuts, @NonNull UserHandle user) {
+            Pair<Executor, ShortcutChangeCallback> remoteReferences = mRemoteReferences.get();
+            if (remoteReferences == null) {
+                // Binder is dead.
+                return;
+            }
+
+            final Executor executor = remoteReferences.first;
+            final ShortcutChangeCallback callback = remoteReferences.second;
+            executor.execute(
+                    PooledLambda.obtainRunnable(ShortcutChangeCallback::onShortcutsRemoved,
+                            callback, packageName, shortcuts, user).recycleOnUse());
         }
     }
 
@@ -410,11 +676,15 @@ public class LauncherApps {
     }
 
     /**
-     * Show an error log on logcat, when the calling user is a managed profile, and the target
-     * user is different from the calling user, in order to help developers to detect it.
+     * Show an error log on logcat, when the calling user is a managed profile, the target
+     * user is different from the calling user, and it is not called from a package that has the
+     * {@link permission.INTERACT_ACROSS_USERS_FULL} permission, in order to help
+     * developers to detect it.
      */
     private void logErrorForInvalidProfileAccess(@NonNull UserHandle target) {
-        if (UserHandle.myUserId() != target.getIdentifier() && mUserManager.isManagedProfile()) {
+        if (UserHandle.myUserId() != target.getIdentifier() && mUserManager.isManagedProfile()
+                    && mContext.checkSelfPermission(permission.INTERACT_ACROSS_USERS_FULL)
+                            != PackageManager.PERMISSION_GRANTED) {
             Log.w(TAG, "Accessing other profiles/users from managed profile is no longer allowed.");
         }
     }
@@ -424,27 +694,87 @@ public class LauncherApps {
      *
      * <p>If the caller is running on a managed profile, it'll return only the current profile.
      * Otherwise it'll return the same list as {@link UserManager#getUserProfiles()} would.
+     *
+     * <p>To get hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
      */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
     public List<UserHandle> getProfiles() {
-        if (mUserManager.isManagedProfile()) {
-            // If it's a managed profile, only return the current profile.
-            final List result =  new ArrayList(1);
+        if (mUserManager.isManagedProfile()
+                || (android.multiuser.Flags.enableLauncherAppsHiddenProfileChecks()
+                    && android.os.Flags.allowPrivateProfile()
+                    && android.multiuser.Flags.enablePrivateSpaceFeatures()
+                    && mUserManager.isPrivateProfile())) {
+            // If it's a managed or private profile, only return the current profile.
+            final List result = new ArrayList(1);
             result.add(android.os.Process.myUserHandle());
             return result;
         } else {
+            if (android.multiuser.Flags.enableLauncherAppsHiddenProfileChecks()) {
+                try {
+                    return mService.getUserProfiles();
+                } catch (RemoteException re) {
+                    throw re.rethrowFromSystemServer();
+                }
+            }
+
             return mUserManager.getUserProfiles();
         }
     }
 
     /**
-     * Retrieves a list of launchable activities that match {@link Intent#ACTION_MAIN} and
-     * {@link Intent#CATEGORY_LAUNCHER}, for a specified user.
+     * Retrieves a list of activities that specify {@link Intent#ACTION_MAIN} and
+     * {@link Intent#CATEGORY_LAUNCHER}, across all apps, for a specified user. If an app doesn't
+     * have any activities that specify <code>ACTION_MAIN</code> or <code>CATEGORY_LAUNCHER</code>,
+     * the system adds a synthesized activity to the list. This synthesized activity represents the
+     * app's details page within system settings.
+     *
+     * <p class="note"><b>Note: </b>It's possible for system apps, such as app stores, to prevent
+     * the system from adding synthesized activities to the returned list.</p>
+     *
+     * <p>As of <a href="/reference/android/os/Build.VERSION_CODES.html#Q">Android Q</a>, at least
+     * one of the app's activities or synthesized activities appears in the returned list unless the
+     * app satisfies at least one of the following conditions:</p>
+     * <ul>
+     * <li>The app is a system app.</li>
+     * <li>The app doesn't request any <a href="/guide/topics/permissions/overview">permissions</a>.
+     * </li>
+     * <li>The app doesn't have a <em>launcher activity</em> that is enabled by default. A launcher
+     * activity has an intent containing the <code>ACTION_MAIN</code> action and the
+     * <code>CATEGORY_LAUNCHER</code> category.</li>
+     * </ul>
+     *
+     * <p>Additionally, the system hides synthesized activities for some or all apps in the
+     * following enterprise-related cases:</p>
+     * <ul>
+     * <li>If the device is a
+     * <a href="https://developers.google.com/android/work/overview#company-owned-devices-for-knowledge-workers">fully
+     * managed device</a>, no synthesized activities for any app appear in the returned list.</li>
+     * <li>If the current user has a
+     * <a href="https://developers.google.com/android/work/overview#employee-owned-devices-byod">work
+     * profile</a>, no synthesized activities for the user's work apps appear in the returned
+     * list.</li>
+     * </ul>
+     *
+     * <p>If the user in question is a hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
      *
      * @param packageName The specific package to query. If null, it checks all installed packages
      *            in the profile.
      * @param user The UserHandle of the profile.
      * @return List of launchable activities. Can be an empty list but will not be null.
      */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
     public List<LauncherActivityInfo> getActivityList(String packageName, UserHandle user) {
         logErrorForInvalidProfileAccess(user);
         try {
@@ -456,36 +786,251 @@ public class LauncherApps {
     }
 
     /**
+     * Returns a mutable PendingIntent that would start the same activity started from
+     * {@link #startMainActivity(ComponentName, UserHandle, Rect, Bundle)}.  The caller needs to
+     * take care in ensuring that the mutable intent returned is not passed to untrusted parties.
+     *
+     * @param component The ComponentName of the activity to launch
+     * @param startActivityOptions This parameter is no longer supported
+     * @param user The UserHandle of the profile
+     * @hide
+     */
+    @RequiresPermission(android.Manifest.permission.START_TASKS_FROM_RECENTS)
+    @Nullable
+    public PendingIntent getMainActivityLaunchIntent(@NonNull ComponentName component,
+            @Nullable Bundle startActivityOptions, @NonNull UserHandle user) {
+        logErrorForInvalidProfileAccess(user);
+        if (DEBUG) {
+            Log.i(TAG, "GetMainActivityLaunchIntent " + component + " " + user);
+        }
+        try {
+            return mService.getActivityLaunchIntent(mContext.getPackageName(), component, user);
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns information related to a user which is useful for displaying UI elements
+     * to distinguish it from other users (eg, badges).
+     *
+     * <p>If the user in question is a hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
+     *
+     * @param userHandle user handle of the user for which LauncherUserInfo is requested.
+     * @return the {@link LauncherUserInfo} object related to the user specified, null in case
+     * the user is inaccessible.
+     */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @Nullable
+    @SuppressLint("RequiresPermission")
+    @FlaggedApi(Flags.FLAG_ALLOW_PRIVATE_PROFILE)
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
+    public final LauncherUserInfo getLauncherUserInfo(@NonNull UserHandle userHandle) {
+        if (DEBUG) {
+            Log.i(TAG, "getLauncherUserInfo " + userHandle);
+        }
+        try {
+            return mService.getLauncherUserInfo(userHandle);
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
+
+    /**
+     * Returns an intent sender which can be used to start the App Market activity (Installer
+     * Activity).
+     * This method is primarily used to get an intent sender which starts App Market activity for
+     * another profile, if the caller is not otherwise allowed to start activity in that profile.
+     *
+     * <p>When packageName is set, intent sender to start the App Market Activity which installed
+     * the package in calling user will be returned, but for the profile passed.
+     *
+     * <p>When packageName is not set, intent sender to launch the default App Market Activity for
+     * the profile will be returned. In case there are multiple App Market Activities available for
+     * the profile, IntentPicker will be started, allowing user to choose the preferred activity.
+     *
+     * <p>The method will fall back to the behaviour of not having the packageName set, in case:
+     * <ul>
+     *     <li>No activity for the packageName is found in calling user-space.</li>
+     *     <li>The App Market Activity which installed the package in calling user-space is not
+     *         present.</li>
+     *     <li>The App Market Activity which installed the package in calling user-space is not
+     *         present in the profile passed.</li>
+     * </ul>
+     * </p>
+     *
+     * <p>If the user in question is a hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
+     *
+     * @param packageName the package for which intent sender to launch App Market Activity is
+     *                    required.
+     * @param user the profile for which intent sender to launch App Market Activity is required.
+     * @return {@link IntentSender} object which launches the App Market Activity, null in case
+     *         there is no such activity.
+     */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @Nullable
+    @SuppressLint("RequiresPermission")
+    @FlaggedApi(Flags.FLAG_ALLOW_PRIVATE_PROFILE)
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
+    public IntentSender getAppMarketActivityIntent(@Nullable String packageName,
+            @NonNull UserHandle user) {
+        if (DEBUG) {
+            Log.i(TAG, "getAppMarketActivityIntent for package: " + packageName
+                    + " user: " + user);
+        }
+        try {
+            return mService.getAppMarketActivityIntent(mContext.getPackageName(),
+                    packageName, user);
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns the list of the system packages that are installed at user creation.
+     *
+     * <p>An empty list denotes that all system packages should be treated as pre-installed for that
+     * user at creation.
+     *
+     * <p>If the user in question is a hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
+     *
+     * @param userHandle the user for which installed system packages are required.
+     * @return {@link List} of {@link String}, representing the package name of the installed
+     *        package. Can be empty but not null.
+     */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @FlaggedApi(Flags.FLAG_ALLOW_PRIVATE_PROFILE)
+    @NonNull
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
+    public List<String> getPreInstalledSystemPackages(@NonNull UserHandle userHandle) {
+        if (DEBUG) {
+            Log.i(TAG, "getPreInstalledSystemPackages for user: " + userHandle);
+        }
+        try {
+            return mService.getPreInstalledSystemPackages(userHandle);
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns {@link IntentSender} which can be used to start the Private Space Settings Activity.
+     *
+     * <p> Caller should have {@link android.app.role.RoleManager#ROLE_HOME} and either of the
+     * permissions required.</p>
+     *
+     * @return {@link IntentSender} object which launches the Private Space Settings Activity, if
+     * successful, null otherwise.
+     * @hide
+     */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @Nullable
+    @FlaggedApi(Flags.FLAG_ALLOW_PRIVATE_PROFILE)
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
+    public IntentSender getPrivateSpaceSettingsIntent() {
+        try {
+            return mService.getPrivateSpaceSettingsIntent();
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
+    /**
      * Returns the activity info for a given intent and user handle, if it resolves. Otherwise it
      * returns null.
+     *
+     * <p>If the user in question is a hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
      *
      * @param intent The intent to find a match for.
      * @param user The profile to look in for a match.
      * @return An activity info object if there is a match.
      */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
     public LauncherActivityInfo resolveActivity(Intent intent, UserHandle user) {
         logErrorForInvalidProfileAccess(user);
         try {
-            ActivityInfo ai = mService.resolveActivity(mContext.getPackageName(),
-                    intent.getComponent(), user);
-            if (ai != null) {
-                LauncherActivityInfo info = new LauncherActivityInfo(mContext, ai, user);
-                return info;
+            LauncherActivityInfoInternal ai = mService.resolveLauncherActivityInternal(
+                    mContext.getPackageName(), intent.getComponent(), user);
+            if (ai == null) {
+                return null;
+            }
+            return new LauncherActivityInfo(mContext, ai);
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns overrides for the activities that should be launched for the shortcuts of certain
+     * package names.
+     *
+     * @return {@link Map} whose keys are package names and whose values are the
+     * {@link LauncherActivityInfo}s that should be used for those packages' shortcuts. If there are
+     * no activity overrides, an empty {@link Map} will be returned.
+     *
+     * @hide
+     */
+    @NonNull
+    public Map<String, LauncherActivityInfo> getActivityOverrides() {
+        Map<String, LauncherActivityInfo> activityOverrides = new ArrayMap<>();
+        try {
+            Map<String, LauncherActivityInfoInternal> activityOverridesInternal =
+                    mService.getActivityOverrides(mContext.getPackageName(), mContext.getUserId());
+            for (Map.Entry<String, LauncherActivityInfoInternal> packageToOverride :
+                    activityOverridesInternal.entrySet()) {
+                activityOverrides.put(
+                        packageToOverride.getKey(),
+                        new LauncherActivityInfo(
+                                mContext,
+                                packageToOverride.getValue()
+                        )
+                );
             }
         } catch (RemoteException re) {
             throw re.rethrowFromSystemServer();
         }
-        return null;
+        return activityOverrides;
     }
 
     /**
      * Starts a Main activity in the specified profile.
+     *
+     * <p>If the user in question is a hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
      *
      * @param component The ComponentName of the activity to launch
      * @param user The UserHandle of the profile
      * @param sourceBounds The Rect containing the source bounds of the clicked icon
      * @param opts Options to pass to startActivity
      */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
     public void startMainActivity(ComponentName component, UserHandle user, Rect sourceBounds,
             Bundle opts) {
         logErrorForInvalidProfileAccess(user);
@@ -493,8 +1038,27 @@ public class LauncherApps {
             Log.i(TAG, "StartMainActivity " + component + " " + user.getIdentifier());
         }
         try {
-            mService.startActivityAsUser(mContext.getPackageName(),
+            mService.startActivityAsUser(mContext.getIApplicationThread(),
+                    mContext.getPackageName(), mContext.getAttributionTag(),
                     component, sourceBounds, opts, user);
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Starts an activity to show the details of the specified session.
+     *
+     * @param sessionInfo The SessionInfo of the session
+     * @param sourceBounds The Rect containing the source bounds of the clicked icon
+     * @param opts Options to pass to startActivity
+     */
+    public void startPackageInstallerSessionDetailsActivity(@NonNull SessionInfo sessionInfo,
+            @Nullable Rect sourceBounds, @Nullable Bundle opts) {
+        try {
+            mService.startSessionDetailsActivityAsUser(mContext.getIApplicationThread(),
+                    mContext.getPackageName(), mContext.getAttributionTag(), sessionInfo,
+                    sourceBounds, opts, sessionInfo.getUser());
         } catch (RemoteException re) {
             throw re.rethrowFromSystemServer();
         }
@@ -504,17 +1068,52 @@ public class LauncherApps {
      * Starts the settings activity to show the application details for a
      * package in the specified profile.
      *
+     * <p>If the user in question is a hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
+     *
      * @param component The ComponentName of the package to launch settings for.
      * @param user The UserHandle of the profile
      * @param sourceBounds The Rect containing the source bounds of the clicked icon
      * @param opts Options to pass to startActivity
      */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
     public void startAppDetailsActivity(ComponentName component, UserHandle user,
             Rect sourceBounds, Bundle opts) {
         logErrorForInvalidProfileAccess(user);
         try {
-            mService.showAppDetailsAsUser(mContext.getPackageName(),
+            mService.showAppDetailsAsUser(mContext.getIApplicationThread(),
+                    mContext.getPackageName(), mContext.getAttributionTag(),
                     component, sourceBounds, opts, user);
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns PendingIntent associated with specified shortcut.
+     *
+     * @param packageName The packageName of the shortcut
+     * @param shortcutId The id of the shortcut
+     * @param opts This parameter is no longer supported
+     * @param user The UserHandle of the profile
+     */
+    @Nullable
+    public PendingIntent getShortcutIntent(@NonNull final String packageName,
+            @NonNull final String shortcutId, @Nullable final Bundle opts,
+            @NonNull final UserHandle user) {
+        logErrorForInvalidProfileAccess(user);
+        if (DEBUG) {
+            Log.i(TAG, "GetShortcutIntent " + packageName + "/" + shortcutId + " " + user);
+        }
+        try {
+            // due to b/209607104, opts will be ignored
+            return mService.getShortcutIntent(
+                    mContext.getPackageName(), packageName, shortcutId, null /* opts */, user);
         } catch (RemoteException re) {
             throw re.rethrowFromSystemServer();
         }
@@ -526,7 +1125,8 @@ public class LauncherApps {
      * @param packageName The specific package to query. If null, it checks all installed packages
      *            in the profile.
      * @param user The UserHandle of the profile.
-     * @return List of config activities. Can be an empty list but will not be null.
+     * @return List of config activities. Can be an empty list but will not be null. Empty list will
+     * be returned for user-profiles that have items restricted on home screen.
      *
      * @see Intent#ACTION_CREATE_SHORTCUT
      * @see #getShortcutConfigActivityIntent(LauncherActivityInfo)
@@ -544,13 +1144,13 @@ public class LauncherApps {
     }
 
     private List<LauncherActivityInfo> convertToActivityList(
-            @Nullable ParceledListSlice<ResolveInfo> activities, UserHandle user) {
-        if (activities == null) {
+            @Nullable ParceledListSlice<LauncherActivityInfoInternal> internals, UserHandle user) {
+        if (internals == null || internals.getList().isEmpty()) {
             return Collections.EMPTY_LIST;
         }
         ArrayList<LauncherActivityInfo> lais = new ArrayList<>();
-        for (ResolveInfo ri : activities.getList()) {
-            LauncherActivityInfo lai = new LauncherActivityInfo(mContext, ri.activityInfo, user);
+        for (LauncherActivityInfoInternal internal : internals.getList()) {
+            LauncherActivityInfo lai = new LauncherActivityInfo(mContext, internal);
             if (DEBUG) {
                 Log.v(TAG, "Returning activity for profile " + user + " : "
                         + lai.getComponentName());
@@ -593,11 +1193,20 @@ public class LauncherApps {
     /**
      * Checks if the package is installed and enabled for a profile.
      *
+     * <p>If the user in question is a hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
+     *
      * @param packageName The package to check.
      * @param user The UserHandle of the profile.
      *
      * @return true if the package exists and is enabled.
      */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
     public boolean isPackageEnabled(String packageName, UserHandle user) {
         logErrorForInvalidProfileAccess(user);
         try {
@@ -608,21 +1217,96 @@ public class LauncherApps {
     }
 
     /**
-     * Get {@link ApplicationInfo} for a profile
+     * Gets the launcher extras supplied to the system when the given package was suspended via
+     * {@code PackageManager#setPackagesSuspended(String[], boolean, PersistableBundle,
+     * PersistableBundle, String)}.
+     *
+     * <p>The contents of this {@link Bundle} are supposed to be a contract between the suspending
+     * app and the launcher.
+     *
+     * <p>If the user in question is a hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
+     *
+     * <p>Note: This just returns whatever extras were provided to the system, <em>which might
+     * even be {@code null}.</em>
+     *
+     * @param packageName The package for which to fetch the launcher extras.
+     * @param user The {@link UserHandle} of the profile.
+     * @return A {@link Bundle} of launcher extras. Or {@code null} if the package is not currently
+     *         suspended.
+     *
+     * @see Callback#onPackagesSuspended(String[], UserHandle, Bundle)
+     * @see PackageManager#isPackageSuspended()
+     */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
+    public @Nullable Bundle getSuspendedPackageLauncherExtras(String packageName, UserHandle user) {
+        logErrorForInvalidProfileAccess(user);
+        try {
+            return mService.getSuspendedPackageLauncherExtras(packageName, user);
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns whether a package should be hidden from suggestions to the user. Currently, this
+     * could be done because the package was marked as distracting to the user via
+     * {@code PackageManager.setDistractingPackageRestrictions(String[], int)}.
+     *
+     * <p>If the user in question is a hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
+     *
+     * @param packageName The package for which to check.
+     * @param user the {@link UserHandle} of the profile.
+     * @return
+     */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
+    public boolean shouldHideFromSuggestions(@NonNull String packageName,
+            @NonNull UserHandle user) {
+        Objects.requireNonNull(packageName, "packageName");
+        Objects.requireNonNull(user, "user");
+        try {
+            return mService.shouldHideFromSuggestions(packageName, user);
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns {@link ApplicationInfo} about an application installed for a specific user profile.
+     *
+     * <p>If the user in question is a hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
      *
      * @param packageName The package name of the application
      * @param flags Additional option flags {@link PackageManager#getApplicationInfo}
      * @param user The UserHandle of the profile.
      *
-     * @return An {@link ApplicationInfo} containing information about the package or
-     *         null if the package isn't installed for the given user, or the target user
-     *         is not enabled.
+     * @return {@link ApplicationInfo} containing information about the package. Returns
+     *         {@code null} if the package isn't installed for the given profile, or the profile
+     *         isn't enabled.
      */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
     public ApplicationInfo getApplicationInfo(@NonNull String packageName,
-            @ApplicationInfoFlags int flags, @NonNull UserHandle user)
+            @ApplicationInfoFlagsBits int flags, @NonNull UserHandle user)
             throws PackageManager.NameNotFoundException {
-        Preconditions.checkNotNull(packageName, "packageName");
-        Preconditions.checkNotNull(packageName, "user");
+        Objects.requireNonNull(packageName, "packageName");
+        Objects.requireNonNull(user, "user");
         logErrorForInvalidProfileAccess(user);
         try {
             final ApplicationInfo ai = mService
@@ -638,13 +1322,49 @@ public class LauncherApps {
     }
 
     /**
+     * Returns an object describing the app usage limit for the given package.
+     * If there are multiple limits that apply to the package, the one with the smallest
+     * time remaining will be returned.
+     *
+     * @param packageName name of the package whose app usage limit will be returned
+     * @param user the user of the package
+     *
+     * @return an {@link AppUsageLimit} object describing the app time limit containing
+     * the given package with the smallest time remaining, or {@code null} if none exist.
+     * @throws SecurityException when the caller is not the recents app.
+     * @hide
+     */
+    @Nullable
+    @SystemApi
+    public LauncherApps.AppUsageLimit getAppUsageLimit(@NonNull String packageName,
+            @NonNull UserHandle user) {
+        try {
+            return mService.getAppUsageLimit(mContext.getPackageName(), packageName, user);
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
+    /**
      * Checks if the activity exists and it enabled for a profile.
+     *
+     * <p>The activity may still not be exported, in which case {@link #startMainActivity} will
+     * throw a {@link SecurityException} unless the caller has the same UID as the target app's.
+     *
+     * <p>If the user in question is a hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
      *
      * @param component The activity to check.
      * @param user The UserHandle of the profile.
      *
      * @return true if the activity exists and is enabled.
      */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
     public boolean isActivityEnabled(ComponentName component, UserHandle user) {
         logErrorForInvalidProfileAccess(user);
         try {
@@ -655,9 +1375,13 @@ public class LauncherApps {
     }
 
     /**
-     * Returns whether the caller can access the shortcut information.
+     * Returns whether the caller can access the shortcut information.  Access is currently
+     * available to:
      *
-     * <p>Only the default launcher can access the shortcut information.
+     * <ul>
+     *     <li>The current launcher (or default launcher if there is no set current launcher).</li>
+     *     <li>The currently active voice interaction service.</li>
+     * </ul>
      *
      * <p>Note when this method returns {@code false}, it may be a temporary situation because
      * the user is trying a new launcher application.  The user may decide to change the default
@@ -675,6 +1399,60 @@ public class LauncherApps {
             return mService.hasShortcutHostPermission(mContext.getPackageName());
         } catch (RemoteException re) {
             throw re.rethrowFromSystemServer();
+        }
+    }
+
+    private List<ShortcutInfo> maybeUpdateDisabledMessage(List<ShortcutInfo> shortcuts) {
+        if (shortcuts == null) {
+            return null;
+        }
+        for (int i = shortcuts.size() - 1; i >= 0; i--) {
+            final ShortcutInfo si = shortcuts.get(i);
+            final String message = ShortcutInfo.getDisabledReasonForRestoreIssue(mContext,
+                    si.getDisabledReason());
+            if (message != null) {
+                si.setDisabledMessage(message);
+            }
+        }
+        return shortcuts;
+    }
+
+    /**
+     * Register a callback to be called right before the wmtrace data is moved to the bugreport.
+     * @hide
+     */
+    @RequiresPermission(READ_FRAME_BUFFER)
+    public void registerDumpCallback(IDumpCallback cb) {
+        try {
+            mService.registerDumpCallback(cb);
+        } catch (RemoteException e) {
+            e.rethrowAsRuntimeException();
+        }
+    }
+
+    /**
+     * Saves view capture data to the default location.
+     * @hide
+     */
+    @RequiresPermission(READ_FRAME_BUFFER)
+    public void saveViewCaptureData() {
+        try {
+            mService.saveViewCaptureData();
+        } catch (RemoteException e) {
+            e.rethrowAsRuntimeException();
+        }
+    }
+
+    /**
+     * Unregister a callback, so that it won't be called when LauncherApps dumps.
+     * @hide
+     */
+    @RequiresPermission(READ_FRAME_BUFFER)
+    public void unRegisterDumpCallback(IDumpCallback cb) {
+        try {
+            mService.unRegisterDumpCallback(cb);
+        } catch (RemoteException e) {
+            e.rethrowAsRuntimeException();
         }
     }
 
@@ -698,12 +1476,36 @@ public class LauncherApps {
             @NonNull UserHandle user) {
         logErrorForInvalidProfileAccess(user);
         try {
-            return mService.getShortcuts(mContext.getPackageName(),
-                    query.mChangedSince, query.mPackage, query.mShortcutIds, query.mActivity,
-                    query.mQueryFlags, user)
-                    .getList();
+            if ((query.mQueryFlags & ShortcutQuery.FLAG_GET_PERSISTED_DATA) != 0) {
+                return getShortcutsBlocked(query, user);
+            }
+            // Note this is the only case we need to update the disabled message for shortcuts
+            // that weren't restored.
+            // The restore problem messages are only shown by the user, and publishers will never
+            // see them. The only other API that the launcher gets shortcuts is the shortcut
+            // changed callback, but that only returns shortcuts with the "key" information, so
+            // that won't return disabled message.
+            return maybeUpdateDisabledMessage(mService.getShortcuts(mContext.getPackageName(),
+                                new ShortcutQueryWrapper(query), user)
+                        .getList());
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
+        }
+    }
+
+    private List<ShortcutInfo> getShortcutsBlocked(@NonNull ShortcutQuery query,
+            @NonNull UserHandle user) {
+        logErrorForInvalidProfileAccess(user);
+        final AndroidFuture<List<ShortcutInfo>> future = new AndroidFuture<>();
+        future.thenApply(this::maybeUpdateDisabledMessage);
+        try {
+            mService.getShortcutsAsync(mContext.getPackageName(),
+                            new ShortcutQueryWrapper(query), user, future);
+            return future.get();
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        } catch (InterruptedException | ExecutionException e) {
+            throw new RuntimeException(e);
         }
     }
 
@@ -730,6 +1532,9 @@ public class LauncherApps {
      * <p>The calling launcher application must be allowed to access the shortcut information,
      * as defined in {@link #hasShortcutHostPermission()}.
      *
+     * <p>For user-profiles with items restricted on home screen, caller must have the required
+     * permission.
+     *
      * @param packageName The target package name.
      * @param shortcutIds The IDs of the shortcut to be pinned.
      * @param user The UserHandle of the profile.
@@ -738,11 +1543,81 @@ public class LauncherApps {
      *
      * @see ShortcutManager
      */
+    @RequiresPermission(conditional = true, value = android.Manifest.permission.ACCESS_SHORTCUTS)
     public void pinShortcuts(@NonNull String packageName, @NonNull List<String> shortcutIds,
             @NonNull UserHandle user) {
         logErrorForInvalidProfileAccess(user);
         try {
             mService.pinShortcuts(mContext.getPackageName(), packageName, shortcutIds, user);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Mark shortcuts as cached for a package.
+     *
+     * <p>Only dynamic long lived shortcuts can be cached. None dynamic or non long lived shortcuts
+     * in the list will be ignored.
+     *
+     * <p>Unlike pinned shortcuts, where different callers can have different sets of pinned
+     * shortcuts, cached state is per shortcut only, and even if multiple callers cache the same
+     * shortcut, it can be uncached by any valid caller.
+     *
+     * @param packageName The target package name.
+     * @param shortcutIds The IDs of the shortcut to be cached.
+     * @param user The UserHandle of the profile.
+     * @param cacheFlags One of the values in:
+     * <ul>
+     *     <li>{@link #FLAG_CACHE_NOTIFICATION_SHORTCUTS}
+     *     <li>{@link #FLAG_CACHE_BUBBLE_SHORTCUTS}
+     *     <li>{@link #FLAG_CACHE_PEOPLE_TILE_SHORTCUTS}
+     * </ul>
+     * @throws IllegalStateException when the user is locked, or when the {@code user} user
+     * is locked or not running.
+     *
+     * @see ShortcutManager
+     *
+     * @hide
+     */
+    @RequiresPermission(android.Manifest.permission.ACCESS_SHORTCUTS)
+    public void cacheShortcuts(@NonNull String packageName, @NonNull List<String> shortcutIds,
+            @NonNull UserHandle user, @ShortcutCacheFlags int cacheFlags) {
+        logErrorForInvalidProfileAccess(user);
+        try {
+            mService.cacheShortcuts(
+                    mContext.getPackageName(), packageName, shortcutIds, user, cacheFlags);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Remove cached flag from shortcuts for a package.
+     *
+     * @param packageName The target package name.
+     * @param shortcutIds The IDs of the shortcut to be uncached.
+     * @param user The UserHandle of the profile.
+     * @param cacheFlags One of the values in:
+     * <ul>
+     *     <li>{@link #FLAG_CACHE_NOTIFICATION_SHORTCUTS}
+     *     <li>{@link #FLAG_CACHE_BUBBLE_SHORTCUTS}
+     *     <li>{@link #FLAG_CACHE_PEOPLE_TILE_SHORTCUTS}
+     * </ul>
+     * @throws IllegalStateException when the user is locked, or when the {@code user} user
+     * is locked or not running.
+     *
+     * @see ShortcutManager
+     *
+     * @hide
+     */
+    @RequiresPermission(android.Manifest.permission.ACCESS_SHORTCUTS)
+    public void uncacheShortcuts(@NonNull String packageName, @NonNull List<String> shortcutIds,
+            @NonNull UserHandle user, @ShortcutCacheFlags int cacheFlags) {
+        logErrorForInvalidProfileAccess(user);
+        try {
+            mService.uncacheShortcuts(
+                    mContext.getPackageName(), packageName, shortcutIds, user, cacheFlags);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -799,6 +1674,40 @@ public class LauncherApps {
     }
 
     /**
+     * @hide internal/unit tests only
+     */
+    @VisibleForTesting
+    public ParcelFileDescriptor getUriShortcutIconFd(@NonNull ShortcutInfo shortcut) {
+        return getUriShortcutIconFd(shortcut.getPackage(), shortcut.getId(), shortcut.getUserId());
+    }
+
+    private ParcelFileDescriptor getUriShortcutIconFd(@NonNull String packageName,
+            @NonNull String shortcutId, int userId) {
+        String uri = getShortcutIconUri(packageName, shortcutId, userId);
+        if (uri == null) {
+            return null;
+        }
+        try {
+            return mContext.getContentResolver().openFileDescriptor(Uri.parse(uri), "r");
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to open icon file: " + uri, e);
+            return null;
+        }
+    }
+
+    private String getShortcutIconUri(@NonNull String packageName,
+            @NonNull String shortcutId, int userId) {
+        String uri = null;
+        try {
+            uri = mService.getShortcutIconUri(mContext.getPackageName(), packageName, shortcutId,
+                    userId);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+        return uri;
+    }
+
+    /**
      * Returns the icon for this shortcut, without any badging for the profile.
      *
      * <p>The calling launcher application must be allowed to access the shortcut information,
@@ -818,26 +1727,10 @@ public class LauncherApps {
     public Drawable getShortcutIconDrawable(@NonNull ShortcutInfo shortcut, int density) {
         if (shortcut.hasIconFile()) {
             final ParcelFileDescriptor pfd = getShortcutIconFd(shortcut);
-            if (pfd == null) {
-                return null;
-            }
-            try {
-                final Bitmap bmp = BitmapFactory.decodeFileDescriptor(pfd.getFileDescriptor());
-                if (bmp != null) {
-                    BitmapDrawable dr = new BitmapDrawable(mContext.getResources(), bmp);
-                    if (shortcut.hasAdaptiveBitmap()) {
-                        return new AdaptiveIconDrawable(null, dr);
-                    } else {
-                        return dr;
-                    }
-                }
-                return null;
-            } finally {
-                try {
-                    pfd.close();
-                } catch (IOException ignore) {
-                }
-            }
+            return loadDrawableFromFileDescriptor(pfd, shortcut.hasAdaptiveBitmap());
+        } else if (shortcut.hasIconUri()) {
+            final ParcelFileDescriptor pfd = getUriShortcutIconFd(shortcut);
+            return loadDrawableFromFileDescriptor(pfd, shortcut.hasAdaptiveBitmap());
         } else if (shortcut.hasIconResource()) {
             return loadDrawableResourceFromPackage(shortcut.getPackage(),
                     shortcut.getIconResourceId(), shortcut.getUserHandle(), density);
@@ -858,6 +1751,72 @@ public class LauncherApps {
             }
         } else {
             return null; // Has no icon.
+        }
+    }
+
+    private Drawable loadDrawableFromFileDescriptor(ParcelFileDescriptor pfd, boolean adaptive) {
+        if (pfd == null) {
+            return null;
+        }
+        try {
+            final Bitmap bmp = BitmapFactory.decodeFileDescriptor(pfd.getFileDescriptor());
+            if (bmp != null) {
+                BitmapDrawable dr = new BitmapDrawable(mContext.getResources(), bmp);
+                if (adaptive) {
+                    return new AdaptiveIconDrawable(null, dr);
+                } else {
+                    return dr;
+                }
+            }
+            return null;
+        } finally {
+            try {
+                pfd.close();
+            } catch (IOException ignore) {
+            }
+        }
+    }
+
+    /**
+     * @hide
+     */
+    public Icon getShortcutIcon(@NonNull ShortcutInfo shortcut) {
+        if (shortcut.hasIconFile()) {
+            final ParcelFileDescriptor pfd = getShortcutIconFd(shortcut);
+            if (pfd == null) {
+                return null;
+            }
+            try {
+                final Bitmap bmp = BitmapFactory.decodeFileDescriptor(pfd.getFileDescriptor());
+                if (bmp != null) {
+                    if (shortcut.hasAdaptiveBitmap()) {
+                        return Icon.createWithAdaptiveBitmap(bmp);
+                    } else {
+                        return Icon.createWithBitmap(bmp);
+                    }
+                }
+                return null;
+            } finally {
+                try {
+                    pfd.close();
+                } catch (IOException ignore) {
+                }
+            }
+        } else if (shortcut.hasIconUri()) {
+            String uri = getShortcutIconUri(shortcut.getPackage(), shortcut.getId(),
+                    shortcut.getUserId());
+            if (uri == null) {
+                return null;
+            }
+            if (shortcut.hasAdaptiveBitmap()) {
+                return Icon.createWithAdaptiveBitmapContentUri(uri);
+            } else {
+                return Icon.createWithContentUri(uri);
+            }
+        } else if (shortcut.hasIconResource()) {
+            return Icon.createWithResource(shortcut.getPackage(), shortcut.getIconResourceId());
+        } else {
+            return shortcut.getIcon();
         }
     }
 
@@ -945,13 +1904,14 @@ public class LauncherApps {
                 shortcut.getUserId());
     }
 
+    @UnsupportedAppUsage
     private void startShortcut(@NonNull String packageName, @NonNull String shortcutId,
             @Nullable Rect sourceBounds, @Nullable Bundle startActivityOptions,
             int userId) {
         try {
-            final boolean success =
-                    mService.startShortcut(mContext.getPackageName(), packageName, shortcutId,
-                    sourceBounds, startActivityOptions, userId);
+            final boolean success = mService.startShortcut(mContext.getPackageName(), packageName,
+                    null /* default featureId */, shortcutId, sourceBounds, startActivityOptions,
+                    userId);
             if (!success) {
                 throw new ActivityNotFoundException("Shortcut could not be started");
             }
@@ -961,20 +1921,38 @@ public class LauncherApps {
     }
 
     /**
-     * Registers a callback for changes to packages in current and managed profiles.
+     * Registers a callback for changes to packages in this user and managed profiles.
+     *
+     * <p>To receive callbacks for hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
      *
      * @param callback The callback to register.
      */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
     public void registerCallback(Callback callback) {
         registerCallback(callback, null);
     }
 
     /**
-     * Registers a callback for changes to packages in current and managed profiles.
+     * Registers a callback for changes to packages in this user and managed profiles.
+     *
+     * <p>To receive callbacks for hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
      *
      * @param callback The callback to register.
      * @param handler that should be used to post callbacks on, may be null.
      */
+    // Alternatively, a system app can access this api for private profile if they've been granted
+    // with the {@code android.Manifest.permission#ACCESS_HIDDEN_PROFILES_FULL} permission.
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
     public void registerCallback(Callback callback, Handler handler) {
         synchronized (this) {
             if (callback != null && findCallbackLocked(callback) < 0) {
@@ -1011,6 +1989,22 @@ public class LauncherApps {
         }
     }
 
+    /**
+     * Disable different archive compatibility options of the launcher for the caller of this
+     * method.
+     *
+     * @see ArchiveCompatibilityParams for individual options.
+     */
+    @FlaggedApi(android.content.pm.Flags.FLAG_ARCHIVING)
+    public void setArchiveCompatibility(@NonNull ArchiveCompatibilityParams params) {
+        try {
+            mService.setArchiveCompatibilityOptions(params.isEnableIconOverlay(),
+                    params.isEnableUnarchivalConfirmation());
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
     /** @return position in mCallbacks for callback or -1 if not present. */
     private int findCallbackLocked(Callback callback) {
         if (callback == null) {
@@ -1042,7 +2036,8 @@ public class LauncherApps {
         mCallbacks.add(toAdd);
     }
 
-    private IOnAppsChangedListener.Stub mAppsChangedListener = new IOnAppsChangedListener.Stub() {
+    private final IOnAppsChangedListener.Stub mAppsChangedListener =
+            new IOnAppsChangedListener.Stub() {
 
         @Override
         public void onPackageRemoved(UserHandle user, String packageName)
@@ -1085,7 +2080,8 @@ public class LauncherApps {
         public void onPackagesAvailable(UserHandle user, String[] packageNames, boolean replacing)
                 throws RemoteException {
             if (DEBUG) {
-                Log.d(TAG, "onPackagesAvailable " + user.getIdentifier() + "," + packageNames);
+                Log.d(TAG, "onPackagesAvailable " + user.getIdentifier() + ","
+                        + Arrays.toString(packageNames));
             }
             synchronized (LauncherApps.this) {
                 for (CallbackMessageHandler callback : mCallbacks) {
@@ -1098,7 +2094,8 @@ public class LauncherApps {
         public void onPackagesUnavailable(UserHandle user, String[] packageNames, boolean replacing)
                 throws RemoteException {
             if (DEBUG) {
-                Log.d(TAG, "onPackagesUnavailable " + user.getIdentifier() + "," + packageNames);
+                Log.d(TAG, "onPackagesUnavailable " + user.getIdentifier() + ","
+                        + Arrays.toString(packageNames));
             }
             synchronized (LauncherApps.this) {
                 for (CallbackMessageHandler callback : mCallbacks) {
@@ -1108,14 +2105,16 @@ public class LauncherApps {
         }
 
         @Override
-        public void onPackagesSuspended(UserHandle user, String[] packageNames)
+        public void onPackagesSuspended(UserHandle user, String[] packageNames,
+                Bundle launcherExtras)
                 throws RemoteException {
             if (DEBUG) {
-                Log.d(TAG, "onPackagesSuspended " + user.getIdentifier() + "," + packageNames);
+                Log.d(TAG, "onPackagesSuspended " + user.getIdentifier() + ","
+                        + Arrays.toString(packageNames));
             }
             synchronized (LauncherApps.this) {
                 for (CallbackMessageHandler callback : mCallbacks) {
-                    callback.postOnPackagesSuspended(packageNames, user);
+                    callback.postOnPackagesSuspended(packageNames, launcherExtras, user);
                 }
             }
         }
@@ -1124,7 +2123,8 @@ public class LauncherApps {
         public void onPackagesUnsuspended(UserHandle user, String[] packageNames)
                 throws RemoteException {
             if (DEBUG) {
-                Log.d(TAG, "onPackagesUnsuspended " + user.getIdentifier() + "," + packageNames);
+                Log.d(TAG, "onPackagesUnsuspended " + user.getIdentifier() + ","
+                        + Arrays.toString(packageNames));
             }
             synchronized (LauncherApps.this) {
                 for (CallbackMessageHandler callback : mCallbacks) {
@@ -1146,7 +2146,64 @@ public class LauncherApps {
                 }
             }
         }
+
+        public void onPackageLoadingProgressChanged(UserHandle user, String packageName,
+                float progress) {
+            if (DEBUG) {
+                Log.d(TAG, "onPackageLoadingProgressChanged " + user.getIdentifier() + ","
+                        + packageName + "," + progress);
+            }
+            synchronized (LauncherApps.this) {
+                for (CallbackMessageHandler callback : mCallbacks) {
+                    callback.postOnPackageLoadingProgressChanged(user, packageName, progress);
+                }
+            }
+        }
     };
+
+    /**
+     * Used to enable Archiving compatibility options with {@link #setArchiveCompatibility}.
+     */
+    @FlaggedApi(android.content.pm.Flags.FLAG_ARCHIVING)
+    public static class ArchiveCompatibilityParams {
+        private boolean mEnableIconOverlay = true;
+
+        private boolean mEnableUnarchivalConfirmation = true;
+
+        /** @hide */
+        public boolean isEnableIconOverlay() {
+            return mEnableIconOverlay;
+        }
+
+        /** @hide */
+        public boolean isEnableUnarchivalConfirmation() {
+            return mEnableUnarchivalConfirmation;
+        }
+
+        /**
+         * If true, provides a cloud overlay for archived apps to ensure users are aware that a
+         * certain app is archived. True by default.
+         *
+         * <p> Launchers might want to disable this operation if they want to provide custom user
+         * experience to differentiate archived apps.
+         */
+        public void setEnableIconOverlay(boolean enableIconOverlay) {
+            this.mEnableIconOverlay = enableIconOverlay;
+        }
+
+        /**
+         * If true, the user is shown a confirmation dialog when they click an archived app, which
+         * explains that the app will be downloaded and restored in the background. True by default.
+         *
+         * <p> Launchers might want to disable this operation if they provide sufficient,
+         * alternative user guidance to highlight that an unarchival is starting and ongoing once an
+         * archived app is tapped. E.g., this could be achieved by showing the unarchival progress
+         * around the icon.
+         */
+        public void setEnableUnarchivalConfirmation(boolean enableUnarchivalConfirmation) {
+            this.mEnableUnarchivalConfirmation = enableUnarchivalConfirmation;
+        }
+    }
 
     private static class CallbackMessageHandler extends Handler {
         private static final int MSG_ADDED = 1;
@@ -1157,15 +2214,18 @@ public class LauncherApps {
         private static final int MSG_SUSPENDED = 6;
         private static final int MSG_UNSUSPENDED = 7;
         private static final int MSG_SHORTCUT_CHANGED = 8;
+        private static final int MSG_LOADING_PROGRESS_CHANGED = 9;
 
-        private LauncherApps.Callback mCallback;
+        private final LauncherApps.Callback mCallback;
 
         private static class CallbackInfo {
             String[] packageNames;
             String packageName;
+            Bundle launcherExtras;
             boolean replacing;
             UserHandle user;
             List<ShortcutInfo> shortcuts;
+            float mLoadingProgress;
         }
 
         public CallbackMessageHandler(Looper looper, LauncherApps.Callback callback) {
@@ -1196,13 +2256,18 @@ public class LauncherApps {
                     mCallback.onPackagesUnavailable(info.packageNames, info.user, info.replacing);
                     break;
                 case MSG_SUSPENDED:
-                    mCallback.onPackagesSuspended(info.packageNames, info.user);
+                    mCallback.onPackagesSuspended(info.packageNames, info.user, info.launcherExtras
+                    );
                     break;
                 case MSG_UNSUSPENDED:
                     mCallback.onPackagesUnsuspended(info.packageNames, info.user);
                     break;
                 case MSG_SHORTCUT_CHANGED:
                     mCallback.onShortcutsChanged(info.packageName, info.shortcuts, info.user);
+                    break;
+                case MSG_LOADING_PROGRESS_CHANGED:
+                    mCallback.onPackageLoadingProgressChanged(info.packageName, info.user,
+                            info.mLoadingProgress);
                     break;
             }
         }
@@ -1246,10 +2311,12 @@ public class LauncherApps {
             obtainMessage(MSG_UNAVAILABLE, info).sendToTarget();
         }
 
-        public void postOnPackagesSuspended(String[] packageNames, UserHandle user) {
+        public void postOnPackagesSuspended(String[] packageNames, Bundle launcherExtras,
+                UserHandle user) {
             CallbackInfo info = new CallbackInfo();
             info.packageNames = packageNames;
             info.user = user;
+            info.launcherExtras = launcherExtras;
             obtainMessage(MSG_SUSPENDED, info).sendToTarget();
         }
 
@@ -1268,6 +2335,141 @@ public class LauncherApps {
             info.shortcuts = shortcuts;
             obtainMessage(MSG_SHORTCUT_CHANGED, info).sendToTarget();
         }
+
+        public void postOnPackageLoadingProgressChanged(UserHandle user, String packageName,
+                float progress) {
+            CallbackInfo info = new CallbackInfo();
+            info.packageName = packageName;
+            info.user = user;
+            info.mLoadingProgress = progress;
+            obtainMessage(MSG_LOADING_PROGRESS_CHANGED, info).sendToTarget();
+        }
+    }
+
+    /**
+     * Register a callback to watch for session lifecycle events in this user and managed profiles.
+     * Callers need to either declare &lt;queries&gt; element with the specific package name in the
+     * app's manifest, have the android.permission.QUERY_ALL_PACKAGES, or be the session owner to
+     * watch for these events.
+     *
+     * <p> Session callbacks are not sent for user-profiles that have items restricted on home
+     * screen.
+     *
+     * @param callback The callback to register.
+     * @param executor {@link Executor} to handle the callbacks, cannot be null.
+     *
+     * @see PackageInstaller#registerSessionCallback(SessionCallback)
+     */
+    public void registerPackageInstallerSessionCallback(
+            @NonNull @CallbackExecutor Executor executor, @NonNull SessionCallback callback) {
+        if (executor == null) {
+            throw new NullPointerException("Executor must not be null");
+        }
+
+        synchronized (mDelegates) {
+            final SessionCallbackDelegate delegate = new SessionCallbackDelegate(callback,
+                    executor);
+            try {
+                mService.registerPackageInstallerCallback(mContext.getPackageName(),
+                        delegate);
+            } catch (RemoteException e) {
+                throw e.rethrowFromSystemServer();
+            }
+            mDelegates.add(delegate);
+        }
+    }
+
+    /**
+     * Unregisters a callback that was previously registered.
+     *
+     * @param callback The callback to unregister.
+     * @see #registerPackageInstallerSessionCallback(Executor, SessionCallback)
+     */
+    public void unregisterPackageInstallerSessionCallback(@NonNull SessionCallback callback) {
+        synchronized (mDelegates) {
+            for (Iterator<SessionCallbackDelegate> i = mDelegates.iterator(); i.hasNext();) {
+                final SessionCallbackDelegate delegate = i.next();
+                if (delegate.mCallback == callback) {
+                    mPm.getPackageInstaller().unregisterSessionCallback(delegate.mCallback);
+                    i.remove();
+                }
+            }
+        }
+    }
+
+    /**
+     * Return list of all known install sessions in this user and managed profiles, regardless
+     * of the installer. Callers need to either declare &lt;queries&gt; element with the specific
+     * package name in the app's manifest, have the android.permission.QUERY_ALL_PACKAGES, or be
+     * the session owner to retrieve these details.
+     *
+     * <p>To receive callbacks for hidden profile {@link UserManager#USER_TYPE_PROFILE_PRIVATE},
+     * caller should have normal {@link android.Manifest.permission#ACCESS_HIDDEN_PROFILES}
+     * permission and the {@link android.app.role.RoleManager#ROLE_HOME} role.
+     *
+     * @see PackageInstaller#getAllSessions()
+     */
+    @SuppressLint("RequiresPermission")
+    @RequiresPermission(conditional = true,
+            anyOf = {ACCESS_HIDDEN_PROFILES_FULL, ACCESS_HIDDEN_PROFILES})
+    public @NonNull List<SessionInfo> getAllPackageInstallerSessions() {
+        try {
+            return mService.getAllSessions(mContext.getPackageName()).getList();
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Register a callback to watch for shortcut change events in this user and managed profiles.
+     *
+     * @param callback The callback to register.
+     * @param query {@link ShortcutQuery} to match and filter the shortcut events. Only matching
+     * shortcuts will be returned by the callback.
+     * @param executor {@link Executor} to handle the callbacks. To dispatch callbacks to the main
+     * thread of your application, you can use {@link android.content.Context#getMainExecutor()}.
+     *
+     * @hide
+     */
+    public void registerShortcutChangeCallback(@NonNull ShortcutChangeCallback callback,
+            @NonNull ShortcutQuery query, @NonNull @CallbackExecutor Executor executor) {
+        Objects.requireNonNull(callback, "Callback cannot be null");
+        Objects.requireNonNull(query, "Query cannot be null");
+        Objects.requireNonNull(executor, "Executor cannot be null");
+
+        synchronized (mShortcutChangeCallbacks) {
+            IShortcutChangeCallback proxy = new ShortcutChangeCallbackProxy(executor, callback);
+            mShortcutChangeCallbacks.put(callback, new Pair<>(executor, proxy));
+            try {
+                mService.registerShortcutChangeCallback(mContext.getPackageName(),
+                        new ShortcutQueryWrapper(query), proxy);
+            } catch (RemoteException e) {
+                throw e.rethrowFromSystemServer();
+            }
+        }
+    }
+
+    /**
+     * Unregisters a callback that was previously registered.
+     * @see #registerShortcutChangeCallback(ShortcutChangeCallback, ShortcutQuery, Executor)
+     *
+     * @param callback Callback to be unregistered.
+     *
+     * @hide
+     */
+    public void unregisterShortcutChangeCallback(@NonNull ShortcutChangeCallback callback) {
+        Objects.requireNonNull(callback, "Callback cannot be null");
+
+        synchronized (mShortcutChangeCallbacks) {
+            if (mShortcutChangeCallbacks.containsKey(callback)) {
+                IShortcutChangeCallback proxy = mShortcutChangeCallbacks.remove(callback).second;
+                try {
+                    mService.unregisterShortcutChangeCallback(mContext.getPackageName(), proxy);
+                } catch (RemoteException e) {
+                    throw e.rethrowFromSystemServer();
+                }
+            }
+        }
     }
 
     /**
@@ -1275,7 +2477,7 @@ public class LauncherApps {
      * the {@link #EXTRA_PIN_ITEM_REQUEST} extra.
      */
     public PinItemRequest getPinItemRequest(Intent intent) {
-        return intent.getParcelableExtra(EXTRA_PIN_ITEM_REQUEST);
+        return intent.getParcelableExtra(EXTRA_PIN_ITEM_REQUEST, android.content.pm.LauncherApps.PinItemRequest.class);
     }
 
     /**
@@ -1283,7 +2485,7 @@ public class LauncherApps {
      * an {@link #ACTION_CONFIRM_PIN_SHORTCUT} or {@link #ACTION_CONFIRM_PIN_APPWIDGET} intent
      * respectively to the default launcher app.
      *
-     * <h3>Request of the {@link #REQUEST_TYPE_SHORTCUT} type.
+     * <h3>Request of the {@link #REQUEST_TYPE_SHORTCUT} type.</h3>
      *
      * <p>A {@link #REQUEST_TYPE_SHORTCUT} request represents a request to pin a
      * {@link ShortcutInfo}.  If the launcher accepts a request, call {@link #accept()},
@@ -1300,7 +2502,7 @@ public class LauncherApps {
      *
      * <p>See also {@link ShortcutManager} for more details.
      *
-     * <h3>Request of the {@link #REQUEST_TYPE_APPWIDGET} type.
+     * <h3>Request of the {@link #REQUEST_TYPE_APPWIDGET} type.</h3>
      *
      * <p>A {@link #REQUEST_TYPE_SHORTCUT} request represents a request to pin a
      * an AppWidget.  If the launcher accepts a request, call {@link #accept(Bundle)} with
@@ -1324,7 +2526,10 @@ public class LauncherApps {
         public static final int REQUEST_TYPE_APPWIDGET = 2;
 
         /** @hide */
-        @IntDef(value = {REQUEST_TYPE_SHORTCUT})
+        @IntDef(prefix = { "REQUEST_TYPE_" }, value = {
+                REQUEST_TYPE_SHORTCUT,
+                REQUEST_TYPE_APPWIDGET
+        })
         @Retention(RetentionPolicy.SOURCE)
         public @interface RequestType {}
 
@@ -1370,6 +2575,10 @@ public class LauncherApps {
          * {@link AppWidgetProviderInfo} sent by the requesting app.
          * Always non-null for a {@link #REQUEST_TYPE_APPWIDGET} request, and always null for a
          * different request type.
+         *
+         * <p>Launcher should not show any configuration activity associated with the provider, and
+         * assume that the widget is already fully configured. Upon accepting the widget, it should
+         * pass the widgetId in {@link #accept(Bundle)}.
          *
          * @return requested {@link AppWidgetProviderInfo} when a request is of the
          * {@link #REQUEST_TYPE_APPWIDGET} type.  Null otherwise.
@@ -1459,7 +2668,7 @@ public class LauncherApps {
             dest.writeStrongBinder(mInner.asBinder());
         }
 
-        public static final Creator<PinItemRequest> CREATOR =
+        public static final @android.annotation.NonNull Creator<PinItemRequest> CREATOR =
                 new Creator<PinItemRequest>() {
                     public PinItemRequest createFromParcel(Parcel source) {
                         return new PinItemRequest(source);
@@ -1472,6 +2681,76 @@ public class LauncherApps {
         @Override
         public int describeContents() {
             return 0;
+        }
+    }
+
+    /**
+     * A class that encapsulates information about the usage limit set for an app or
+     * a group of apps.
+     *
+     * <p>The launcher can query specifics about the usage limit such as how much usage time
+     * the limit has and how much of the total usage time is remaining via the APIs available
+     * in this class.
+     *
+     * @see #getAppUsageLimit(String, UserHandle)
+     * @hide
+     */
+    @SystemApi
+    public static final class AppUsageLimit implements Parcelable {
+        private final long mTotalUsageLimit;
+        private final long mUsageRemaining;
+
+        /** @hide */
+        public AppUsageLimit(long totalUsageLimit, long usageRemaining) {
+            this.mTotalUsageLimit = totalUsageLimit;
+            this.mUsageRemaining = usageRemaining;
+        }
+
+        /**
+         * Returns the total usage limit in milliseconds set for an app or a group of apps.
+         *
+         * @return the total usage limit in milliseconds
+         */
+        public long getTotalUsageLimit() {
+            return mTotalUsageLimit;
+        }
+
+        /**
+         * Returns the usage remaining in milliseconds for an app or the group of apps
+         * this limit refers to.
+         *
+         * @return the usage remaining in milliseconds
+         */
+        public long getUsageRemaining() {
+            return mUsageRemaining;
+        }
+
+        private AppUsageLimit(Parcel source) {
+            mTotalUsageLimit = source.readLong();
+            mUsageRemaining = source.readLong();
+        }
+
+        public static final @android.annotation.NonNull Creator<AppUsageLimit> CREATOR = new Creator<AppUsageLimit>() {
+            @Override
+            public AppUsageLimit createFromParcel(Parcel source) {
+                return new AppUsageLimit(source);
+            }
+
+            @Override
+            public AppUsageLimit[] newArray(int size) {
+                return new AppUsageLimit[size];
+            }
+        };
+
+        @Override
+        public int describeContents() {
+            return 0;
+        }
+
+        @Override
+        public void writeToParcel(Parcel dest, int flags) {
+            dest.writeLong(mTotalUsageLimit);
+            dest.writeLong(mUsageRemaining);
         }
     }
 }

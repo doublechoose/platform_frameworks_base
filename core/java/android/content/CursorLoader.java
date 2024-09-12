@@ -16,8 +16,10 @@
 
 package android.content;
 
+import android.compat.annotation.UnsupportedAppUsage;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.CancellationSignal;
 import android.os.OperationCanceledException;
 
@@ -35,11 +37,16 @@ import java.util.Arrays;
  * perform, either through the
  * {@link #CursorLoader(Context, Uri, String[], String, String[], String)} or
  * creating an empty instance with {@link #CursorLoader(Context)} and filling
- * in the desired paramters with {@link #setUri(Uri)}, {@link #setSelection(String)},
+ * in the desired parameters with {@link #setUri(Uri)}, {@link #setSelection(String)},
  * {@link #setSelectionArgs(String[])}, {@link #setSortOrder(String)},
  * and {@link #setProjection(String[])}.
+ *
+ * @deprecated Use the <a href="{@docRoot}tools/extras/support-library.html">Support Library</a>
+ *      {@link androidx.loader.content.CursorLoader}
  */
+@Deprecated
 public class CursorLoader extends AsyncTaskLoader<Cursor> {
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     final ForceLoadContentObserver mObserver;
 
     Uri mUri;
@@ -49,6 +56,7 @@ public class CursorLoader extends AsyncTaskLoader<Cursor> {
     String mSortOrder;
 
     Cursor mCursor;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     CancellationSignal mCancellationSignal;
 
     /* Runs on a worker thread */
@@ -142,7 +150,7 @@ public class CursorLoader extends AsyncTaskLoader<Cursor> {
     }
 
     /**
-     * Starts an asynchronous load of the contacts list data. When the result is ready the callbacks
+     * Starts an asynchronous load of the data. When the result is ready the callbacks
      * will be called on the UI thread. If a previous load has been completed and is still valid
      * the result may be passed to the callbacks immediately.
      *

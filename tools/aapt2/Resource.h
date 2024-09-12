@@ -19,22 +19,21 @@
 
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <tuple>
 #include <vector>
 
+#include "androidfw/ConfigDescription.h"
+#include "androidfw/Source.h"
 #include "androidfw/StringPiece.h"
 #include "utils/JenkinsHash.h"
-
-#include "ConfigDescription.h"
-#include "Source.h"
 
 namespace aapt {
 
 /**
- * The various types of resource types available. Corresponds
- * to the 'type' in package:type/entry.
+ * The various types of resource types available.
  */
 enum class ResourceType {
   kAnim,
@@ -57,8 +56,10 @@ enum class ResourceType {
   kInteger,
   kInterpolator,
   kLayout,
+  kMacro,
   kMenu,
   kMipmap,
+  kNavigation,
   kPlurals,
   kRaw,
   kString,
@@ -68,13 +69,58 @@ enum class ResourceType {
   kXml,
 };
 
-android::StringPiece ToString(ResourceType type);
+android::StringPiece to_string(ResourceType type);
 
 /**
- * Returns a pointer to a valid ResourceType, or nullptr if
- * the string was invalid.
+ * Returns a pointer to a valid ResourceType, or nullptr if the string was invalid.
  */
-const ResourceType* ParseResourceType(const android::StringPiece& str);
+const ResourceType* ParseResourceType(android::StringPiece str);
+
+/**
+ * Pair of type name as in ResourceTable and actual resource type.
+ * Corresponds to the 'type' in package:type/entry.
+ *
+ * This is to support resource types with custom names inside resource tables.
+ */
+struct ResourceNamedType {
+  std::string name;
+  ResourceType type = ResourceType::kRaw;
+
+  ResourceNamedType() = default;
+  ResourceNamedType(android::StringPiece n, ResourceType t);
+
+  int compare(const ResourceNamedType& other) const;
+
+  const std::string& to_string() const;
+};
+
+/**
+ * Same as ResourceNamedType, but uses StringPieces instead.
+ * Use this if you need to avoid copying and know that
+ * the lifetime of this object is shorter than that
+ * of the original string.
+ */
+struct ResourceNamedTypeRef {
+  android::StringPiece name;
+  ResourceType type = ResourceType::kRaw;
+
+  ResourceNamedTypeRef() = default;
+  ResourceNamedTypeRef(const ResourceNamedTypeRef&) = default;
+  ResourceNamedTypeRef(ResourceNamedTypeRef&&) = default;
+  ResourceNamedTypeRef(const ResourceNamedType& rhs);  // NOLINT(google-explicit-constructor)
+  ResourceNamedTypeRef(android::StringPiece n, ResourceType t);
+  ResourceNamedTypeRef& operator=(const ResourceNamedTypeRef& rhs) = default;
+  ResourceNamedTypeRef& operator=(ResourceNamedTypeRef&& rhs) = default;
+  ResourceNamedTypeRef& operator=(const ResourceNamedType& rhs);
+
+  ResourceNamedType ToResourceNamedType() const;
+
+  std::string_view to_string() const;
+};
+
+ResourceNamedTypeRef ResourceNamedTypeWithDefaultName(ResourceType t);
+
+std::optional<ResourceNamedTypeRef> ParseResourceNamedType(android::StringPiece s);
 
 /**
  * A resource's name. This can uniquely identify
@@ -82,16 +128,17 @@ const ResourceType* ParseResourceType(const android::StringPiece& str);
  */
 struct ResourceName {
   std::string package;
-  ResourceType type = ResourceType::kRaw;
+  ResourceNamedType type;
   std::string entry;
 
   ResourceName() = default;
-  ResourceName(const android::StringPiece& p, ResourceType t, const android::StringPiece& e);
+  ResourceName(android::StringPiece p, const ResourceNamedTypeRef& t, android::StringPiece e);
+  ResourceName(android::StringPiece p, ResourceType t, android::StringPiece e);
 
   int compare(const ResourceName& other) const;
 
   bool is_valid() const;
-  std::string ToString() const;
+  std::string to_string() const;
 };
 
 /**
@@ -102,20 +149,23 @@ struct ResourceName {
  */
 struct ResourceNameRef {
   android::StringPiece package;
-  ResourceType type = ResourceType::kRaw;
+  ResourceNamedTypeRef type;
   android::StringPiece entry;
 
   ResourceNameRef() = default;
   ResourceNameRef(const ResourceNameRef&) = default;
   ResourceNameRef(ResourceNameRef&&) = default;
-  ResourceNameRef(const ResourceName& rhs);  // NOLINT(implicit)
-  ResourceNameRef(const android::StringPiece& p, ResourceType t, const android::StringPiece& e);
+  ResourceNameRef(const ResourceName& rhs);  // NOLINT(google-explicit-constructor)
+  ResourceNameRef(android::StringPiece p, const ResourceNamedTypeRef& t, android::StringPiece e);
+  ResourceNameRef(android::StringPiece p, ResourceType t, android::StringPiece e);
   ResourceNameRef& operator=(const ResourceNameRef& rhs) = default;
   ResourceNameRef& operator=(ResourceNameRef&& rhs) = default;
   ResourceNameRef& operator=(const ResourceName& rhs);
 
-  ResourceName ToResourceName() const;
   bool is_valid() const;
+
+  ResourceName ToResourceName() const;
+  std::string to_string() const;
 };
 
 constexpr const uint8_t kAppPackageId = 0x7fu;
@@ -136,18 +186,21 @@ struct ResourceId {
   uint32_t id;
 
   ResourceId();
-  ResourceId(const ResourceId& rhs);
-  ResourceId(uint32_t res_id);  // NOLINT(implicit)
+  ResourceId(const ResourceId& rhs) = default;
+  ResourceId(uint32_t res_id);  // NOLINT(google-explicit-constructor)
   ResourceId(uint8_t p, uint8_t t, uint16_t e);
 
-  bool is_valid() const;
+  // Returns true if the ID is a valid ID that is not dynamic (package ID cannot be 0)
+  bool is_valid_static() const;
 
   // Returns true if the ID is a valid ID or dynamic ID (package ID can be 0).
-  bool is_valid_dynamic() const;
+  bool is_valid() const;
 
   uint8_t package_id() const;
   uint8_t type_id() const;
   uint16_t entry_id() const;
+
+  std::string to_string() const;
 };
 
 struct SourcedResourceName {
@@ -156,14 +209,24 @@ struct SourcedResourceName {
 };
 
 struct ResourceFile {
+  enum class Type {
+    kUnknown,
+    kPng,
+    kBinaryXml,
+    kProtoXml,
+  };
+
   // Name
   ResourceName name;
 
   // Configuration
-  ConfigDescription config;
+  android::ConfigDescription config;
+
+  // Type
+  Type type;
 
   // Source
-  Source source;
+  android::Source source;
 
   // Exported symbols
   std::vector<SourcedResourceName> exported_symbols;
@@ -175,7 +238,7 @@ struct ResourceFile {
  */
 struct ResourceKey {
   ResourceName name;
-  ConfigDescription config;
+  android::ConfigDescription config;
 };
 
 bool operator<(const ResourceKey& a, const ResourceKey& b);
@@ -187,16 +250,16 @@ bool operator<(const ResourceKey& a, const ResourceKey& b);
  */
 struct ResourceKeyRef {
   ResourceNameRef name;
-  ConfigDescription config;
+  android::ConfigDescription config;
 
   ResourceKeyRef() = default;
-  ResourceKeyRef(const ResourceNameRef& n, const ConfigDescription& c)
+  ResourceKeyRef(const ResourceNameRef& n, const android::ConfigDescription& c)
       : name(n), config(c) {}
 
   /**
    * Prevent taking a reference to a temporary. This is bad.
    */
-  ResourceKeyRef(ResourceName&& n, const ConfigDescription& c) = delete;
+  ResourceKeyRef(ResourceName&& n, const android::ConfigDescription& c) = delete;
 };
 
 bool operator<(const ResourceKeyRef& a, const ResourceKeyRef& b);
@@ -207,18 +270,18 @@ bool operator<(const ResourceKeyRef& a, const ResourceKeyRef& b);
 
 inline ResourceId::ResourceId() : id(0) {}
 
-inline ResourceId::ResourceId(const ResourceId& rhs) : id(rhs.id) {}
-
 inline ResourceId::ResourceId(uint32_t res_id) : id(res_id) {}
 
 inline ResourceId::ResourceId(uint8_t p, uint8_t t, uint16_t e)
     : id((p << 24) | (t << 16) | e) {}
 
-inline bool ResourceId::is_valid() const {
+inline bool ResourceId::is_valid_static() const {
   return (id & 0xff000000u) != 0 && (id & 0x00ff0000u) != 0;
 }
 
-inline bool ResourceId::is_valid_dynamic() const { return (id & 0x00ff0000u) != 0; }
+inline bool ResourceId::is_valid() const {
+  return (id & 0x00ff0000u) != 0;
+}
 
 inline uint8_t ResourceId::package_id() const {
   return static_cast<uint8_t>(id >> 24);
@@ -248,38 +311,128 @@ inline bool operator!=(const ResourceId& lhs, const ResourceId& rhs) {
   return lhs.id != rhs.id;
 }
 
-inline ::std::ostream& operator<<(::std::ostream& out,
-                                  const ResourceId& res_id) {
-  std::ios_base::fmtflags old_flags = out.flags();
-  char old_fill = out.fill();
-  out << "0x" << std::internal << std::setfill('0') << std::setw(8) << std::hex
-      << res_id.id;
-  out.flags(old_flags);
-  out.fill(old_fill);
-  return out;
+inline ::std::ostream& operator<<(::std::ostream& out, const ResourceId& res_id) {
+  return out << res_id.to_string();
+}
+
+// For generic code to call 'using std::to_string; to_string(T);'.
+inline std::string to_string(const ResourceId& id) {
+  return id.to_string();
+}
+
+// Helper to compare resource IDs, moving dynamic IDs after framework IDs.
+inline bool cmp_ids_dynamic_after_framework(const ResourceId& a, const ResourceId& b) {
+  // If one of a and b is from the framework package (package ID 0x01), and the
+  // other is a dynamic ID (package ID 0x00), then put the dynamic ID after the
+  // framework ID. This ensures that when AssetManager resolves the dynamic IDs,
+  // they will be in sorted order as expected by AssetManager.
+  if ((a.package_id() == kFrameworkPackageId && b.package_id() == 0x00) ||
+      (a.package_id() == 0x00 && b.package_id() == kFrameworkPackageId)) {
+    return b < a;
+  }
+  return a < b;
 }
 
 //
 // ResourceType implementation.
 //
 
-inline ::std::ostream& operator<<(::std::ostream& out,
-                                  const ResourceType& val) {
-  return out << ToString(val);
+inline ::std::ostream& operator<<(::std::ostream& out, const ResourceType& val) {
+  return out << to_string(val);
+}
+
+//
+// ResourceNamedType implementation.
+//
+inline ResourceNamedType::ResourceNamedType(android::StringPiece n, ResourceType t)
+    : name(n), type(t) {
+}
+
+inline int ResourceNamedType::compare(const ResourceNamedType& other) const {
+  int cmp = static_cast<int>(type) - static_cast<int>(other.type);
+  if (cmp != 0) return cmp;
+  cmp = name.compare(other.name);
+  return cmp;
+}
+
+inline const std::string& ResourceNamedType::to_string() const {
+  return name;
+}
+
+inline bool operator<(const ResourceNamedType& lhs, const ResourceNamedType& rhs) {
+  return lhs.compare(rhs) < 0;
+}
+
+inline bool operator==(const ResourceNamedType& lhs, const ResourceNamedType& rhs) {
+  return lhs.compare(rhs) == 0;
+}
+
+inline bool operator!=(const ResourceNamedType& lhs, const ResourceNamedType& rhs) {
+  return lhs.compare(rhs) != 0;
+}
+
+inline ::std::ostream& operator<<(::std::ostream& out, const ResourceNamedType& val) {
+  return out << val.to_string();
+}
+
+//
+// ResourceNamedTypeRef implementation.
+//
+inline ResourceNamedTypeRef::ResourceNamedTypeRef(android::StringPiece n, ResourceType t)
+    : name(n), type(t) {
+}
+
+inline ResourceNamedTypeRef::ResourceNamedTypeRef(const ResourceNamedType& rhs)
+    : name(rhs.name), type(rhs.type) {
+}
+
+inline ResourceNamedTypeRef& ResourceNamedTypeRef::operator=(const ResourceNamedType& rhs) {
+  name = rhs.name;
+  type = rhs.type;
+  return *this;
+}
+
+inline ResourceNamedType ResourceNamedTypeRef::ToResourceNamedType() const {
+  return ResourceNamedType(name, type);
+}
+
+inline std::string_view ResourceNamedTypeRef::to_string() const {
+  return name;
+}
+
+inline bool operator<(const ResourceNamedTypeRef& lhs, const ResourceNamedTypeRef& rhs) {
+  return std::tie(lhs.type, lhs.name) < std::tie(rhs.type, rhs.name);
+}
+
+inline bool operator==(const ResourceNamedTypeRef& lhs, const ResourceNamedTypeRef& rhs) {
+  return std::tie(lhs.type, lhs.name) == std::tie(rhs.type, rhs.name);
+}
+
+inline bool operator!=(const ResourceNamedTypeRef& lhs, const ResourceNamedTypeRef& rhs) {
+  return std::tie(lhs.type, lhs.name) != std::tie(rhs.type, rhs.name);
+}
+
+inline ::std::ostream& operator<<(::std::ostream& out, const ResourceNamedTypeRef& val) {
+  return out << val.name;
 }
 
 //
 // ResourceName implementation.
 //
 
-inline ResourceName::ResourceName(const android::StringPiece& p, ResourceType t,
-                                  const android::StringPiece& e)
-    : package(p.to_string()), type(t), entry(e.to_string()) {}
+inline ResourceName::ResourceName(android::StringPiece p, const ResourceNamedTypeRef& t,
+                                  android::StringPiece e)
+    : package(p), type(t.ToResourceNamedType()), entry(e) {
+}
+
+inline ResourceName::ResourceName(android::StringPiece p, ResourceType t, android::StringPiece e)
+    : ResourceName(p, ResourceNamedTypeWithDefaultName(t), e) {
+}
 
 inline int ResourceName::compare(const ResourceName& other) const {
   int cmp = package.compare(other.package);
   if (cmp != 0) return cmp;
-  cmp = static_cast<int>(type) - static_cast<int>(other.type);
+  cmp = type.compare(other.type);
   if (cmp != 0) return cmp;
   cmp = entry.compare(other.entry);
   return cmp;
@@ -304,18 +457,8 @@ inline bool operator!=(const ResourceName& lhs, const ResourceName& rhs) {
          std::tie(rhs.package, rhs.type, rhs.entry);
 }
 
-inline ::std::ostream& operator<<(::std::ostream& out,
-                                  const ResourceName& name) {
-  if (!name.package.empty()) {
-    out << name.package << ":";
-  }
-  return out << name.type << "/" << name.entry;
-}
-
-inline std::string ResourceName::ToString() const {
-  std::stringstream stream;
-  stream << *this;
-  return stream.str();
+inline ::std::ostream& operator<<(::std::ostream& out, const ResourceName& name) {
+  return out << name.to_string();
 }
 
 //
@@ -325,9 +468,15 @@ inline std::string ResourceName::ToString() const {
 inline ResourceNameRef::ResourceNameRef(const ResourceName& rhs)
     : package(rhs.package), type(rhs.type), entry(rhs.entry) {}
 
-inline ResourceNameRef::ResourceNameRef(const android::StringPiece& p, ResourceType t,
-                                        const android::StringPiece& e)
-    : package(p), type(t), entry(e) {}
+inline ResourceNameRef::ResourceNameRef(android::StringPiece p, const ResourceNamedTypeRef& t,
+                                        android::StringPiece e)
+    : package(p), type(t), entry(e) {
+}
+
+inline ResourceNameRef::ResourceNameRef(android::StringPiece p, ResourceType t,
+                                        android::StringPiece e)
+    : ResourceNameRef(p, ResourceNamedTypeWithDefaultName(t), e) {
+}
 
 inline ResourceNameRef& ResourceNameRef::operator=(const ResourceName& rhs) {
   package = rhs.package;
@@ -359,12 +508,8 @@ inline bool operator!=(const ResourceNameRef& lhs, const ResourceNameRef& rhs) {
          std::tie(rhs.package, rhs.type, rhs.entry);
 }
 
-inline ::std::ostream& operator<<(::std::ostream& out,
-                                  const ResourceNameRef& name) {
-  if (!name.package.empty()) {
-    out << name.package << ":";
-  }
-  return out << name.type << "/" << name.entry;
+inline ::std::ostream& operator<<(::std::ostream& out, const ResourceNameRef& name) {
+  return out << name.to_string();
 }
 
 inline bool operator<(const ResourceName& lhs, const ResourceNameRef& b) {
@@ -375,8 +520,7 @@ inline bool operator!=(const ResourceName& lhs, const ResourceNameRef& rhs) {
   return ResourceNameRef(lhs) != rhs;
 }
 
-inline bool operator==(const SourcedResourceName& lhs,
-                       const SourcedResourceName& rhs) {
+inline bool operator==(const SourcedResourceName& lhs, const SourcedResourceName& rhs) {
   return lhs.name == rhs.name && lhs.line == rhs.line;
 }
 
@@ -389,7 +533,7 @@ struct hash<aapt::ResourceName> {
   size_t operator()(const aapt::ResourceName& name) const {
     android::hash_t h = 0;
     h = android::JenkinsHashMix(h, static_cast<uint32_t>(hash<string>()(name.package)));
-    h = android::JenkinsHashMix(h, static_cast<uint32_t>(name.type));
+    h = android::JenkinsHashMix(h, static_cast<uint32_t>(hash<string>()(name.type.name)));
     h = android::JenkinsHashMix(h, static_cast<uint32_t>(hash<string>()(name.entry)));
     return static_cast<size_t>(h);
   }

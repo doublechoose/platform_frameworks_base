@@ -20,6 +20,9 @@ import android.app.Activity;
 import android.app.LoadedApk;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.net.ConnectivityManager;
 import android.net.ConnectivityManager.NetworkCallback;
@@ -32,8 +35,9 @@ import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Bundle;
 import android.telephony.CarrierConfigManager;
-import android.telephony.Rlog;
 import android.telephony.SubscriptionManager;
+import android.telephony.TelephonyManager;
+import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.Log;
 import android.util.TypedValue;
@@ -45,9 +49,8 @@ import android.webkit.WebViewClient;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
-import com.android.internal.telephony.PhoneConstants;
-import com.android.internal.telephony.TelephonyIntents;
 import com.android.internal.util.ArrayUtils;
+import com.android.net.module.util.NetworkStackConstants;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -68,7 +71,7 @@ public class CaptivePortalLoginActivity extends Activity {
     private static final boolean DBG = true;
 
     private static final int SOCKET_TIMEOUT_MS = 10 * 1000;
-    public static final int NETWORK_REQUEST_TIMEOUT_MS = 5 * 1000;
+    private static final int NETWORK_REQUEST_TIMEOUT_MS = 5 * 1000;
 
     private URL mUrl;
     private Network mNetwork;
@@ -77,11 +80,13 @@ public class CaptivePortalLoginActivity extends Activity {
     private WebView mWebView;
     private MyWebViewClient mWebViewClient;
     private boolean mLaunchBrowser = false;
+    private Thread mTestingThread = null;
+    private boolean mReload = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        mCm = ConnectivityManager.from(this);
+        mCm = getSystemService(ConnectivityManager.class);
         mUrl = getUrlForCaptivePortal();
         if (mUrl == null) {
             done(false);
@@ -100,15 +105,17 @@ public class CaptivePortalLoginActivity extends Activity {
         webSettings.setLoadWithOverviewMode(true);
         webSettings.setSupportZoom(true);
         webSettings.setBuiltInZoomControls(true);
+        webSettings.setDomStorageEnabled(true);
+        webSettings.setAllowFileAccess(false);
         mWebViewClient = new MyWebViewClient();
         mWebView.setWebViewClient(mWebViewClient);
         mWebView.setWebChromeClient(new MyWebChromeClient());
 
-        mNetwork = getNetworkForCaptivePortal();
-        if (mNetwork == null) {
+        final Network network = getNetworkForCaptivePortal();
+        if (network == null) {
             requestNetworkForCaptivePortal();
         } else {
-            mCm.bindProcessToNetwork(mNetwork);
+            setNetwork(network);
             // Start initial page load so WebView finishes loading proxy settings.
             // Actual load of mUrl is initiated by MyWebViewClient.
             mWebView.loadData("", "text/html", null);
@@ -127,8 +134,6 @@ public class CaptivePortalLoginActivity extends Activity {
 
     @Override
     public void onDestroy() {
-        super.onDestroy();
-        releaseNetworkRequest();
         if (mLaunchBrowser) {
             // Give time for this network to become default. After 500ms just proceed.
             for (int i = 0; i < 5; i++) {
@@ -143,6 +148,21 @@ public class CaptivePortalLoginActivity extends Activity {
             if (DBG) logd("starting activity with intent ACTION_VIEW for " + url);
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
         }
+
+        if (mTestingThread != null) {
+            mTestingThread.interrupt();
+        }
+        mWebView.destroy();
+        releaseNetworkRequest();
+        super.onDestroy();
+    }
+
+    private void setNetwork(Network network) {
+        if (network != null) {
+            network = network.getPrivateDnsBypassingCopy();
+            mCm.bindProcessToNetwork(network);
+        }
+        mNetwork = network;
     }
 
     // Find WebView's proxy BroadcastReceiver and prompt it to read proxy system properties.
@@ -175,27 +195,18 @@ public class CaptivePortalLoginActivity extends Activity {
         if (success) {
             // Trigger re-evaluation upon success http response code
             CarrierActionUtils.applyCarrierAction(
-                    CarrierActionUtils.CARRIER_ACTION_ENABLE_RADIO, getIntent(),
+                    CarrierActionUtils.CARRIER_ACTION_RESET_ALL, getIntent(),
                     getApplicationContext());
-            CarrierActionUtils.applyCarrierAction(
-                    CarrierActionUtils.CARRIER_ACTION_ENABLE_METERED_APNS, getIntent(),
-                    getApplicationContext());
-            CarrierActionUtils.applyCarrierAction(
-                    CarrierActionUtils.CARRIER_ACTION_CANCEL_ALL_NOTIFICATIONS, getIntent(),
-                    getApplicationContext());
-
         }
         finishAndRemoveTask();
     }
 
     private URL getUrlForCaptivePortal() {
-        String url = getIntent().getStringExtra(TelephonyIntents.EXTRA_REDIRECTION_URL_KEY);
-        if (url.isEmpty()) {
-            url = mCm.getCaptivePortalServerUrl();
-        }
+        String url = getIntent().getStringExtra(TelephonyManager.EXTRA_REDIRECTION_URL);
+        if (TextUtils.isEmpty(url)) url = mCm.getCaptivePortalServerUrl();
         final CarrierConfigManager configManager = getApplicationContext()
                 .getSystemService(CarrierConfigManager.class);
-        final int subId = getIntent().getIntExtra(PhoneConstants.SUBSCRIPTION_KEY,
+        final int subId = getIntent().getIntExtra(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX,
                 SubscriptionManager.getDefaultVoiceSubscriptionId());
         final String[] portalURLs = configManager.getConfigForSubId(subId).getStringArray(
                 CarrierConfigManager.KEY_CARRIER_DEFAULT_REDIRECTION_URL_STRING_ARRAY);
@@ -216,16 +227,18 @@ public class CaptivePortalLoginActivity extends Activity {
     }
 
     private void testForCaptivePortal() {
-        new Thread(new Runnable() {
+        mTestingThread = new Thread(new Runnable() {
             public void run() {
                 // Give time for captive portal to open.
                 try {
                     Thread.sleep(1000);
                 } catch (InterruptedException e) {
                 }
+                if (isFinishing() || isDestroyed()) return;
                 HttpURLConnection urlConnection = null;
                 int httpResponseCode = 500;
-                int oldTag = TrafficStats.getAndSetThreadStatsTag(TrafficStats.TAG_SYSTEM_PROBE);
+                int oldTag = TrafficStats.getAndSetThreadStatsTag(
+                        NetworkStackConstants.TAG_SYSTEM_PROBE);
                 try {
                     urlConnection = (HttpURLConnection) mNetwork.openConnection(
                             new URL(mCm.getCaptivePortalServerUrl()));
@@ -245,7 +258,8 @@ public class CaptivePortalLoginActivity extends Activity {
                     done(true);
                 }
             }
-        }).start();
+        });
+        mTestingThread.start();
     }
 
     private Network getNetworkForCaptivePortal() {
@@ -273,12 +287,15 @@ public class CaptivePortalLoginActivity extends Activity {
             @Override
             public void onAvailable(Network network) {
                 if (DBG) logd("Network available: " + network);
-                mCm.bindProcessToNetwork(network);
-                mNetwork = network;
+                setNetwork(network);
                 runOnUiThreadIfNotFinishing(() -> {
-                    // Start initial page load so WebView finishes loading proxy settings.
-                    // Actual load of mUrl is initiated by MyWebViewClient.
-                    mWebView.loadData("", "text/html", null);
+                    if (mReload) {
+                        mWebView.reload();
+                    } else {
+                        // Start initial page load so WebView finishes loading proxy settings.
+                        // Actual load of mUrl is initiated by MyWebViewClient.
+                        mWebView.loadData("", "text/html", null);
+                    }
                 });
             }
 
@@ -290,6 +307,12 @@ public class CaptivePortalLoginActivity extends Activity {
                     // HTTP error page in the absence of network connection.
                     mWebView.loadUrl(mUrl.toString());
                 });
+            }
+
+            @Override
+            public void onLost(Network lostNetwork) {
+                if (DBG) logd("Network lost");
+                mReload = true;
             }
         };
         logd("request Network for captive portal");
@@ -430,12 +453,33 @@ public class CaptivePortalLoginActivity extends Activity {
         }
     }
 
+    /**
+     * This alias presents the target activity, CaptivePortalLoginActivity, as a independent
+     * entity with its own intent filter to handle URL links. This alias will be enabled/disabled
+     * dynamically to handle url links based on the network conditions.
+     */
+    public static String getAlias(Context context) {
+        try {
+            PackageInfo p = context.getPackageManager().getPackageInfo(context.getPackageName(),
+                    PackageManager.GET_ACTIVITIES | PackageManager.MATCH_DISABLED_COMPONENTS);
+            for (ActivityInfo activityInfo : p.activities) {
+                String targetActivity = activityInfo.targetActivity;
+                if (CaptivePortalLoginActivity.class.getName().equals(targetActivity)) {
+                    return activityInfo.name;
+                }
+            }
+        } catch (PackageManager.NameNotFoundException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
     private static void logd(String s) {
-        Rlog.d(TAG, s);
+        Log.d(TAG, s);
     }
 
     private static void loge(String s) {
-        Rlog.d(TAG, s);
+        Log.d(TAG, s);
     }
 
 }

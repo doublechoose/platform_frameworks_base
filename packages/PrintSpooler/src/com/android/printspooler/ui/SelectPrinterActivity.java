@@ -19,6 +19,7 @@ package com.android.printspooler.ui;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.Activity;
+import android.app.ActivityOptions;
 import android.app.LoaderManager;
 import android.content.ComponentName;
 import android.content.Context;
@@ -122,7 +123,7 @@ public final class SelectPrinterActivity extends Activity implements
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getActionBar().setIcon(R.drawable.ic_print);
+        getActionBar().setIcon(com.android.internal.R.drawable.ic_print);
 
         setContentView(R.layout.select_printer_activity);
 
@@ -285,6 +286,11 @@ public final class SelectPrinterActivity extends Activity implements
             final int position = ((AdapterContextMenuInfo) menuInfo).position;
             PrinterInfo printer = (PrinterInfo) mListView.getAdapter().getItem(position);
 
+            // Printer is null if this is a context menu for the "add printer" entry
+            if (printer == null) {
+                return;
+            }
+
             menu.setHeaderTitle(printer.getName());
 
             // Add the select menu item if applicable.
@@ -309,16 +315,15 @@ public final class SelectPrinterActivity extends Activity implements
 
     @Override
     public boolean onContextItemSelected(MenuItem item) {
-        switch (item.getItemId()) {
-            case R.string.print_select_printer: {
-                PrinterInfo printer = item.getIntent().getParcelableExtra(EXTRA_PRINTER);
-                onPrinterSelected(printer);
-            } return true;
-
-            case R.string.print_forget_printer: {
-                PrinterId printerId = item.getIntent().getParcelableExtra(EXTRA_PRINTER_ID);
-                mPrinterRegistry.forgetFavoritePrinter(printerId);
-            } return true;
+        final int itemId = item.getItemId();
+        if (itemId == R.string.print_select_printer) {
+            PrinterInfo printer = item.getIntent().getParcelableExtra(EXTRA_PRINTER);
+            onPrinterSelected(printer);
+            return true;
+        } else if (itemId == R.string.print_forget_printer) {
+            PrinterId printerId = item.getIntent().getParcelableExtra(EXTRA_PRINTER_ID);
+            mPrinterRegistry.forgetFavoritePrinter(printerId);
+            return true;
         }
         return false;
     }
@@ -710,8 +715,13 @@ public final class SelectPrinterActivity extends Activity implements
 
                     try {
                         mPrinterForInfoIntent = printer;
+                        Bundle options = ActivityOptions.makeBasic()
+                                .setPendingIntentBackgroundActivityStartMode(
+                                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                                .toBundle();
                         startIntentSenderForResult(printer.getInfoIntent().getIntentSender(),
-                                INFO_INTENT_REQUEST_CODE, fillInIntent, 0, 0, 0);
+                                INFO_INTENT_REQUEST_CODE, fillInIntent, 0, 0, 0,
+                                options);
                     } catch (SendIntentException e) {
                         mPrinterForInfoIntent = null;
                         Log.e(LOG_TAG, "Could not execute pending info intent: %s", e);

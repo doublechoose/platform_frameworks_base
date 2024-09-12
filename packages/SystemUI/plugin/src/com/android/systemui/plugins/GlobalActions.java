@@ -26,6 +26,11 @@ public interface GlobalActions extends Plugin {
     int VERSION = 1;
 
     void showGlobalActions(GlobalActionsManager manager);
+    default void showShutdownUi(boolean isReboot, String reason) {
+    }
+
+    default void destroy() {
+    }
 
     @ProvidesInterface(version = GlobalActionsManager.VERSION)
     public interface GlobalActionsManager {

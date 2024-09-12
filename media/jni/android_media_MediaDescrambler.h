@@ -19,48 +19,19 @@
 
 #include "jni.h"
 
-#include <binder/Status.h>
-#include <media/cas/DescramblerAPI.h>
-#include <media/stagefright/foundation/ABase.h>
-#include <utils/Mutex.h>
 #include <utils/RefBase.h>
 
 namespace android {
-class IMemory;
-class MemoryDealer;
-namespace media {
-class IDescrambler;
-};
-using namespace media;
-using binder::Status;
 
-struct JDescrambler : public RefBase {
-    JDescrambler(JNIEnv *env, jobject descramberBinderObj);
+namespace hardware {
+namespace cas {
+namespace native {
+namespace V1_0 {
+struct IDescrambler;
+}}}}
+using hardware::cas::native::V1_0::IDescrambler;
 
-    Status descramble(
-            jbyte key,
-            size_t numSubSamples,
-            ssize_t totalLength,
-            DescramblerPlugin::SubSample *subSamples,
-            const void *srcPtr,
-            jint srcOffset,
-            void *dstPtr,
-            jint dstOffset,
-            ssize_t *result);
-
-protected:
-    virtual ~JDescrambler();
-
-private:
-    sp<IDescrambler> mDescrambler;
-    sp<IMemory> mMem;
-    sp<MemoryDealer> mDealer;
-    Mutex mSharedMemLock;
-
-    void ensureBufferCapacity(size_t neededSize);
-
-    DISALLOW_EVIL_CONSTRUCTORS(JDescrambler);
-};
+sp<IDescrambler> GetDescrambler(JNIEnv *env, jobject obj);
 
 }  // namespace android
 

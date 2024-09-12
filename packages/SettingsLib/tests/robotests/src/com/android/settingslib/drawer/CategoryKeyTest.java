@@ -16,21 +16,17 @@
 
 package com.android.settingslib.drawer;
 
-import android.util.ArraySet;
+import static com.google.common.truth.Truth.assertThat;
 
-import com.android.settingslib.TestConfig;
+import android.util.ArraySet;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
-import org.robolectric.annotation.Config;
 
 import java.util.Set;
 
-import static com.google.common.truth.Truth.assertThat;
-
 @RunWith(RobolectricTestRunner.class)
-@Config(manifest = TestConfig.MANIFEST_PATH, sdk = TestConfig.SDK_VERSION)
 public class CategoryKeyTest {
 
     @Test
@@ -46,6 +42,7 @@ public class CategoryKeyTest {
 
         // DO NOT REMOVE ANYTHING BELOW
         allKeys.add(CategoryKey.CATEGORY_HOMEPAGE);
+        allKeys.add(CategoryKey.CATEGORY_CONNECT);
         allKeys.add(CategoryKey.CATEGORY_DEVICE);
         allKeys.add(CategoryKey.CATEGORY_APPS);
         allKeys.add(CategoryKey.CATEGORY_APPS_DEFAULT);
@@ -54,13 +51,18 @@ public class CategoryKeyTest {
         allKeys.add(CategoryKey.CATEGORY_SOUND);
         allKeys.add(CategoryKey.CATEGORY_STORAGE);
         allKeys.add(CategoryKey.CATEGORY_SECURITY);
+        allKeys.add(CategoryKey.CATEGORY_SECURITY_LOCKSCREEN);
         allKeys.add(CategoryKey.CATEGORY_ACCOUNT);
+        allKeys.add(CategoryKey.CATEGORY_ACCOUNT_DETAIL);
         allKeys.add(CategoryKey.CATEGORY_SYSTEM);
         allKeys.add(CategoryKey.CATEGORY_SYSTEM_LANGUAGE);
         allKeys.add(CategoryKey.CATEGORY_SYSTEM_DEVELOPMENT);
+        allKeys.add(CategoryKey.CATEGORY_GESTURES);
+        allKeys.add(CategoryKey.CATEGORY_NIGHT_DISPLAY);
+        allKeys.add(CategoryKey.CATEGORY_SMART_BATTERY_SETTINGS);
+        allKeys.add(CategoryKey.CATEGORY_COMMUNAL_SETTINGS);
         // DO NOT REMOVE ANYTHING ABOVE
 
-        assertThat(allKeys.size()).isEqualTo(13);
+        assertThat(allKeys.size()).isEqualTo(20);
     }
-
 }

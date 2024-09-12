@@ -18,6 +18,7 @@ package android.app;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentSender;
@@ -37,7 +38,11 @@ import java.io.PrintWriter;
  * Fragments may be hosted by any object; such as an {@link Activity}. In order to
  * host fragments, implement {@link FragmentHostCallback}, overriding the methods
  * applicable to the host.
+ *
+ * @deprecated Use the <a href="{@docRoot}tools/extras/support-library.html">Support Library</a>
+ *      {@link androidx.fragment.app.FragmentHostCallback}
  */
+@Deprecated
 public abstract class FragmentHostCallback<E> extends FragmentContainer {
     private final Activity mActivity;
     final Context mContext;
@@ -48,10 +53,11 @@ public abstract class FragmentHostCallback<E> extends FragmentContainer {
     private ArrayMap<String, LoaderManager> mAllLoaderManagers;
     /** Whether or not fragment loaders should retain their state */
     private boolean mRetainLoaders;
-    /** The loader manger for the fragment host [i.e. Activity#getLoaderManager()] */
+    /** The loader manager for the fragment host [i.e. Activity#getLoaderManager()] */
     private LoaderManagerImpl mLoaderManager;
     private boolean mCheckedForLoaderManager;
     /** Whether or not the fragment host loader manager was started */
+    @UnsupportedAppUsage
     private boolean mLoadersStarted;
 
     public FragmentHostCallback(Context context, Handler handler, int windowAnimations) {

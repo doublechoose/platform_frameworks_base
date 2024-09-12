@@ -20,28 +20,37 @@ import android.content.Context;
 import android.net.ConnectivityMetricsEvent;
 import android.net.IIpConnectivityMetrics;
 import android.net.INetdEventCallback;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkStack;
 import android.net.metrics.ApfProgramEvent;
 import android.net.metrics.IpConnectivityLog;
 import android.os.Binder;
-import android.os.IBinder;
-import android.os.Parcelable;
 import android.os.Process;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.text.format.DateUtils;
 import android.util.ArrayMap;
 import android.util.Base64;
 import android.util.Log;
+
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.RingBuffer;
 import com.android.internal.util.TokenBucket;
+import com.android.server.LocalServices;
 import com.android.server.SystemService;
 import com.android.server.connectivity.metrics.nano.IpConnectivityLogClass.IpConnectivityEvent;
+
 import java.io.FileDescriptor;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.function.ToIntFunction;
 
@@ -112,6 +121,9 @@ final public class IpConnectivityMetrics extends SystemService {
 
     private final ToIntFunction<Context> mCapacityGetter;
 
+    @VisibleForTesting
+    final DefaultNetworkMetrics mDefaultNetworkMetrics = new DefaultNetworkMetrics();
+
     public IpConnectivityMetrics(Context ctx, ToIntFunction<Context> capacityGetter) {
         super(ctx);
         mCapacityGetter = capacityGetter;
@@ -135,6 +147,8 @@ final public class IpConnectivityMetrics extends SystemService {
 
             publishBinderService(SERVICE_NAME, impl);
             publishBinderService(mNetdListener.SERVICE_NAME, mNetdListener);
+
+            LocalServices.addService(Logger.class, new LoggerImpl());
         }
     }
 
@@ -188,6 +202,8 @@ final public class IpConnectivityMetrics extends SystemService {
 
         final List<IpConnectivityEvent> protoEvents = IpConnectivityEventBuilder.toProto(events);
 
+        mDefaultNetworkMetrics.flushEvents(protoEvents);
+
         if (mNetdListener != null) {
             mNetdListener.flushStatistics(protoEvents);
         }
@@ -204,87 +220,92 @@ final public class IpConnectivityMetrics extends SystemService {
     }
 
     /**
-     * Clears the event buffer and prints its content as a protobuf serialized byte array
+     * Clear the event buffer and prints its content as a protobuf serialized byte array
      * inside a base64 encoded string.
      */
-    private void cmdFlush(FileDescriptor fd, PrintWriter pw, String[] args) {
+    private void cmdFlush(PrintWriter pw) {
         pw.print(flushEncodedOutput());
     }
 
     /**
-     * Prints the content of the event buffer, either using the events ASCII representation
-     * or using protobuf text format.
+     * Print the content of the rolling event buffer in human readable format.
+     * Also print network dns/connect statistics and recent default network events.
      */
-    private void cmdList(FileDescriptor fd, PrintWriter pw, String[] args) {
-        final ArrayList<ConnectivityMetricsEvent> events;
-        synchronized (mLock) {
-            events = new ArrayList(mBuffer);
-        }
-
-        if (args.length > 1 && args[1].equals("proto")) {
-            for (IpConnectivityEvent ev : IpConnectivityEventBuilder.toProto(events)) {
-                pw.print(ev.toString());
-            }
-            if (mNetdListener != null) {
-                mNetdListener.listAsProtos(pw);
-            }
-            return;
-        }
-
+    private void cmdList(PrintWriter pw) {
+        pw.println("metrics events:");
+        final List<ConnectivityMetricsEvent> events = getEvents();
         for (ConnectivityMetricsEvent ev : events) {
             pw.println(ev.toString());
         }
+        pw.println("");
         if (mNetdListener != null) {
             mNetdListener.list(pw);
         }
+        pw.println("");
+        mDefaultNetworkMetrics.listEvents(pw);
     }
 
-    /**
-     * Prints for bug reports the content of the rolling event log and the
-     * content of Netd event listener.
+    private List<IpConnectivityEvent> listEventsAsProtos() {
+        final List<IpConnectivityEvent> events = IpConnectivityEventBuilder.toProto(getEvents());
+        if (mNetdListener != null) {
+            events.addAll(mNetdListener.listAsProtos());
+        }
+        events.addAll(mDefaultNetworkMetrics.listEventsAsProto());
+        return events;
+    }
+
+    /*
+     * Print the content of the rolling event buffer in text proto format.
      */
-    private void cmdDumpsys(FileDescriptor fd, PrintWriter pw, String[] args) {
-        final ConnectivityMetricsEvent[] events;
+    private void cmdListAsTextProto(PrintWriter pw) {
+        listEventsAsProtos().forEach(e -> pw.print(e.toString()));
+    }
+
+    /*
+     * Write the content of the rolling event buffer in proto wire format to the given OutputStream.
+     */
+    private void cmdListAsBinaryProto(OutputStream out) {
+        final int dropped;
         synchronized (mLock) {
-            events = mEventLog.toArray();
+            dropped = mDropped;
         }
-        for (ConnectivityMetricsEvent ev : events) {
-            pw.println(ev.toString());
-        }
-        if (mNetdListener != null) {
-            mNetdListener.list(pw);
+        try {
+            byte[] data = IpConnectivityEventBuilder.serialize(dropped, listEventsAsProtos());
+            out.write(data);
+            out.flush();
+        } catch (IOException e) {
+            Log.e(TAG, "could not serialize events", e);
         }
     }
 
-    private void cmdStats(FileDescriptor fd, PrintWriter pw, String[] args) {
+    /*
+     * Return a copy of metrics events stored in buffer for metrics uploading.
+     */
+    private List<ConnectivityMetricsEvent> getEvents() {
         synchronized (mLock) {
-            pw.println("Buffered events: " + mBuffer.size());
-            pw.println("Buffer capacity: " + mCapacity);
-            pw.println("Dropped events: " + mDropped);
+            return Arrays.asList(mEventLog.toArray());
         }
-        if (mNetdListener != null) {
-            mNetdListener.dump(pw);
-        }
-    }
-
-    private void cmdDefault(FileDescriptor fd, PrintWriter pw, String[] args) {
-        if (args.length == 0) {
-            pw.println("No command");
-            return;
-        }
-        pw.println("Unknown command " + TextUtils.join(" ", args));
     }
 
     public final class Impl extends IIpConnectivityMetrics.Stub {
-        static final String CMD_FLUSH   = "flush";
-        static final String CMD_LIST    = "list";
-        static final String CMD_STATS   = "stats";
-        static final String CMD_DUMPSYS = "-a"; // dumpsys.cpp dumps services with "-a" as arguments
-        static final String CMD_DEFAULT = CMD_STATS;
+        // Dump and flushes the metrics event buffer in base64 encoded serialized proto output.
+        static final String CMD_FLUSH = "flush";
+        // Dump the rolling buffer of metrics event in human readable proto text format.
+        static final String CMD_PROTO = "proto";
+        // Dump the rolling buffer of metrics event in proto wire format. See usage() of
+        // frameworks/native/cmds/dumpsys/dumpsys.cpp for details.
+        static final String CMD_PROTO_BIN = "--proto";
+        // Dump the rolling buffer of metrics event and pretty print events using a human readable
+        // format. Also print network dns/connect statistics and default network event time series.
+        static final String CMD_LIST = "list";
+        // By default any other argument will fall into the default case which is the equivalent
+        // of calling both the "list" and "ipclient" commands. This includes most notably bug
+        // reports collected by dumpsys.cpp with the "-a" argument.
+        static final String CMD_DEFAULT = "";
 
         @Override
         public int logEvent(ConnectivityMetricsEvent event) {
-            enforceConnectivityInternalPermission();
+            NetworkStack.checkNetworkStackPermission(getContext());
             return append(event);
         }
 
@@ -295,24 +316,19 @@ final public class IpConnectivityMetrics extends SystemService {
             final String cmd = (args.length > 0) ? args[0] : CMD_DEFAULT;
             switch (cmd) {
                 case CMD_FLUSH:
-                    cmdFlush(fd, pw, args);
+                    cmdFlush(pw);
                     return;
-                case CMD_DUMPSYS:
-                    cmdDumpsys(fd, pw, args);
+                case CMD_PROTO:
+                    cmdListAsTextProto(pw);
+                    return;
+                case CMD_PROTO_BIN:
+                    cmdListAsBinaryProto(new FileOutputStream(fd));
                     return;
                 case CMD_LIST:
-                    cmdList(fd, pw, args);
-                    return;
-                case CMD_STATS:
-                    cmdStats(fd, pw, args);
-                    return;
                 default:
-                    cmdDefault(fd, pw, args);
+                    cmdList(pw);
+                    return;
             }
-        }
-
-        private void enforceConnectivityInternalPermission() {
-            enforcePermission(android.Manifest.permission.CONNECTIVITY_INTERNAL);
         }
 
         private void enforceDumpPermission() {
@@ -332,23 +348,40 @@ final public class IpConnectivityMetrics extends SystemService {
         }
 
         @Override
-        public boolean registerNetdEventCallback(INetdEventCallback callback) {
+        public boolean addNetdEventCallback(int callerType, INetdEventCallback callback) {
             enforceNetdEventListeningPermission();
             if (mNetdListener == null) {
                 return false;
             }
-            return mNetdListener.registerNetdEventCallback(callback);
+            return mNetdListener.addNetdEventCallback(callerType, callback);
         }
 
         @Override
-        public boolean unregisterNetdEventCallback() {
+        public boolean removeNetdEventCallback(int callerType) {
             enforceNetdEventListeningPermission();
             if (mNetdListener == null) {
                 // if the service is null, we aren't registered anyway
                 return true;
             }
-            return mNetdListener.unregisterNetdEventCallback();
+            return mNetdListener.removeNetdEventCallback(callerType);
         }
+
+        @Override
+        public void logDefaultNetworkValidity(boolean valid) {
+            NetworkStack.checkNetworkStackPermission(getContext());
+            mDefaultNetworkMetrics.logDefaultNetworkValidity(SystemClock.elapsedRealtime(), valid);
+        }
+
+        @Override
+        public void logDefaultNetworkEvent(Network defaultNetwork, int score, boolean validated,
+                LinkProperties lp, NetworkCapabilities nc, Network previousDefaultNetwork,
+                int previousScore, LinkProperties previousLp, NetworkCapabilities previousNc) {
+            NetworkStack.checkNetworkStackPermission(getContext());
+            final long timeMs = SystemClock.elapsedRealtime();
+            mDefaultNetworkMetrics.logDefaultNetworkEvent(timeMs, defaultNetwork, score, validated,
+                    lp, nc,  previousDefaultNetwork, previousScore, previousLp, previousNc);
+        }
+
     };
 
     private static final ToIntFunction<Context> READ_BUFFER_SIZE = (ctx) -> {
@@ -365,5 +398,16 @@ final public class IpConnectivityMetrics extends SystemService {
         // one token every minute, 50 tokens max: burst of ~50 events every hour.
         map.put(ApfProgramEvent.class, new TokenBucket((int)DateUtils.MINUTE_IN_MILLIS, 50));
         return map;
+    }
+
+    /** Direct non-Binder interface for event producer clients within the system servers. */
+    public interface Logger {
+        DefaultNetworkMetrics defaultNetworkMetrics();
+    }
+
+    private class LoggerImpl implements Logger {
+        public DefaultNetworkMetrics defaultNetworkMetrics() {
+            return mDefaultNetworkMetrics;
+        }
     }
 }

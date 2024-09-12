@@ -15,7 +15,8 @@
  */
 package com.android.systemui.qs.external;
 
-import android.app.ActivityManager;
+import static com.android.systemui.Flags.qsCustomTileClickGuaranteedBugFix;
+
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -26,19 +27,19 @@ import android.content.pm.ResolveInfo;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.IBinder;
-import android.os.UserHandle;
 import android.service.quicksettings.IQSTileService;
-import android.service.quicksettings.Tile;
 import android.service.quicksettings.TileService;
-import android.support.annotation.VisibleForTesting;
 import android.util.Log;
 
-import com.android.systemui.qs.customize.TileQueryHelper.TileStateListener;
+import androidx.annotation.VisibleForTesting;
+
 import com.android.systemui.qs.external.TileLifecycleManager.TileChangeListener;
+import com.android.systemui.qs.pipeline.data.repository.CustomTileAddedRepository;
+import com.android.systemui.settings.UserTracker;
 
 import java.util.List;
-
-import libcore.util.Objects;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Manages the priority which lets {@link TileServices} make decisions about which tiles
@@ -60,6 +61,8 @@ public class TileServiceManager {
     private final TileServices mServices;
     private final TileLifecycleManager mStateManager;
     private final Handler mHandler;
+    private final UserTracker mUserTracker;
+    private final CustomTileAddedRepository mCustomTileAddedRepository;
     private boolean mBindRequested;
     private boolean mBindAllowed;
     private boolean mBound;
@@ -70,30 +73,54 @@ public class TileServiceManager {
     // Whether we have a pending bind going out to the service without a response yet.
     // This defaults to true to ensure tiles start out unavailable.
     private boolean mPendingBind = true;
+    private boolean mStarted = false;
+
+    private final AtomicBoolean mListeningFromRequest = new AtomicBoolean(false);
 
     TileServiceManager(TileServices tileServices, Handler handler, ComponentName component,
-            Tile tile) {
-        this(tileServices, handler, new TileLifecycleManager(handler,
-                tileServices.getContext(), tileServices, tile, new Intent().setComponent(component),
-                new UserHandle(ActivityManager.getCurrentUser())));
+            UserTracker userTracker, TileLifecycleManager.Factory tileLifecycleManagerFactory,
+            CustomTileAddedRepository customTileAddedRepository) {
+        this(tileServices, handler, userTracker, customTileAddedRepository,
+                tileLifecycleManagerFactory.create(
+                        new Intent(TileService.ACTION_QS_TILE).setComponent(component),
+                        userTracker.getUserHandle()));
     }
 
     @VisibleForTesting
-    TileServiceManager(TileServices tileServices, Handler handler,
+    TileServiceManager(TileServices tileServices, Handler handler, UserTracker userTracker,
+            CustomTileAddedRepository customTileAddedRepository,
             TileLifecycleManager tileLifecycleManager) {
         mServices = tileServices;
         mHandler = handler;
         mStateManager = tileLifecycleManager;
+        mUserTracker = userTracker;
+        mCustomTileAddedRepository = customTileAddedRepository;
 
         IntentFilter filter = new IntentFilter();
         filter.addAction(Intent.ACTION_PACKAGE_REMOVED);
         filter.addDataScheme("package");
         Context context = mServices.getContext();
-        context.registerReceiverAsUser(mUninstallReceiver,
-                new UserHandle(ActivityManager.getCurrentUser()), filter, null, mHandler);
-        ComponentName component = tileLifecycleManager.getComponent();
-        if (!TileLifecycleManager.isTileAdded(context, component)) {
-            TileLifecycleManager.setTileAdded(context, component, true);
+        context.registerReceiverAsUser(mUninstallReceiver, userTracker.getUserHandle(), filter,
+                null, mHandler, Context.RECEIVER_EXPORTED);
+    }
+
+    boolean isLifecycleStarted() {
+        return mStarted;
+    }
+
+    /**
+     * Starts the TileLifecycleManager by adding the corresponding component as a Tile and
+     * binding to it if needed.
+     *
+     * This method should be called after constructing a TileServiceManager to guarantee that the
+     * TileLifecycleManager has added the tile and bound to it at least once.
+     */
+    void startLifecycleManagerAndAddTile() {
+        mStarted = true;
+        ComponentName component = mStateManager.getComponent();
+        final int userId = mStateManager.getUserId();
+        if (!mCustomTileAddedRepository.isTileAdded(component, userId)) {
+            mCustomTileAddedRepository.setTileAdded(component, userId, true);
             mStateManager.onTileAdded();
             mStateManager.flushMessagesAndUnbind();
         }
@@ -105,6 +132,10 @@ public class TileServiceManager {
 
     public boolean isActiveTile() {
         return mStateManager.isActiveTile();
+    }
+
+    public boolean isToggleableTile() {
+        return mStateManager.isToggleableTile();
     }
 
     public void setShowingDialog(boolean dialog) {
@@ -133,13 +164,28 @@ public class TileServiceManager {
         }
     }
 
+    void onStartListeningFromRequest() {
+        mListeningFromRequest.set(true);
+        mStateManager.onStartListening();
+    }
+
     public void setLastUpdate(long lastUpdate) {
         mLastUpdate = lastUpdate;
         if (mBound && isActiveTile()) {
-            mStateManager.onStopListening();
-            setBindRequested(false);
+            if (qsCustomTileClickGuaranteedBugFix()) {
+                if (mListeningFromRequest.compareAndSet(true, false)) {
+                    stopListeningAndUnbind();
+                }
+            } else {
+                stopListeningAndUnbind();
+            }
         }
         mServices.recalculateBindAllowance();
+    }
+
+    private void stopListeningAndUnbind() {
+        mStateManager.onStopListening();
+        setBindRequested(false);
     }
 
     public void handleDestroy() {
@@ -175,7 +221,7 @@ public class TileServiceManager {
         mBound = true;
         mJustBound = true;
         mHandler.postDelayed(mJustBoundOver, MIN_BIND_TIME);
-        mStateManager.setBindService(true);
+        mStateManager.executeSetBindService(true);
     }
 
     private void unbindService() {
@@ -185,7 +231,7 @@ public class TileServiceManager {
         }
         mBound = false;
         mJustBound = false;
-        mStateManager.setBindService(false);
+        mStateManager.executeSetBindService(false);
     }
 
     public void calculateBindPriority(long currentTime) {
@@ -248,7 +294,7 @@ public class TileServiceManager {
             Uri data = intent.getData();
             String pkgName = data.getEncodedSchemeSpecificPart();
             final ComponentName component = mStateManager.getComponent();
-            if (!Objects.equal(pkgName, component.getPackageName())) {
+            if (!Objects.equals(pkgName, component.getPackageName())) {
                 return;
             }
 
@@ -258,16 +304,16 @@ public class TileServiceManager {
                 queryIntent.setPackage(pkgName);
                 PackageManager pm = context.getPackageManager();
                 List<ResolveInfo> services = pm.queryIntentServicesAsUser(
-                        queryIntent, 0, ActivityManager.getCurrentUser());
+                        queryIntent, 0, mUserTracker.getUserId());
                 for (ResolveInfo info : services) {
-                    if (Objects.equal(info.serviceInfo.packageName, component.getPackageName())
-                            && Objects.equal(info.serviceInfo.name, component.getClassName())) {
+                    if (Objects.equals(info.serviceInfo.packageName, component.getPackageName())
+                            && Objects.equals(info.serviceInfo.name, component.getClassName())) {
                         return;
                     }
                 }
             }
 
-            mServices.getHost().removeTile(component);
+            mServices.getHost().removeTile(CustomTile.toSpec(component));
         }
     };
 }

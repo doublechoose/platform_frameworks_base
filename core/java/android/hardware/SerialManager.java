@@ -17,7 +17,9 @@
 package android.hardware;
 
 import android.annotation.SystemService;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
+import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 
@@ -27,6 +29,7 @@ import java.io.IOException;
  * @hide
  */
 @SystemService(Context.SERIAL_SERVICE)
+@android.ravenwood.annotation.RavenwoodKeepWholeClass
 public class SerialManager {
     private static final String TAG = "SerialManager";
 
@@ -46,6 +49,7 @@ public class SerialManager {
      *
      * @return names of available serial ports
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public String[] getSerialPorts() {
         try {
             return mService.getSerialPorts();
@@ -65,6 +69,9 @@ public class SerialManager {
      * @param speed at which to open the serial port
      * @return the serial port
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
+    @android.ravenwood.annotation.RavenwoodThrow(blockedBy = ParcelFileDescriptor.class, reason =
+            "Needs socketpair() to offer accurate emulation")
     public SerialPort openSerialPort(String name, int speed) throws IOException {
         try {
             ParcelFileDescriptor pfd = mService.openSerialPort(name);

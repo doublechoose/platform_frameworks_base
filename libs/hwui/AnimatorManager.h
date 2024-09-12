@@ -16,10 +16,10 @@
 #ifndef ANIMATORMANAGER_H
 #define ANIMATORMANAGER_H
 
-#include <vector>
-
 #include <cutils/compiler.h>
 #include <utils/StrongPointer.h>
+
+#include <vector>
 
 #include "utils/Macros.h"
 
@@ -34,6 +34,7 @@ class TreeInfo;
 // Responsible for managing the animators for a single RenderNode
 class AnimatorManager {
     PREVENT_COPY_AND_ASSIGN(AnimatorManager);
+
 public:
     explicit AnimatorManager(RenderNode& parent);
     ~AnimatorManager();
@@ -53,7 +54,9 @@ public:
     void animateNoDamage(TreeInfo& info);
 
     // Hard-ends all animators. May only be called on the UI thread.
-    ANDROID_API void endAllStagingAnimators();
+    void endAllStagingAnimators();
+
+    void forceEndAnimators();
 
     // Hard-ends all animators that have been pushed. Used for cleanup if
     // the ActivityContext is being destroyed
@@ -68,8 +71,10 @@ private:
     AnimationHandle* mAnimationHandle;
 
     // To improve the efficiency of resizing & removing from the vector
-    std::vector< sp<BaseRenderNodeAnimator> > mNewAnimators;
-    std::vector< sp<BaseRenderNodeAnimator> > mAnimators;
+    std::vector<sp<BaseRenderNodeAnimator> > mNewAnimators;
+    std::vector<sp<BaseRenderNodeAnimator> > mAnimators;
+
+    bool mCancelAllAnimators;
 };
 
 } /* namespace uirenderer */

@@ -19,6 +19,9 @@ package android.net;
 import android.os.Parcelable;
 import android.net.ConnectivityMetricsEvent;
 import android.net.INetdEventCallback;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 
 /** {@hide} */
 interface IIpConnectivityMetrics {
@@ -29,12 +32,17 @@ interface IIpConnectivityMetrics {
      */
     int logEvent(in ConnectivityMetricsEvent event);
 
+    void logDefaultNetworkValidity(boolean valid);
+    void logDefaultNetworkEvent(in Network defaultNetwork, int score, boolean validated,
+            in LinkProperties lp, in NetworkCapabilities nc, in Network previousDefaultNetwork,
+            int previousScore, in LinkProperties previousLp, in NetworkCapabilities previousNc);
+
     /**
-     * At most one callback can be registered (by DevicePolicyManager).
+     * Callback can be registered by DevicePolicyManager or NetworkWatchlistService only.
      * @return status {@code true} if registering/unregistering of the callback was successful,
      *         {@code false} otherwise (might happen if IIpConnectivityMetrics is not available,
      *         if it happens make sure you call it when the service is up in the caller)
      */
-    boolean registerNetdEventCallback(in INetdEventCallback callback);
-    boolean unregisterNetdEventCallback();
+    boolean addNetdEventCallback(in int callerType, in INetdEventCallback callback);
+    boolean removeNetdEventCallback(in int callerType);
 }

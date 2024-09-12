@@ -17,6 +17,7 @@
 package android.app.trust;
 
 import android.app.trust.ITrustListener;
+import android.hardware.biometrics.BiometricSourceType;
 
 /**
  * System private API to comunicate with trust service.
@@ -25,13 +26,20 @@ import android.app.trust.ITrustListener;
  */
 interface ITrustManager {
     void reportUnlockAttempt(boolean successful, int userId);
+    void reportUserRequestedUnlock(int userId, boolean dismissKeyguard);
+    void reportUserMayRequestUnlock(int userId);
     void reportUnlockLockout(int timeoutMs, int userId);
     void reportEnabledTrustAgentsChanged(int userId);
     void registerTrustListener(in ITrustListener trustListener);
     void unregisterTrustListener(in ITrustListener trustListener);
     void reportKeyguardShowingChanged();
     void setDeviceLockedForUser(int userId, boolean locked);
-    boolean isDeviceLocked(int userId);
-    boolean isDeviceSecure(int userId);
+    boolean isDeviceLocked(int userId, int deviceId);
+    boolean isDeviceSecure(int userId, int deviceId);
+    @EnforcePermission("TRUST_LISTENER")
     boolean isTrustUsuallyManaged(int userId);
+    void unlockedByBiometricForUser(int userId, in BiometricSourceType source);
+    void clearAllBiometricRecognized(in BiometricSourceType target, int unlockedUser);
+    boolean isActiveUnlockRunning(int userId);
+    boolean isInSignificantPlace();
 }

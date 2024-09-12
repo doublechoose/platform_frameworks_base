@@ -19,6 +19,7 @@ package android.widget;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.LocalActivityManager;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.TypedArray;
@@ -45,7 +46,11 @@ import java.util.List;
  * page. The individual elements are typically controlled using this container object, rather than
  * setting values on the child elements themselves.
  *
+ * @deprecated new applications should use fragment APIs instead of this class:
+ * Use <a href="{@docRoot}guide/navigation/navigation-swipe-view">TabLayout and ViewPager</a>
+ * instead.
  */
+@Deprecated
 public class TabHost extends FrameLayout implements ViewTreeObserver.OnTouchModeChangeListener {
 
     private static final int TABWIDGET_LOCATION_LEFT = 0;
@@ -54,11 +59,21 @@ public class TabHost extends FrameLayout implements ViewTreeObserver.OnTouchMode
     private static final int TABWIDGET_LOCATION_BOTTOM = 3;
     private TabWidget mTabWidget;
     private FrameLayout mTabContent;
+    @UnsupportedAppUsage(trackingBug = 137825207, maxTargetSdk = Build.VERSION_CODES.Q,
+            publicAlternatives = "Use {@code androidx.viewpager.widget.ViewPager} and "
+                    + "{@code com.google.android.material.tabs.TabLayout} instead.\n"
+                    + "See <a href=\"{@docRoot}guide/navigation/navigation-swipe-view"
+                    + "\">TabLayout and ViewPager</a>")
     private List<TabSpec> mTabSpecs = new ArrayList<TabSpec>(2);
     /**
      * This field should be made private, so it is hidden from the SDK.
      * {@hide}
      */
+    @UnsupportedAppUsage(trackingBug = 137825207, maxTargetSdk = Build.VERSION_CODES.Q,
+            publicAlternatives = "Use {@code androidx.viewpager.widget.ViewPager} and "
+                    + "{@code com.google.android.material.tabs.TabLayout} instead.\n"
+                    + "See <a href=\"{@docRoot}guide/navigation/navigation-swipe-view"
+                    + "\">TabLayout and ViewPager</a>")
     protected int mCurrentTab = -1;
     private View mCurrentView = null;
     /**
@@ -66,6 +81,11 @@ public class TabHost extends FrameLayout implements ViewTreeObserver.OnTouchMode
      * {@hide}
      */
     protected LocalActivityManager mLocalActivityManager = null;
+    @UnsupportedAppUsage(trackingBug = 137825207, maxTargetSdk = Build.VERSION_CODES.Q,
+            publicAlternatives = "Use {@code androidx.viewpager.widget.ViewPager} and "
+                    + "{@code com.google.android.material.tabs.TabLayout} instead.\n"
+                    + "See <a href=\"{@docRoot}guide/navigation/navigation-swipe-view"
+                    + "\">TabLayout and ViewPager</a>")
     private OnTabChangeListener mOnTabChangeListener;
     private OnKeyListener mTabKeyListener;
 
@@ -89,6 +109,8 @@ public class TabHost extends FrameLayout implements ViewTreeObserver.OnTouchMode
 
         final TypedArray a = context.obtainStyledAttributes(
                 attrs, com.android.internal.R.styleable.TabWidget, defStyleAttr, defStyleRes);
+        saveAttributeDataForStyleable(context, com.android.internal.R.styleable.TabWidget,
+                attrs, a, defStyleAttr, defStyleRes);
 
         mTabLayoutId = a.getResourceId(R.styleable.TabWidget_tabLayout, 0);
         a.recycle();
@@ -146,12 +168,17 @@ mTabHost.addTab(TAB_TAG_1, "Hello, world!", "Tab 1");
         // and relays them to the tab content.
         mTabKeyListener = new OnKeyListener() {
             public boolean onKey(View v, int keyCode, KeyEvent event) {
+                if (KeyEvent.isModifierKey(keyCode)) {
+                    return false;
+                }
                 switch (keyCode) {
                     case KeyEvent.KEYCODE_DPAD_CENTER:
                     case KeyEvent.KEYCODE_DPAD_LEFT:
                     case KeyEvent.KEYCODE_DPAD_RIGHT:
                     case KeyEvent.KEYCODE_DPAD_UP:
                     case KeyEvent.KEYCODE_DPAD_DOWN:
+                    case KeyEvent.KEYCODE_TAB:
+                    case KeyEvent.KEYCODE_SPACE:
                     case KeyEvent.KEYCODE_ENTER:
                         return false;
 
@@ -499,7 +526,17 @@ mTabHost.addTab(TAB_TAG_1, "Hello, world!", "Tab 1");
 
         private final @NonNull String mTag;
 
+        @UnsupportedAppUsage(trackingBug = 137825207, maxTargetSdk = Build.VERSION_CODES.Q,
+                publicAlternatives = "Use {@code androidx.viewpager.widget.ViewPager} and "
+                        + "{@code com.google.android.material.tabs.TabLayout} instead.\n"
+                        + "See <a href=\"{@docRoot}guide/navigation/navigation-swipe-view"
+                        + "\">TabLayout and ViewPager</a>")
         private IndicatorStrategy mIndicatorStrategy;
+        @UnsupportedAppUsage(trackingBug = 137825207, maxTargetSdk = Build.VERSION_CODES.Q,
+                publicAlternatives = "Use {@code androidx.viewpager.widget.ViewPager} and "
+                        + "{@code com.google.android.material.tabs.TabLayout} instead.\n"
+                        + "See <a href=\"{@docRoot}guide/navigation/navigation-swipe-view"
+                        + "\">TabLayout and ViewPager</a>")
         private ContentStrategy mContentStrategy;
 
         /**
@@ -762,6 +799,11 @@ mTabHost.addTab(TAB_TAG_1, "Hello, world!", "Tab 1");
             mIntent = intent;
         }
 
+        @UnsupportedAppUsage(trackingBug = 137825207, maxTargetSdk = Build.VERSION_CODES.Q,
+                publicAlternatives = "Use {@code androidx.viewpager.widget.ViewPager} and "
+                        + "{@code com.google.android.material.tabs.TabLayout} instead.\n"
+                        + "See <a href=\"{@docRoot}guide/navigation/navigation-swipe-view"
+                        + "\">TabLayout and ViewPager</a>")
         public View getContentView() {
             if (mLocalActivityManager == null) {
                 throw new IllegalStateException("Did you forget to call 'public void setup(LocalActivityManager activityGroup)'?");
@@ -791,6 +833,11 @@ mTabHost.addTab(TAB_TAG_1, "Hello, world!", "Tab 1");
             return mLaunchedView;
         }
 
+        @UnsupportedAppUsage(trackingBug = 137825207, maxTargetSdk = Build.VERSION_CODES.Q,
+                publicAlternatives = "Use {@code androidx.viewpager.widget.ViewPager} and "
+                        + "{@code com.google.android.material.tabs.TabLayout} instead.\n"
+                        + "See <a href=\"{@docRoot}guide/navigation/navigation-swipe-view"
+                        + "\">TabLayout and ViewPager</a>")
         public void tabClosed() {
             if (mLaunchedView != null) {
                 mLaunchedView.setVisibility(View.GONE);

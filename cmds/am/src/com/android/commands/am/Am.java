@@ -16,75 +16,34 @@
 
 package com.android.commands.am;
 
-import static android.app.ActivityManager.RESIZE_MODE_SYSTEM;
-import static android.app.ActivityManager.RESIZE_MODE_USER;
-import static android.app.ActivityManager.StackId.DOCKED_STACK_ID;
-import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
-
 import android.app.ActivityManager;
-import android.app.ActivityManager.StackInfo;
-import android.app.IActivityContainer;
-import android.app.IActivityController;
 import android.app.IActivityManager;
-import android.app.IInstrumentationWatcher;
-import android.app.Instrumentation;
-import android.app.IStopUserCallback;
-import android.app.ProfilerInfo;
-import android.app.UiAutomationConnection;
-import android.app.usage.ConfigurationStats;
-import android.app.usage.IUsageStatsManager;
-import android.app.usage.UsageStatsManager;
-import android.content.ComponentCallbacks2;
-import android.content.ComponentName;
-import android.content.Context;
-import android.content.IIntentReceiver;
-import android.content.Intent;
 import android.content.pm.IPackageManager;
-import android.content.pm.InstrumentationInfo;
-import android.content.pm.ParceledListSlice;
-import android.content.pm.UserInfo;
-import android.content.res.Configuration;
-import android.graphics.Rect;
-import android.os.Binder;
-import android.os.Build;
-import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.os.ResultReceiver;
 import android.os.SELinux;
 import android.os.ServiceManager;
 import android.os.ShellCallback;
-import android.os.ShellCommand;
-import android.os.SystemProperties;
 import android.os.UserHandle;
-import android.text.TextUtils;
 import android.util.AndroidException;
-import android.util.ArrayMap;
-import android.util.Log;
-import android.view.IWindowManager;
 
 import com.android.internal.os.BaseCommand;
-import com.android.internal.util.HexDump;
-import com.android.internal.util.Preconditions;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.io.PrintStream;
-import java.io.PrintWriter;
-import java.net.URISyntaxException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
 
 public class Am extends BaseCommand {
 
     private IActivityManager mAm;
     private IPackageManager mPm;
+
+    Am() {
+        svcInit();
+    }
 
     /**
      * Command-line entry point.
@@ -93,6 +52,20 @@ public class Am extends BaseCommand {
      */
     public static void main(String[] args) {
         (new Am()).run(args);
+    }
+
+    private void svcInit() {
+        mAm = ActivityManager.getService();
+        if (mAm == null) {
+            System.err.println(NO_SYSTEM_ERROR_CODE);
+            return;
+        }
+
+        mPm = IPackageManager.Stub.asInterface(ServiceManager.getService("package"));
+        if (mPm == null) {
+            System.err.println(NO_SYSTEM_ERROR_CODE);
+            return;
+        }
     }
 
     @Override
@@ -106,19 +79,6 @@ public class Am extends BaseCommand {
 
     @Override
     public void onRun() throws Exception {
-
-        mAm = ActivityManager.getService();
-        if (mAm == null) {
-            System.err.println(NO_SYSTEM_ERROR_CODE);
-            throw new AndroidException("Can't connect to activity manager; is the system running?");
-        }
-
-        mPm = IPackageManager.Stub.asInterface(ServiceManager.getService("package"));
-        if (mPm == null) {
-            System.err.println(NO_SYSTEM_ERROR_CODE);
-            throw new AndroidException("Can't connect to package manager; is the system running?");
-        }
-
         String op = nextArgRequired();
 
         if (op.equals("instrument")) {
@@ -143,7 +103,8 @@ public class Am extends BaseCommand {
     static final class MyShellCallback extends ShellCallback {
         boolean mActive = true;
 
-        @Override public ParcelFileDescriptor onOpenOutputFile(String path, String seLinuxContext) {
+        @Override public ParcelFileDescriptor onOpenFile(String path, String seLinuxContext,
+                String mode) {
             if (!mActive) {
                 System.err.println("Open attempt after active for: " + path);
                 return null;
@@ -204,7 +165,11 @@ public class Am extends BaseCommand {
             } else if (opt.equals("-r")) {
                 instrument.rawMode = true;
             } else if (opt.equals("-m")) {
-                instrument.proto = true;
+                instrument.protoStd = true;
+            } else if (opt.equals("-f")) {
+                instrument.protoFile = true;
+                if (peekNextArg() != null && !peekNextArg().startsWith("-"))
+                    instrument.logPath = nextArg();
             } else if (opt.equals("-e")) {
                 final String argKey = nextArgRequired();
                 final String argValue = nextArgRequired();
@@ -212,10 +177,27 @@ public class Am extends BaseCommand {
             } else if (opt.equals("--no_window_animation")
                     || opt.equals("--no-window-animation")) {
                 instrument.noWindowAnimation = true;
+            } else if (opt.equals("--no-hidden-api-checks")) {
+                instrument.disableHiddenApiChecks = true;
+            } else if (opt.equals("--no-test-api-access")) {
+                instrument.disableTestApiChecks = false;
+            } else if (opt.equals("--no-isolated-storage")) {
+                instrument.disableIsolatedStorage = true;
+            } else if (opt.equals("--no-logcat")) {
+                instrument.captureLogcat = false;
             } else if (opt.equals("--user")) {
                 instrument.userId = parseUserArg(nextArgRequired());
             } else if (opt.equals("--abi")) {
                 instrument.abi = nextArgRequired();
+            } else if (opt.equals("--no-restart")) {
+                instrument.noRestart = true;
+            } else if (opt.equals("--always-check-signature")) {
+                instrument.alwaysCheckSignature = true;
+            } else if (opt.equals("--instrument-sdk-sandbox")) {
+                instrument.instrumentSdkSandbox = true;
+            } else if (opt.equals("--instrument-sdk-in-sandbox")) {
+                instrument.instrumentSdkSandbox = true;
+                instrument.instrumentSdkInSandbox = true;
             } else {
                 System.err.println("Error: Unknown option: " + opt);
                 return;
@@ -228,7 +210,6 @@ public class Am extends BaseCommand {
         }
 
         instrument.componentNameArg = nextArgRequired();
-
         instrument.run();
     }
 }

@@ -21,6 +21,7 @@ import android.annotation.CallSuper;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.StringRes;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ComponentCallbacks2;
 import android.content.Context;
 import android.content.Intent;
@@ -42,7 +43,6 @@ import android.util.AndroidRuntimeException;
 import android.util.ArrayMap;
 import android.util.AttributeSet;
 import android.util.DebugUtils;
-import android.util.Log;
 import android.util.SparseArray;
 import android.util.SuperNotCalledException;
 import android.view.ContextMenu;
@@ -59,114 +59,6 @@ import android.widget.AdapterView;
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.lang.reflect.InvocationTargetException;
-
-final class FragmentState implements Parcelable {
-    final String mClassName;
-    final int mIndex;
-    final boolean mFromLayout;
-    final int mFragmentId;
-    final int mContainerId;
-    final String mTag;
-    final boolean mRetainInstance;
-    final boolean mDetached;
-    final Bundle mArguments;
-    final boolean mHidden;
-
-    Bundle mSavedFragmentState;
-
-    Fragment mInstance;
-
-    public FragmentState(Fragment frag) {
-        mClassName = frag.getClass().getName();
-        mIndex = frag.mIndex;
-        mFromLayout = frag.mFromLayout;
-        mFragmentId = frag.mFragmentId;
-        mContainerId = frag.mContainerId;
-        mTag = frag.mTag;
-        mRetainInstance = frag.mRetainInstance;
-        mDetached = frag.mDetached;
-        mArguments = frag.mArguments;
-        mHidden = frag.mHidden;
-    }
-
-    public FragmentState(Parcel in) {
-        mClassName = in.readString();
-        mIndex = in.readInt();
-        mFromLayout = in.readInt() != 0;
-        mFragmentId = in.readInt();
-        mContainerId = in.readInt();
-        mTag = in.readString();
-        mRetainInstance = in.readInt() != 0;
-        mDetached = in.readInt() != 0;
-        mArguments = in.readBundle();
-        mHidden = in.readInt() != 0;
-        mSavedFragmentState = in.readBundle();
-    }
-
-    public Fragment instantiate(FragmentHostCallback host, FragmentContainer container,
-            Fragment parent, FragmentManagerNonConfig childNonConfig) {
-        if (mInstance == null) {
-            final Context context = host.getContext();
-            if (mArguments != null) {
-                mArguments.setClassLoader(context.getClassLoader());
-            }
-
-            if (container != null) {
-                mInstance = container.instantiate(context, mClassName, mArguments);
-            } else {
-                mInstance = Fragment.instantiate(context, mClassName, mArguments);
-            }
-
-            if (mSavedFragmentState != null) {
-                mSavedFragmentState.setClassLoader(context.getClassLoader());
-                mInstance.mSavedFragmentState = mSavedFragmentState;
-            }
-            mInstance.setIndex(mIndex, parent);
-            mInstance.mFromLayout = mFromLayout;
-            mInstance.mRestored = true;
-            mInstance.mFragmentId = mFragmentId;
-            mInstance.mContainerId = mContainerId;
-            mInstance.mTag = mTag;
-            mInstance.mRetainInstance = mRetainInstance;
-            mInstance.mDetached = mDetached;
-            mInstance.mHidden = mHidden;
-            mInstance.mFragmentManager = host.mFragmentManager;
-            if (FragmentManagerImpl.DEBUG) Log.v(FragmentManagerImpl.TAG,
-                    "Instantiated fragment " + mInstance);
-        }
-        mInstance.mChildNonConfig = childNonConfig;
-        return mInstance;
-    }
-
-    public int describeContents() {
-        return 0;
-    }
-
-    public void writeToParcel(Parcel dest, int flags) {
-        dest.writeString(mClassName);
-        dest.writeInt(mIndex);
-        dest.writeInt(mFromLayout ? 1 : 0);
-        dest.writeInt(mFragmentId);
-        dest.writeInt(mContainerId);
-        dest.writeString(mTag);
-        dest.writeInt(mRetainInstance ? 1 : 0);
-        dest.writeInt(mDetached ? 1 : 0);
-        dest.writeBundle(mArguments);
-        dest.writeInt(mHidden ? 1 : 0);
-        dest.writeBundle(mSavedFragmentState);
-    }
-
-    public static final Parcelable.Creator<FragmentState> CREATOR
-            = new Parcelable.Creator<FragmentState>() {
-        public FragmentState createFromParcel(Parcel in) {
-            return new FragmentState(in);
-        }
-
-        public FragmentState[] newArray(int size) {
-            return new FragmentState[size];
-        }
-    };
-}
 
 /**
  * A Fragment is a piece of an application's user interface or behavior
@@ -210,7 +102,7 @@ final class FragmentState implements Parcelable {
  * While the Fragment API was introduced in
  * {@link android.os.Build.VERSION_CODES#HONEYCOMB}, a version of the API
  * at is also available for use on older platforms through
- * {@link android.support.v4.app.FragmentActivity}.  See the blog post
+ * {@link androidx.fragment.app.FragmentActivity}.  See the blog post
  * <a href="http://android-developers.blogspot.com/2011/03/fragments-for-all.html">
  * Fragments For All</a> for more details.
  *
@@ -365,8 +257,19 @@ final class FragmentState implements Parcelable {
  * <p>After each call to this function, a new entry is on the stack, and
  * pressing back will pop it to return the user to whatever previous state
  * the activity UI was in.
+ *
+ * <p>
+ * Fragments appearing or disappearing do not generate system events for accessibility, so set a
+ * title on your fragments with {@link View#setAccessibilityPaneTitle(CharSequence)} to notify
+ * accessibility users of these UI transitions.
+ *
+ * @deprecated Use the <a href="{@docRoot}jetpack">Jetpack Fragment Library</a>
+ *      {@link androidx.fragment.app.Fragment} for consistent behavior across all devices
+ *      and access to <a href="{@docRoot}topic/libraries/architecture/lifecycle.html">Lifecycle</a>.
  */
+@Deprecated
 public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListener {
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private static final ArrayMap<String, Class<?>> sClassMap =
             new ArrayMap<String, Class<?>>();
 
@@ -383,13 +286,16 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     int mState = INITIALIZING;
 
     // When instantiated from saved state, this is the saved state.
+    @UnsupportedAppUsage
     Bundle mSavedFragmentState;
     SparseArray<Parcelable> mSavedViewState;
 
     // Index into active fragment array.
+    @UnsupportedAppUsage
     int mIndex = -1;
 
     // Internal unique name for this fragment;
+    @UnsupportedAppUsage
     String mWho;
 
     // Construction arguments;
@@ -405,6 +311,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     int mTargetRequestCode;
 
     // True if the fragment is in the list of added fragments.
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     boolean mAdded;
 
     // If set this fragment is being removed from its activity.
@@ -429,12 +336,15 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     // The fragment manager we are associated with.  Set as soon as the
     // fragment is used in a transaction; cleared after it has been removed
     // from all transactions.
+    @UnsupportedAppUsage
     FragmentManagerImpl mFragmentManager;
 
     // Activity this fragment is attached to.
+    @UnsupportedAppUsage
     FragmentHostCallback mHost;
 
     // Private fragment manager for child fragments inside of this one.
+    @UnsupportedAppUsage
     FragmentManagerImpl mChildFragmentManager;
 
     // For use when restoring fragment state and descendant fragments are retained.
@@ -447,6 +357,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     // The optional identifier for this fragment -- either the container ID if it
     // was dynamically added to the view hierarchy, or the ID supplied in
     // layout.
+    @UnsupportedAppUsage
     int mFragmentId;
 
     // When a fragment is being dynamically added to the view hierarchy, this
@@ -484,6 +395,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     ViewGroup mContainer;
 
     // The View generated for this fragment.
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     View mView;
 
     // Whether this fragment should defer starting until after other fragments
@@ -494,6 +406,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     boolean mUserVisibleHint = true;
 
     LoaderManagerImpl mLoaderManager;
+    @UnsupportedAppUsage
     boolean mLoadersStarted;
     boolean mCheckedForLoaderManager;
 
@@ -514,11 +427,19 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     // getLayoutInflater()
     LayoutInflater mLayoutInflater;
 
+    // Keep track of whether or not this Fragment has run performCreate(). Retained instance
+    // fragments can have mRetaining set to true without going through creation, so we must
+    // track it separately.
+    boolean mIsCreated;
+
     /**
      * State information that has been retrieved from a fragment instance
      * through {@link FragmentManager#saveFragmentInstanceState(Fragment)
      * FragmentManager.saveFragmentInstanceState}.
+     *
+     * @deprecated Use {@link androidx.fragment.app.Fragment.SavedState}
      */
+    @Deprecated
     public static class SavedState implements Parcelable {
         final Bundle mState;
 
@@ -562,7 +483,10 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     /**
      * Thrown by {@link Fragment#instantiate(Context, String, Bundle)} when
      * there is an instantiation failure.
+     *
+     * @deprecated Use {@link androidx.fragment.app.Fragment.InstantiationException}
      */
+    @Deprecated
     static public class InstantiationException extends AndroidRuntimeException {
         public InstantiationException(String msg, Exception cause) {
             super(msg, cause);
@@ -677,7 +601,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     /**
      * Subclasses can not override equals().
      */
-    @Override final public boolean equals(Object o) {
+    @Override final public boolean equals(@Nullable Object o) {
         return super.equals(o);
     }
 
@@ -984,7 +908,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
 
     /**
      * Return true if the fragment is currently visible to the user.  This means
-     * it: (1) has been added, (2) has its view attached to the window, and 
+     * it: (1) has been added, (2) has its view attached to the window, and
      * (3) is not hidden.
      */
     final public boolean isVisible() {
@@ -1135,7 +1059,10 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
 
     /**
      * Return the LoaderManager for this fragment, creating it if needed.
+     *
+     * @deprecated Use {@link androidx.fragment.app.Fragment#getLoaderManager()}
      */
+    @Deprecated
     public LoaderManager getLoaderManager() {
         if (mLoaderManager != null) {
             return mLoaderManager;
@@ -1257,6 +1184,10 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
      * the signature of the app declaring the permissions.
      * </p>
      * <p>
+     * Call {@link #shouldShowRequestPermissionRationale(String)} before calling this API
+     * to check if the system recommends to show a rationale UI before asking for a permission.
+     * </p>
+     * <p>
      * If your app does not have the requested permissions the user will be presented
      * with UI for accepting them. After the user has accepted or rejected the
      * requested permissions you will receive a callback on {@link
@@ -1291,29 +1222,6 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
      * <code>true</code> because in this case the activity would not receive
      * result callbacks including {@link #onRequestPermissionsResult(int, String[], int[])}.
      * </p>
-     * <p>
-     * A sample permissions request looks like this:
-     * </p>
-     * <code><pre><p>
-     * private void showContacts() {
-     *     if (getActivity().checkSelfPermission(Manifest.permission.READ_CONTACTS)
-     *             != PackageManager.PERMISSION_GRANTED) {
-     *         requestPermissions(new String[]{Manifest.permission.READ_CONTACTS},
-     *                 PERMISSIONS_REQUEST_READ_CONTACTS);
-     *     } else {
-     *         doShowContacts();
-     *     }
-     * }
-     *
-     * {@literal @}Override
-     * public void onRequestPermissionsResult(int requestCode, String[] permissions,
-     *         int[] grantResults) {
-     *     if (requestCode == PERMISSIONS_REQUEST_READ_CONTACTS
-     *             && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-     *         doShowContacts();
-     *     }
-     * }
-     * </code></pre></p>
      *
      * @param permissions The requested permissions. Must me non-null and not empty.
      * @param requestCode Application specific request code to match with a result
@@ -1353,20 +1261,10 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     }
 
     /**
-     * Gets whether you should show UI with rationale for requesting a permission.
-     * You should do this only if you do not have the permission and the context in
-     * which the permission is requested does not clearly communicate to the user
-     * what would be the benefit from granting this permission.
-     * <p>
-     * For example, if you write a camera app, requesting the camera permission
-     * would be expected by the user and no rationale for why it is requested is
-     * needed. If however, the app needs location for tagging photos then a non-tech
-     * savvy user may wonder how location is related to taking photos. In this case
-     * you may choose to show UI with rationale of requesting this permission.
-     * </p>
+     * Gets whether you should show UI with rationale before requesting a permission.
      *
      * @param permission A permission your app wants to request.
-     * @return Whether you can show permission rationale UI.
+     * @return Whether you should show permission rationale UI.
      *
      * @see Context#checkSelfPermission(String)
      * @see #requestPermissions(String[], int)
@@ -1463,7 +1361,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
      * declaration for the styleable used here is:</p>
      *
      * {@sample development/samples/ApiDemos/res/values/attrs.xml fragment_arguments}
-     * 
+     *
      * <p>The fragment can then be declared within its activity's content layout
      * through a tag like this:</p>
      *
@@ -2337,7 +2235,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     }
 
     /**
-     * Sets whether the the exit transition and enter transition overlap or not.
+     * Sets whether the exit transition and enter transition overlap or not.
      * When true, the enter transition will start as soon as possible. When false, the
      * enter transition will wait until the exit transition completes before starting.
      *
@@ -2350,7 +2248,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     }
 
     /**
-     * Returns whether the the exit transition and enter transition overlap or not.
+     * Returns whether the exit transition and enter transition overlap or not.
      * When true, the enter transition will start as soon as possible. When false, the
      * enter transition will wait until the exit transition completes before starting.
      *
@@ -2364,7 +2262,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     }
 
     /**
-     * Sets whether the the return transition and reenter transition overlap or not.
+     * Sets whether the return transition and reenter transition overlap or not.
      * When true, the reenter transition will start as soon as possible. When false, the
      * reenter transition will wait until the return transition completes before starting.
      *
@@ -2377,7 +2275,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
     }
 
     /**
-     * Returns whether the the return transition and reenter transition overlap or not.
+     * Returns whether the return transition and reenter transition overlap or not.
      * When true, the reenter transition will start as soon as possible. When false, the
      * reenter transition will wait until the return transition completes before starting.
      *
@@ -2401,7 +2299,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
      * transaction have called {@link #startPostponedEnterTransition()}.
      * <p>
      * This method should be called before being added to the FragmentTransaction or
-     * in {@link #onCreate(Bundle), {@link #onAttach(Context)}, or
+     * in {@link #onCreate(Bundle)}, {@link #onAttach(Context)}, or
      * {@link #onCreateView(LayoutInflater, ViewGroup, Bundle)}}.
      * {@link #startPostponedEnterTransition()} must be called to allow the Fragment to
      * start the transitions.
@@ -2591,6 +2489,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
         mState = CREATED;
         mCalled = false;
         onCreate(savedInstanceState);
+        mIsCreated = true;
         if (!mCalled) {
             throw new SuperNotCalledException("Fragment " + this
                     + " did not call through to super.onCreate()");
@@ -2867,6 +2766,7 @@ public class Fragment implements ComponentCallbacks2, OnCreateContextMenuListene
         }
         mState = INITIALIZING;
         mCalled = false;
+        mIsCreated = false;
         onDestroy();
         if (!mCalled) {
             throw new SuperNotCalledException("Fragment " + this

@@ -16,19 +16,41 @@
 
 package com.android.server.wm;
 
+import static android.Manifest.permission.ALWAYS_UPDATE_WALLPAPER;
+import static android.Manifest.permission.HIDE_NON_SYSTEM_OVERLAY_WINDOWS;
+import static android.Manifest.permission.HIDE_OVERLAY_WINDOWS;
 import static android.Manifest.permission.INTERNAL_SYSTEM_WINDOW;
+import static android.Manifest.permission.SET_UNRESTRICTED_GESTURE_EXCLUSION;
+import static android.Manifest.permission.SET_UNRESTRICTED_KEEP_CLEAR_AREAS;
+import static android.Manifest.permission.START_TASKS_FROM_RECENTS;
+import static android.Manifest.permission.STATUS_BAR_SERVICE;
+import static android.Manifest.permission.SYSTEM_APPLICATION_OVERLAY;
+import static android.app.ActivityTaskManager.INVALID_TASK_ID;
+import static android.content.ClipDescription.MIMETYPE_APPLICATION_ACTIVITY;
+import static android.content.ClipDescription.MIMETYPE_APPLICATION_SHORTCUT;
+import static android.content.ClipDescription.MIMETYPE_APPLICATION_TASK;
+import static android.content.Intent.EXTRA_PACKAGE_NAME;
+import static android.content.Intent.EXTRA_SHORTCUT_ID;
+import static android.content.Intent.EXTRA_TASK_ID;
 import static android.content.pm.PackageManager.PERMISSION_GRANTED;
 import static android.os.Trace.TRACE_TAG_WINDOW_MANAGER;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
 import static android.view.WindowManager.LayoutParams.isSystemAlertWindowType;
-import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_DRAG;
-import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_TASK_POSITIONING;
-import static com.android.server.wm.WindowManagerDebugConfig.SHOW_LIGHT_TRANSACTIONS;
-import static com.android.server.wm.WindowManagerDebugConfig.SHOW_TRANSACTIONS;
-import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
 
+import static com.android.internal.protolog.ProtoLogGroup.WM_SHOW_TRANSACTIONS;
+import static com.android.server.wm.WindowManagerDebugConfig.DEBUG;
+import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_TASK_POSITIONING;
+import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
+import static com.android.window.flags.Flags.windowSessionRelayoutInfo;
+
+import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.app.PendingIntent;
 import android.content.ClipData;
-import android.content.Context;
+import android.content.ClipDescription;
+import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.content.pm.ShortcutServiceInternal;
 import android.graphics.Rect;
 import android.graphics.Region;
 import android.os.Binder;
@@ -36,70 +58,123 @@ import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Process;
+import android.os.RemoteCallback;
 import android.os.RemoteException;
-import android.os.ServiceManager;
 import android.os.Trace;
 import android.os.UserHandle;
+import android.text.TextUtils;
+import android.util.ArraySet;
 import android.util.MergedConfiguration;
 import android.util.Slog;
-import android.view.Display;
 import android.view.IWindow;
 import android.view.IWindowId;
 import android.view.IWindowSession;
 import android.view.IWindowSessionCallback;
 import android.view.InputChannel;
-import android.view.Surface;
+import android.view.InsetsSourceControl;
+import android.view.InsetsState;
 import android.view.SurfaceControl;
 import android.view.SurfaceSession;
+import android.view.View;
+import android.view.View.FocusDirection;
+import android.view.WindowInsets;
+import android.view.WindowInsets.Type.InsetsType;
 import android.view.WindowManager;
+import android.view.WindowRelayoutResult;
+import android.window.ClientWindowFrames;
+import android.window.InputTransferToken;
+import android.window.OnBackInvokedCallbackInfo;
 
-import com.android.internal.view.IInputContext;
-import com.android.internal.view.IInputMethodClient;
-import com.android.internal.view.IInputMethodManager;
+import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.os.logging.MetricsLoggerWrapper;
+import com.android.internal.protolog.common.ProtoLog;
+import com.android.server.LocalServices;
 import com.android.server.wm.WindowManagerService.H;
+import com.android.window.flags.Flags;
 
 import java.io.PrintWriter;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.function.BiConsumer;
 
 /**
  * This class represents an active client session.  There is generally one
  * Session object per process that is interacting with the window manager.
  */
-// Needs to be public and not final so we can mock during tests...sucks I know :(
-public class Session extends IWindowSession.Stub
-        implements IBinder.DeathRecipient {
+class Session extends IWindowSession.Stub implements IBinder.DeathRecipient {
     final WindowManagerService mService;
     final IWindowSessionCallback mCallback;
-    final IInputMethodClient mClient;
     final int mUid;
     final int mPid;
+    @NonNull
+    final WindowProcessController mProcess;
     private final String mStringName;
     SurfaceSession mSurfaceSession;
-    private int mNumWindow = 0;
-    // Set of visible application overlay window surfaces connected to this session.
-    private final Set<WindowSurfaceController> mAppOverlaySurfaces = new HashSet<>();
-    // Set of visible alert window surfaces connected to this session.
-    private final Set<WindowSurfaceController> mAlertWindowSurfaces = new HashSet<>();
+    private final ArrayList<WindowState> mAddedWindows = new ArrayList<>();
+    /** Set of visible alert/app-overlay window surfaces connected to this session. */
+    private final ArraySet<WindowSurfaceController> mAlertWindowSurfaces = new ArraySet<>();
+    private final DragDropController mDragDropController;
     final boolean mCanAddInternalSystemWindow;
+    boolean mCanForceShowingInsets;
+    private final boolean mCanStartTasksFromRecents;
+
+    final boolean mCanCreateSystemApplicationOverlay;
+    final boolean mCanHideNonSystemOverlayWindows;
+    final boolean mCanSetUnrestrictedGestureExclusion;
+    final boolean mCanAlwaysUpdateWallpaper;
     private AlertWindowNotification mAlertWindowNotification;
     private boolean mShowingAlertWindowNotificationAllowed;
     private boolean mClientDead = false;
     private float mLastReportedAnimatorScale;
-    private String mPackageName;
+    protected String mPackageName;
     private String mRelayoutTag;
+    private final InsetsSourceControl.Array mDummyControls =  new InsetsSourceControl.Array();
+    final boolean mSetsUnrestrictedKeepClearAreas;
 
-    public Session(WindowManagerService service, IWindowSessionCallback callback,
-            IInputMethodClient client, IInputContext inputContext) {
+    public Session(WindowManagerService service, IWindowSessionCallback callback) {
+        this(service, callback, Binder.getCallingPid(), Binder.getCallingUid());
+    }
+
+    @VisibleForTesting
+    Session(WindowManagerService service, IWindowSessionCallback callback,
+            int callingPid, int callingUid) {
         mService = service;
         mCallback = callback;
-        mClient = client;
-        mUid = Binder.getCallingUid();
-        mPid = Binder.getCallingPid();
-        mLastReportedAnimatorScale = service.getCurrentAnimatorScale();
+        mPid = callingPid;
+        mUid = callingUid;
+        synchronized (service.mGlobalLock) {
+            mLastReportedAnimatorScale = service.getCurrentAnimatorScale();
+            mProcess = service.mAtmService.mProcessMap.getProcess(mPid);
+        }
+        if (mProcess == null) {
+            throw new IllegalStateException("Unknown pid=" + mPid + " uid=" + mUid);
+        }
         mCanAddInternalSystemWindow = service.mContext.checkCallingOrSelfPermission(
                 INTERNAL_SYSTEM_WINDOW) == PERMISSION_GRANTED;
+        mCanForceShowingInsets = service.mAtmService.isCallerRecents(mUid)
+                || service.mContext.checkCallingOrSelfPermission(STATUS_BAR_SERVICE)
+                == PERMISSION_GRANTED;
+        mCanHideNonSystemOverlayWindows = service.mContext.checkCallingOrSelfPermission(
+                HIDE_NON_SYSTEM_OVERLAY_WINDOWS) == PERMISSION_GRANTED
+                || service.mContext.checkCallingOrSelfPermission(HIDE_OVERLAY_WINDOWS)
+                == PERMISSION_GRANTED;
+        mCanCreateSystemApplicationOverlay =
+                service.mContext.checkCallingOrSelfPermission(SYSTEM_APPLICATION_OVERLAY)
+                        == PERMISSION_GRANTED;
+        mCanStartTasksFromRecents = service.mContext.checkCallingOrSelfPermission(
+                START_TASKS_FROM_RECENTS) == PERMISSION_GRANTED;
+        mSetsUnrestrictedKeepClearAreas =
+                service.mContext.checkCallingOrSelfPermission(SET_UNRESTRICTED_KEEP_CLEAR_AREAS)
+                        == PERMISSION_GRANTED;
+        mCanSetUnrestrictedGestureExclusion =
+                service.mContext.checkCallingOrSelfPermission(SET_UNRESTRICTED_GESTURE_EXCLUSION)
+                        == PERMISSION_GRANTED;
+        mCanAlwaysUpdateWallpaper = Flags.alwaysUpdateWallpaperPermission()
+                && service.mContext.checkCallingOrSelfPermission(ALWAYS_UPDATE_WALLPAPER)
+                        == PERMISSION_GRANTED;
         mShowingAlertWindowNotificationAllowed = mService.mShowAlertWindowNotifications;
+        mDragDropController = mService.mDragDropController;
         StringBuilder sb = new StringBuilder();
         sb.append("Session{");
         sb.append(Integer.toHexString(System.identityHashCode(this)));
@@ -117,34 +192,10 @@ public class Session extends IWindowSession.Stub
         sb.append("}");
         mStringName = sb.toString();
 
-        synchronized (mService.mWindowMap) {
-            if (mService.mInputMethodManager == null && mService.mHaveInputMethods) {
-                IBinder b = ServiceManager.getService(
-                        Context.INPUT_METHOD_SERVICE);
-                mService.mInputMethodManager = IInputMethodManager.Stub.asInterface(b);
-            }
-        }
-        long ident = Binder.clearCallingIdentity();
         try {
-            // Note: it is safe to call in to the input method manager
-            // here because we are not holding our lock.
-            if (mService.mInputMethodManager != null) {
-                mService.mInputMethodManager.addClient(client, inputContext,
-                        mUid, mPid);
-            } else {
-                client.setUsingInputMethod(false);
-            }
-            client.asBinder().linkToDeath(this, 0);
+            mCallback.asBinder().linkToDeath(this, 0);
         } catch (RemoteException e) {
-            // The caller has died, so we can just forget about this.
-            try {
-                if (mService.mInputMethodManager != null) {
-                    mService.mInputMethodManager.removeClient(client);
-                }
-            } catch (RemoteException ee) {
-            }
-        } finally {
-            Binder.restoreCallingIdentity(ident);
+            mClientDead = true;
         }
     }
 
@@ -162,364 +213,508 @@ public class Session extends IWindowSession.Stub
         }
     }
 
+    boolean isClientDead() {
+        return mClientDead;
+    }
+
+    @Override
     public void binderDied() {
-        // Note: it is safe to call in to the input method manager
-        // here because we are not holding our lock.
-        try {
-            if (mService.mInputMethodManager != null) {
-                mService.mInputMethodManager.removeClient(mClient);
-            }
-        } catch (RemoteException e) {
-        }
-        synchronized(mService.mWindowMap) {
-            mClient.asBinder().unlinkToDeath(this, 0);
+        synchronized (mService.mGlobalLock) {
+            mCallback.asBinder().unlinkToDeath(this, 0);
             mClientDead = true;
-            killSessionLocked();
+            try {
+                for (int i = mAddedWindows.size() - 1; i >= 0; i--) {
+                    final WindowState w = mAddedWindows.get(i);
+                    Slog.i(TAG_WM, "WIN DEATH: " + w);
+                    if (w.mActivityRecord != null && w.mActivityRecord.findMainWindow() == w) {
+                        mService.mSnapshotController.onAppDied(w.mActivityRecord);
+                    }
+                    w.removeIfPossible();
+                }
+            } finally {
+                killSessionLocked();
+            }
         }
     }
 
     @Override
-    public int add(IWindow window, int seq, WindowManager.LayoutParams attrs,
-            int viewVisibility, Rect outContentInsets, Rect outStableInsets,
-            InputChannel outInputChannel) {
-        return addToDisplay(window, seq, attrs, viewVisibility, Display.DEFAULT_DISPLAY,
-                outContentInsets, outStableInsets, null /* outOutsets */, outInputChannel);
+    public int addToDisplay(IWindow window, WindowManager.LayoutParams attrs,
+            int viewVisibility, int displayId, @InsetsType int requestedVisibleTypes,
+            InputChannel outInputChannel, InsetsState outInsetsState,
+            InsetsSourceControl.Array outActiveControls, Rect outAttachedFrame,
+            float[] outSizeCompatScale) {
+        return mService.addWindow(this, window, attrs, viewVisibility, displayId,
+                UserHandle.getUserId(mUid), requestedVisibleTypes, outInputChannel, outInsetsState,
+                outActiveControls, outAttachedFrame, outSizeCompatScale);
     }
 
     @Override
-    public int addToDisplay(IWindow window, int seq, WindowManager.LayoutParams attrs,
-            int viewVisibility, int displayId, Rect outContentInsets, Rect outStableInsets,
-            Rect outOutsets, InputChannel outInputChannel) {
-        return mService.addWindow(this, window, seq, attrs, viewVisibility, displayId,
-                outContentInsets, outStableInsets, outOutsets, outInputChannel);
+    public int addToDisplayAsUser(IWindow window, WindowManager.LayoutParams attrs,
+            int viewVisibility, int displayId, int userId, @InsetsType int requestedVisibleTypes,
+            InputChannel outInputChannel, InsetsState outInsetsState,
+            InsetsSourceControl.Array outActiveControls, Rect outAttachedFrame,
+            float[] outSizeCompatScale) {
+        return mService.addWindow(this, window, attrs, viewVisibility, displayId, userId,
+                requestedVisibleTypes, outInputChannel, outInsetsState, outActiveControls,
+                outAttachedFrame, outSizeCompatScale);
     }
 
     @Override
-    public int addWithoutInputChannel(IWindow window, int seq, WindowManager.LayoutParams attrs,
-            int viewVisibility, Rect outContentInsets, Rect outStableInsets) {
-        return addToDisplayWithoutInputChannel(window, seq, attrs, viewVisibility,
-                Display.DEFAULT_DISPLAY, outContentInsets, outStableInsets);
+    public int addToDisplayWithoutInputChannel(IWindow window, WindowManager.LayoutParams attrs,
+            int viewVisibility, int displayId, InsetsState outInsetsState, Rect outAttachedFrame,
+            float[] outSizeCompatScale) {
+        return mService.addWindow(this, window, attrs, viewVisibility, displayId,
+                UserHandle.getUserId(mUid), WindowInsets.Type.defaultVisible(),
+                null /* outInputChannel */, outInsetsState, mDummyControls, outAttachedFrame,
+                outSizeCompatScale);
     }
 
     @Override
-    public int addToDisplayWithoutInputChannel(IWindow window, int seq, WindowManager.LayoutParams attrs,
-            int viewVisibility, int displayId, Rect outContentInsets, Rect outStableInsets) {
-        return mService.addWindow(this, window, seq, attrs, viewVisibility, displayId,
-            outContentInsets, outStableInsets, null /* outOutsets */, null);
-    }
-
-    public void remove(IWindow window) {
-        mService.removeWindow(this, window);
+    public void remove(IBinder clientToken) {
+        mService.removeClientToken(this, clientToken);
     }
 
     @Override
-    public void prepareToReplaceWindows(IBinder appToken, boolean childrenOnly) {
-        mService.setWillReplaceWindows(appToken, childrenOnly);
+    public boolean cancelDraw(IWindow window) {
+        return mService.cancelDraw(this, window);
     }
 
-    public int relayout(IWindow window, int seq, WindowManager.LayoutParams attrs,
-            int requestedWidth, int requestedHeight, int viewFlags,
-            int flags, Rect outFrame, Rect outOverscanInsets, Rect outContentInsets,
-            Rect outVisibleInsets, Rect outStableInsets, Rect outsets, Rect outBackdropFrame,
-            MergedConfiguration mergedConfiguration, Surface outSurface) {
-        if (false) Slog.d(TAG_WM, ">>>>>> ENTERED relayout from "
-                + Binder.getCallingPid());
+    @Override
+    public int relayout(IWindow window, WindowManager.LayoutParams attrs,
+            int requestedWidth, int requestedHeight, int viewFlags, int flags, int seq,
+            int lastSyncSeqId, WindowRelayoutResult outRelayoutResult) {
         Trace.traceBegin(TRACE_TAG_WINDOW_MANAGER, mRelayoutTag);
-        int res = mService.relayoutWindow(this, window, seq, attrs,
-                requestedWidth, requestedHeight, viewFlags, flags,
-                outFrame, outOverscanInsets, outContentInsets, outVisibleInsets,
-                outStableInsets, outsets, outBackdropFrame, mergedConfiguration, outSurface);
+        int res = mService.relayoutWindow(this, window, attrs, requestedWidth,
+                requestedHeight, viewFlags, flags, seq, lastSyncSeqId, outRelayoutResult);
         Trace.traceEnd(TRACE_TAG_WINDOW_MANAGER);
-        if (false) Slog.d(TAG_WM, "<<<<<< EXITING relayout to "
-                + Binder.getCallingPid());
         return res;
     }
 
+    /** @deprecated */
+    @Deprecated
+    @Override
+    public int relayoutLegacy(IWindow window, WindowManager.LayoutParams attrs,
+            int requestedWidth, int requestedHeight, int viewFlags, int flags, int seq,
+            int lastSyncSeqId, ClientWindowFrames outFrames,
+            MergedConfiguration mergedConfiguration, SurfaceControl outSurfaceControl,
+            InsetsState outInsetsState, InsetsSourceControl.Array outActiveControls,
+            Bundle outBundle) {
+        Trace.traceBegin(TRACE_TAG_WINDOW_MANAGER, mRelayoutTag);
+        int res = mService.relayoutWindow(this, window, attrs,
+                requestedWidth, requestedHeight, viewFlags, flags, seq,
+                lastSyncSeqId, outFrames, mergedConfiguration, outSurfaceControl, outInsetsState,
+                outActiveControls, outBundle);
+        Trace.traceEnd(TRACE_TAG_WINDOW_MANAGER);
+        return res;
+    }
+
+    @Override
+    public void relayoutAsync(IWindow window, WindowManager.LayoutParams attrs,
+            int requestedWidth, int requestedHeight, int viewFlags, int flags, int seq,
+            int lastSyncSeqId) {
+        if (windowSessionRelayoutInfo()) {
+            relayout(window, attrs, requestedWidth, requestedHeight, viewFlags, flags, seq,
+                    lastSyncSeqId, null /* outRelayoutResult */);
+        } else {
+            relayoutLegacy(window, attrs, requestedWidth, requestedHeight, viewFlags, flags, seq,
+                    lastSyncSeqId, null /* outFrames */, null /* mergedConfiguration */,
+                    null /* outSurfaceControl */, null /* outInsetsState */,
+                    null /* outActiveControls */, null /* outSyncIdBundle */);
+        }
+    }
+
+    @Override
     public boolean outOfMemory(IWindow window) {
         return mService.outOfMemoryWindow(this, window);
     }
 
-    public void setTransparentRegion(IWindow window, Region region) {
-        mService.setTransparentRegionWindow(this, window, region);
-    }
-
+    @Override
     public void setInsets(IWindow window, int touchableInsets,
             Rect contentInsets, Rect visibleInsets, Region touchableArea) {
         mService.setInsetsWindow(this, window, touchableInsets, contentInsets,
                 visibleInsets, touchableArea);
     }
 
-    public void getDisplayFrame(IWindow window, Rect outDisplayFrame) {
-        mService.getWindowDisplayFrame(this, window, outDisplayFrame);
+    @Override
+    public void clearTouchableRegion(IWindow window) {
+        mService.clearTouchableRegion(this, window);
     }
 
-    public void finishDrawing(IWindow window) {
-        if (WindowManagerService.localLOGV) Slog.v(
-            TAG_WM, "IWindow finishDrawing called for " + window);
-        mService.finishDrawingWindow(this, window);
-    }
-
-    public void setInTouchMode(boolean mode) {
-        synchronized(mService.mWindowMap) {
-            mService.mInTouchMode = mode;
+    @Override
+    public void finishDrawing(IWindow window,
+            @Nullable SurfaceControl.Transaction postDrawTransaction, int seqId) {
+        if (DEBUG) Slog.v(TAG_WM, "IWindow finishDrawing called for " + window);
+        if (Trace.isTagEnabled(TRACE_TAG_WINDOW_MANAGER)) {
+            Trace.traceBegin(TRACE_TAG_WINDOW_MANAGER, "finishDrawing: " + mPackageName);
         }
+        mService.finishDrawingWindow(this, window, postDrawTransaction, seqId);
+        Trace.traceEnd(TRACE_TAG_WINDOW_MANAGER);
     }
 
-    public boolean getInTouchMode() {
-        synchronized(mService.mWindowMap) {
-            return mService.mInTouchMode;
-        }
-    }
-
-    public boolean performHapticFeedback(IWindow window, int effectId,
-            boolean always) {
-        synchronized(mService.mWindowMap) {
-            long ident = Binder.clearCallingIdentity();
-            try {
-                return mService.mPolicy.performHapticFeedbackLw(
-                        mService.windowForClientLocked(this, window, true),
-                        effectId, always);
-            } finally {
-                Binder.restoreCallingIdentity(ident);
-            }
-        }
-    }
-
-    /* Drag/drop */
-    public IBinder prepareDrag(IWindow window, int flags,
-            int width, int height, Surface outSurface) {
-        return mService.prepareDragSurface(window, mSurfaceSession, flags,
-                width, height, outSurface);
-    }
-
-    public boolean performDrag(IWindow window, IBinder dragToken,
-            int touchSource, float touchX, float touchY, float thumbCenterX, float thumbCenterY,
-            ClipData data) {
-        if (DEBUG_DRAG) {
-            Slog.d(TAG_WM, "perform drag: win=" + window + " data=" + data);
-        }
-
-        synchronized (mService.mWindowMap) {
-            if (mService.mDragState == null) {
-                Slog.w(TAG_WM, "No drag prepared");
-                throw new IllegalStateException("performDrag() without prepareDrag()");
-            }
-
-            if (dragToken != mService.mDragState.mToken) {
-                Slog.w(TAG_WM, "Performing mismatched drag");
-                throw new IllegalStateException("performDrag() does not match prepareDrag()");
-            }
-
-            WindowState callingWin = mService.windowForClientLocked(null, window, false);
-            if (callingWin == null) {
-                Slog.w(TAG_WM, "Bad requesting window " + window);
-                return false;  // !!! TODO: throw here?
-            }
-
-            // !!! TODO: if input is not still focused on the initiating window, fail
-            // the drag initiation (e.g. an alarm window popped up just as the application
-            // called performDrag()
-
-            mService.mH.removeMessages(H.DRAG_START_TIMEOUT, window.asBinder());
-
-            // !!! TODO: extract the current touch (x, y) in screen coordinates.  That
-            // will let us eliminate the (touchX,touchY) parameters from the API.
-
-            // !!! FIXME: put all this heavy stuff onto the mH looper, as well as
-            // the actual drag event dispatch stuff in the dragstate
-
-            final DisplayContent displayContent = callingWin.getDisplayContent();
-            if (displayContent == null) {
-               return false;
-            }
-            Display display = displayContent.getDisplay();
-            mService.mDragState.register(display);
-            if (!mService.mInputManager.transferTouchFocus(callingWin.mInputChannel,
-                    mService.mDragState.getInputChannel())) {
-                Slog.e(TAG_WM, "Unable to transfer touch focus");
-                mService.mDragState.unregister();
-                mService.mDragState.reset();
-                mService.mDragState = null;
-                return false;
-            }
-
-            mService.mDragState.mDisplayContent = displayContent;
-            mService.mDragState.mData = data;
-            mService.mDragState.broadcastDragStartedLw(touchX, touchY);
-            mService.mDragState.overridePointerIconLw(touchSource);
-
-            // remember the thumb offsets for later
-            mService.mDragState.mThumbOffsetX = thumbCenterX;
-            mService.mDragState.mThumbOffsetY = thumbCenterY;
-
-            // Make the surface visible at the proper location
-            final SurfaceControl surfaceControl = mService.mDragState.mSurfaceControl;
-            if (SHOW_LIGHT_TRANSACTIONS) Slog.i(
-                    TAG_WM, ">>> OPEN TRANSACTION performDrag");
-            mService.openSurfaceTransaction();
-            try {
-                surfaceControl.setPosition(touchX - thumbCenterX,
-                        touchY - thumbCenterY);
-                surfaceControl.setLayer(mService.mDragState.getDragLayerLw());
-                surfaceControl.setLayerStack(display.getLayerStack());
-                surfaceControl.show();
-            } finally {
-                mService.closeSurfaceTransaction();
-                if (SHOW_LIGHT_TRANSACTIONS) Slog.i(
-                        TAG_WM, "<<< CLOSE TRANSACTION performDrag");
-            }
-
-            mService.mDragState.notifyLocationLw(touchX, touchY);
-        }
-
-        return true;    // success!
-    }
-
-    public boolean startMovingTask(IWindow window, float startX, float startY) {
-        if (DEBUG_TASK_POSITIONING) Slog.d(
-                TAG_WM, "startMovingTask: {" + startX + "," + startY + "}");
-
-        long ident = Binder.clearCallingIdentity();
+    @Override
+    public boolean performHapticFeedback(int effectId, boolean always, boolean fromIme) {
+        final long ident = Binder.clearCallingIdentity();
         try {
-            return mService.startMovingTask(window, startX, startY);
+            return mService.mPolicy.performHapticFeedback(mUid, mPackageName,
+                        effectId, always, null, fromIme);
         } finally {
             Binder.restoreCallingIdentity(ident);
         }
     }
 
+    @Override
+    public void performHapticFeedbackAsync(int effectId, boolean always, boolean fromIme) {
+        performHapticFeedback(effectId, always, fromIme);
+    }
+
+    /* Drag/drop */
+
+    @Override
+    public IBinder performDrag(IWindow window, int flags, SurfaceControl surface, int touchSource,
+            int touchDeviceId, int touchPointerId, float touchX, float touchY, float thumbCenterX,
+            float thumbCenterY, ClipData data) {
+        final int callingUid = Binder.getCallingUid();
+        final int callingPid = Binder.getCallingPid();
+        // Validate and resolve ClipDescription data before clearing the calling identity
+        validateAndResolveDragMimeTypeExtras(data, callingUid, callingPid, mPackageName);
+        validateDragFlags(flags);
+        final long ident = Binder.clearCallingIdentity();
+        try {
+            return mDragDropController.performDrag(mPid, mUid, window, flags, surface, touchSource,
+                    touchDeviceId, touchPointerId, touchX, touchY, thumbCenterX, thumbCenterY,
+                    data);
+        } finally {
+            Binder.restoreCallingIdentity(ident);
+        }
+    }
+
+
+    @Override
+    public boolean dropForAccessibility(IWindow window, int x, int y) {
+        final long ident = Binder.clearCallingIdentity();
+        try {
+            return mDragDropController.dropForAccessibility(window, x, y);
+        } finally {
+            Binder.restoreCallingIdentity(ident);
+        }
+    }
+
+    /**
+     * Validates the given drag flags.
+     */
+    @VisibleForTesting
+    void validateDragFlags(int flags) {
+        if ((flags & View.DRAG_FLAG_REQUEST_SURFACE_FOR_RETURN_ANIMATION) != 0) {
+            if (!mCanStartTasksFromRecents) {
+                throw new SecurityException("Requires START_TASKS_FROM_RECENTS permission");
+            }
+        }
+    }
+
+    /**
+     * Validates the given drag data.
+     */
+    @VisibleForTesting
+    void validateAndResolveDragMimeTypeExtras(ClipData data, int callingUid, int callingPid,
+            String callingPackage) {
+        final ClipDescription desc = data != null ? data.getDescription() : null;
+        if (desc == null) {
+            return;
+        }
+        // Ensure that only one of the app mime types are set
+        final boolean hasActivity = desc.hasMimeType(MIMETYPE_APPLICATION_ACTIVITY);
+        final boolean hasShortcut = desc.hasMimeType(MIMETYPE_APPLICATION_SHORTCUT);
+        final boolean hasTask = desc.hasMimeType(MIMETYPE_APPLICATION_TASK);
+        int appMimeTypeCount = (hasActivity ? 1 : 0)
+                + (hasShortcut ? 1 : 0)
+                + (hasTask ? 1 : 0);
+        if (appMimeTypeCount == 0) {
+            return;
+        } else if (appMimeTypeCount > 1) {
+            throw new IllegalArgumentException("Can not specify more than one of activity, "
+                    + "shortcut, or task mime types");
+        }
+        // Ensure that data is provided and that they are intents
+        if (data.getItemCount() == 0) {
+            throw new IllegalArgumentException("Unexpected number of items (none)");
+        }
+        for (int i = 0; i < data.getItemCount(); i++) {
+            if (data.getItemAt(i).getIntent() == null) {
+                throw new IllegalArgumentException("Unexpected item, expected an intent");
+            }
+        }
+
+        if (hasActivity) {
+            long origId = Binder.clearCallingIdentity();
+            try {
+                // Resolve the activity info for each intent
+                for (int i = 0; i < data.getItemCount(); i++) {
+                    final ClipData.Item item = data.getItemAt(i);
+                    final Intent intent = item.getIntent();
+                    final PendingIntent pi = intent.getParcelableExtra(
+                            ClipDescription.EXTRA_PENDING_INTENT);
+                    final UserHandle user = intent.getParcelableExtra(Intent.EXTRA_USER);
+                    if (pi == null || user == null) {
+                        throw new IllegalArgumentException("Clip data must include the pending "
+                                + "intent to launch and its associated user to launch for.");
+                    }
+                    final Intent launchIntent = mService.mAmInternal.getIntentForIntentSender(
+                            pi.getIntentSender().getTarget());
+                    final ActivityInfo info = mService.mAtmService.resolveActivityInfoForIntent(
+                            launchIntent, null /* resolvedType */, user.getIdentifier(),
+                            callingUid, callingPid);
+                    item.setActivityInfo(info);
+                }
+            } finally {
+                Binder.restoreCallingIdentity(origId);
+            }
+        } else if (hasShortcut) {
+            // Restrict who can start a shortcut drag since it will start the shortcut as the
+            // target shortcut package
+            if (!mCanStartTasksFromRecents) {
+                throw new SecurityException("Requires START_TASKS_FROM_RECENTS permission");
+            }
+            for (int i = 0; i < data.getItemCount(); i++) {
+                final ClipData.Item item = data.getItemAt(i);
+                final Intent intent = item.getIntent();
+                final String shortcutId = intent.getStringExtra(EXTRA_SHORTCUT_ID);
+                final String packageName = intent.getStringExtra(EXTRA_PACKAGE_NAME);
+                final UserHandle user = intent.getParcelableExtra(Intent.EXTRA_USER);
+                if (TextUtils.isEmpty(shortcutId)
+                        || TextUtils.isEmpty(packageName)
+                        || user == null) {
+                    throw new IllegalArgumentException("Clip item must include the package name, "
+                            + "shortcut id, and the user to launch for.");
+                }
+                final ShortcutServiceInternal shortcutService =
+                        LocalServices.getService(ShortcutServiceInternal.class);
+                final Intent[] shortcutIntents = shortcutService.createShortcutIntents(
+                        UserHandle.getUserId(callingUid), callingPackage, packageName, shortcutId,
+                        user.getIdentifier(), callingPid, callingUid);
+                if (shortcutIntents == null || shortcutIntents.length == 0) {
+                    throw new IllegalArgumentException("Invalid shortcut id");
+                }
+                final ActivityInfo info = mService.mAtmService.resolveActivityInfoForIntent(
+                        shortcutIntents[0], null /* resolvedType */, user.getIdentifier(),
+                        callingUid, callingPid);
+                item.setActivityInfo(info);
+            }
+        } else if (hasTask) {
+            // TODO(b/169894807): Consider opening this up for tasks from the same app as the caller
+            if (!mCanStartTasksFromRecents) {
+                throw new SecurityException("Requires START_TASKS_FROM_RECENTS permission");
+            }
+            for (int i = 0; i < data.getItemCount(); i++) {
+                final ClipData.Item item = data.getItemAt(i);
+                final Intent intent = item.getIntent();
+                final int taskId = intent.getIntExtra(EXTRA_TASK_ID, INVALID_TASK_ID);
+                if (taskId == INVALID_TASK_ID) {
+                    throw new IllegalArgumentException("Clip item must include the task id.");
+                }
+                final Task task = mService.mRoot.anyTaskForId(taskId);
+                if (task == null) {
+                    throw new IllegalArgumentException("Invalid task id.");
+                }
+                if (task.getRootActivity() != null) {
+                    item.setActivityInfo(task.getRootActivity().info);
+                } else {
+                    // Resolve the activity info manually if the task was restored after reboot
+                    final ActivityInfo info = mService.mAtmService.resolveActivityInfoForIntent(
+                            task.intent, null /* resolvedType */, task.mUserId, callingUid,
+                            callingPid);
+                    item.setActivityInfo(info);
+                }
+            }
+        }
+    }
+
+    @Override
     public void reportDropResult(IWindow window, boolean consumed) {
-        IBinder token = window.asBinder();
-        if (DEBUG_DRAG) {
-            Slog.d(TAG_WM, "Drop result=" + consumed + " reported by " + token);
-        }
-
-        synchronized (mService.mWindowMap) {
-            long ident = Binder.clearCallingIdentity();
-            try {
-                if (mService.mDragState == null) {
-                    // Most likely the drop recipient ANRed and we ended the drag
-                    // out from under it.  Log the issue and move on.
-                    Slog.w(TAG_WM, "Drop result given but no drag in progress");
-                    return;
-                }
-
-                if (mService.mDragState.mToken != token) {
-                    // We're in a drag, but the wrong window has responded.
-                    Slog.w(TAG_WM, "Invalid drop-result claim by " + window);
-                    throw new IllegalStateException("reportDropResult() by non-recipient");
-                }
-
-                // The right window has responded, even if it's no longer around,
-                // so be sure to halt the timeout even if the later WindowState
-                // lookup fails.
-                mService.mH.removeMessages(H.DRAG_END_TIMEOUT, window.asBinder());
-                WindowState callingWin = mService.windowForClientLocked(null, window, false);
-                if (callingWin == null) {
-                    Slog.w(TAG_WM, "Bad result-reporting window " + window);
-                    return;  // !!! TODO: throw here?
-                }
-
-                mService.mDragState.mDragResult = consumed;
-                mService.mDragState.endDragLw();
-            } finally {
-                Binder.restoreCallingIdentity(ident);
-            }
+        final long ident = Binder.clearCallingIdentity();
+        try {
+            mDragDropController.reportDropResult(window, consumed);
+        } finally {
+            Binder.restoreCallingIdentity(ident);
         }
     }
 
-    public void cancelDragAndDrop(IBinder dragToken) {
-        if (DEBUG_DRAG) {
-            Slog.d(TAG_WM, "cancelDragAndDrop");
-        }
-
-        synchronized (mService.mWindowMap) {
-            long ident = Binder.clearCallingIdentity();
-            try {
-                if (mService.mDragState == null) {
-                    Slog.w(TAG_WM, "cancelDragAndDrop() without prepareDrag()");
-                    throw new IllegalStateException("cancelDragAndDrop() without prepareDrag()");
-                }
-
-                if (mService.mDragState.mToken != dragToken) {
-                    Slog.w(TAG_WM,
-                            "cancelDragAndDrop() does not match prepareDrag()");
-                    throw new IllegalStateException(
-                            "cancelDragAndDrop() does not match prepareDrag()");
-                }
-
-                mService.mDragState.mDragResult = false;
-                mService.mDragState.cancelDragLw();
-            } finally {
-                Binder.restoreCallingIdentity(ident);
-            }
+    @Override
+    public void cancelDragAndDrop(IBinder dragToken, boolean skipAnimation) {
+        final long ident = Binder.clearCallingIdentity();
+        try {
+            mDragDropController.cancelDragAndDrop(dragToken, skipAnimation);
+        } finally {
+            Binder.restoreCallingIdentity(ident);
         }
     }
 
+    @Override
     public void dragRecipientEntered(IWindow window) {
-        if (DEBUG_DRAG) {
-            Slog.d(TAG_WM, "Drag into new candidate view @ " + window.asBinder());
-        }
+        mDragDropController.dragRecipientEntered(window);
     }
 
+    @Override
     public void dragRecipientExited(IWindow window) {
-        if (DEBUG_DRAG) {
-            Slog.d(TAG_WM, "Drag from old candidate view @ " + window.asBinder());
+        mDragDropController.dragRecipientExited(window);
+    }
+
+    @Override
+    public boolean startMovingTask(IWindow window, float startX, float startY) {
+        if (DEBUG_TASK_POSITIONING) Slog.d(
+                TAG_WM, "startMovingTask: {" + startX + "," + startY + "}");
+
+        final long ident = Binder.clearCallingIdentity();
+        try {
+            return mService.mTaskPositioningController.startMovingTask(window, startX, startY);
+        } finally {
+            Binder.restoreCallingIdentity(ident);
         }
     }
 
+    @Override
+    public void finishMovingTask(IWindow window) {
+        if (DEBUG_TASK_POSITIONING) Slog.d(TAG_WM, "finishMovingTask");
+
+        final long ident = Binder.clearCallingIdentity();
+        try {
+            mService.mTaskPositioningController.finishTaskPositioning(window);
+        } finally {
+            Binder.restoreCallingIdentity(ident);
+        }
+    }
+
+    @Override
+    public void reportSystemGestureExclusionChanged(IWindow window, List<Rect> exclusionRects) {
+        final long ident = Binder.clearCallingIdentity();
+        try {
+            mService.reportSystemGestureExclusionChanged(this, window, exclusionRects);
+        } finally {
+            Binder.restoreCallingIdentity(ident);
+        }
+    }
+
+    @Override
+    public void reportDecorViewGestureInterceptionChanged(IWindow window, boolean intercepted) {
+        final long ident = Binder.clearCallingIdentity();
+        try {
+            mService.reportDecorViewGestureChanged(this, window, intercepted);
+        } finally {
+            Binder.restoreCallingIdentity(ident);
+        }
+    }
+
+    @Override
+    public void reportKeepClearAreasChanged(IWindow window, List<Rect> restricted,
+            List<Rect> unrestricted) {
+        if (!mSetsUnrestrictedKeepClearAreas && !unrestricted.isEmpty()) {
+            unrestricted = Collections.emptyList();
+        }
+
+        final long ident = Binder.clearCallingIdentity();
+        try {
+            mService.reportKeepClearAreasChanged(this, window, restricted, unrestricted);
+        } finally {
+            Binder.restoreCallingIdentity(ident);
+        }
+    }
+
+    private void actionOnWallpaper(IBinder window,
+            BiConsumer<WallpaperController, WindowState> action) {
+        final WindowState windowState = mService.windowForClientLocked(this, window, true);
+        action.accept(windowState.getDisplayContent().mWallpaperController, windowState);
+    }
+
+    @Override
     public void setWallpaperPosition(IBinder window, float x, float y, float xStep, float yStep) {
-        synchronized(mService.mWindowMap) {
-            long ident = Binder.clearCallingIdentity();
+        synchronized (mService.mGlobalLock) {
+            final long ident = Binder.clearCallingIdentity();
             try {
-                mService.mRoot.mWallpaperController.setWindowWallpaperPosition(
-                        mService.windowForClientLocked(this, window, true),
-                        x, y, xStep, yStep);
+                actionOnWallpaper(window, (wpController, windowState) ->
+                        wpController.setWindowWallpaperPosition(windowState, x, y, xStep, yStep));
             } finally {
                 Binder.restoreCallingIdentity(ident);
             }
         }
     }
 
+    @Override
+    public void setWallpaperZoomOut(IBinder window, float zoom) {
+        if (Float.compare(0f, zoom) > 0 || Float.compare(1f, zoom) < 0 || Float.isNaN(zoom)) {
+            throw new IllegalArgumentException("Zoom must be a valid float between 0 and 1: "
+                    + zoom);
+        }
+        synchronized (mService.mGlobalLock) {
+            final long ident = Binder.clearCallingIdentity();
+            try {
+                actionOnWallpaper(window, (wpController, windowState) ->
+                        wpController.setWallpaperZoomOut(windowState, zoom));
+            } finally {
+                Binder.restoreCallingIdentity(ident);
+            }
+        }
+    }
+
+    @Override
+    public void setShouldZoomOutWallpaper(IBinder window, boolean shouldZoom) {
+        synchronized (mService.mGlobalLock) {
+            actionOnWallpaper(window, (wpController, windowState) ->
+                    wpController.setShouldZoomOutWallpaper(windowState, shouldZoom));
+        }
+    }
+
+    @Override
     public void wallpaperOffsetsComplete(IBinder window) {
-        synchronized (mService.mWindowMap) {
-            mService.mRoot.mWallpaperController.wallpaperOffsetsComplete(window);
+        synchronized (mService.mGlobalLock) {
+            actionOnWallpaper(window, (wpController, windowState) ->
+                    wpController.wallpaperOffsetsComplete(window));
         }
     }
 
+    @Override
     public void setWallpaperDisplayOffset(IBinder window, int x, int y) {
-        synchronized(mService.mWindowMap) {
-            long ident = Binder.clearCallingIdentity();
+        synchronized (mService.mGlobalLock) {
+            final long ident = Binder.clearCallingIdentity();
             try {
-                mService.mRoot.mWallpaperController.setWindowWallpaperDisplayOffset(
-                        mService.windowForClientLocked(this, window, true), x, y);
+                actionOnWallpaper(window, (wpController, windowState) ->
+                        wpController.setWindowWallpaperDisplayOffset(windowState, x, y));
             } finally {
                 Binder.restoreCallingIdentity(ident);
             }
         }
     }
 
-    public Bundle sendWallpaperCommand(IBinder window, String action, int x, int y,
+    @Override
+    public void sendWallpaperCommand(IBinder window, String action, int x, int y,
             int z, Bundle extras, boolean sync) {
-        synchronized(mService.mWindowMap) {
-            long ident = Binder.clearCallingIdentity();
+        synchronized (mService.mGlobalLock) {
+            final long ident = Binder.clearCallingIdentity();
             try {
-                return mService.mRoot.mWallpaperController.sendWindowWallpaperCommand(
-                        mService.windowForClientLocked(this, window, true),
-                        action, x, y, z, extras, sync);
+                final WindowState windowState = mService.windowForClientLocked(this, window, true);
+                WallpaperController wallpaperController =
+                        windowState.getDisplayContent().mWallpaperController;
+                if (mCanAlwaysUpdateWallpaper
+                        || windowState == wallpaperController.getWallpaperTarget()
+                        || windowState == wallpaperController.getPrevWallpaperTarget()) {
+                    wallpaperController.sendWindowWallpaperCommandUnchecked(
+                            windowState, action, x, y, z, extras, sync);
+                }
             } finally {
                 Binder.restoreCallingIdentity(ident);
             }
         }
     }
 
+    @Override
     public void wallpaperCommandComplete(IBinder window, Bundle result) {
-        synchronized (mService.mWindowMap) {
-            mService.mRoot.mWallpaperController.wallpaperCommandComplete(window);
+        synchronized (mService.mGlobalLock) {
+            actionOnWallpaper(window, (wpController, windowState) ->
+                    wpController.wallpaperCommandComplete(window));
         }
     }
 
+    @Override
     public void onRectangleOnScreenRequested(IBinder token, Rect rectangle) {
-        synchronized(mService.mWindowMap) {
+        synchronized (mService.mGlobalLock) {
             final long identity = Binder.clearCallingIdentity();
             try {
                 mService.onRectangleOnScreenRequested(token, rectangle);
@@ -529,6 +724,7 @@ public class Session extends IWindowSession.Stub
         }
     }
 
+    @Override
     public IWindowId getWindowId(IBinder window) {
         return mService.getWindowId(window);
     }
@@ -544,37 +740,57 @@ public class Session extends IWindowSession.Stub
     }
 
     @Override
-    public void updatePointerIcon(IWindow window) {
+    public void updateTapExcludeRegion(IWindow window, Region region) {
         final long identity = Binder.clearCallingIdentity();
         try {
-            mService.updatePointerIcon(window);
+            mService.updateTapExcludeRegion(window, region);
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
     }
 
-    void windowAddedLocked(String packageName) {
-        mPackageName = packageName;
-        mRelayoutTag = "relayoutWindow: " + mPackageName;
+    @Override
+    public void updateRequestedVisibleTypes(IWindow window, @InsetsType int requestedVisibleTypes) {
+        synchronized (mService.mGlobalLock) {
+            final WindowState win = mService.windowForClientLocked(this, window,
+                    false /* throwOnError */);
+            if (win != null) {
+                win.setRequestedVisibleTypes(requestedVisibleTypes);
+                win.getDisplayContent().getInsetsPolicy().onRequestedVisibleTypesChanged(win);
+            }
+        }
+    }
+
+    void onWindowAdded(WindowState w) {
+        if (mPackageName == null) {
+            mPackageName = mProcess.mInfo.packageName;
+            mRelayoutTag = "relayoutWindow: " + mPackageName;
+        }
         if (mSurfaceSession == null) {
-            if (WindowManagerService.localLOGV) Slog.v(
-                TAG_WM, "First window added to " + this + ", creating SurfaceSession");
+            if (DEBUG) {
+                Slog.v(TAG_WM, "First window added to " + this + ", creating SurfaceSession");
+            }
             mSurfaceSession = new SurfaceSession();
-            if (SHOW_TRANSACTIONS) Slog.i(
-                    TAG_WM, "  NEW SURFACE SESSION " + mSurfaceSession);
+            ProtoLog.i(WM_SHOW_TRANSACTIONS, "  NEW SURFACE SESSION %s", mSurfaceSession);
             mService.mSessions.add(this);
             if (mLastReportedAnimatorScale != mService.getCurrentAnimatorScale()) {
                 mService.dispatchNewAnimatorScaleLocked(this);
             }
+            mProcess.mWindowSession = this;
         }
-        mNumWindow++;
+        mAddedWindows.add(w);
     }
 
-    void windowRemovedLocked() {
-        mNumWindow--;
-        killSessionLocked();
+    void onWindowRemoved(WindowState w) {
+        mAddedWindows.remove(w);
+        if (mAddedWindows.isEmpty()) {
+            killSessionLocked();
+        }
     }
 
+    boolean hasWindow() {
+        return !mAddedWindows.isEmpty();
+    }
 
     void onWindowSurfaceVisibilityChanged(WindowSurfaceController surfaceController,
             boolean visible, int type) {
@@ -584,43 +800,56 @@ public class Session extends IWindowSession.Stub
         }
 
         boolean changed;
-
-        if (!mCanAddInternalSystemWindow) {
-            // We want to track non-system signature apps adding alert windows so we can post an
-            // on-going notification for the user to control their visibility.
-            if (visible) {
-                changed = mAlertWindowSurfaces.add(surfaceController);
-            } else {
-                changed = mAlertWindowSurfaces.remove(surfaceController);
+        // Track non-system apps adding overlay/alert windows, so a notification can post for the
+        // user to control their visibility.
+        final boolean noSystemOverlayPermission =
+                !mCanAddInternalSystemWindow && !mCanCreateSystemApplicationOverlay;
+        if (visible) {
+            changed = mAlertWindowSurfaces.add(surfaceController);
+            if (type == TYPE_APPLICATION_OVERLAY) {
+                MetricsLoggerWrapper.logAppOverlayEnter(mUid, mPackageName, changed, type,
+                        false /* set false to only log for TYPE_APPLICATION_OVERLAY */);
+            } else if (noSystemOverlayPermission) {
+                MetricsLoggerWrapper.logAppOverlayEnter(mUid, mPackageName, changed, type,
+                        true /* only log for non-TYPE_APPLICATION_OVERLAY */);
             }
+        } else {
+            changed = mAlertWindowSurfaces.remove(surfaceController);
+            if (type == TYPE_APPLICATION_OVERLAY) {
+                MetricsLoggerWrapper.logAppOverlayExit(mUid, mPackageName, changed, type,
+                        false /* set false to only log for TYPE_APPLICATION_OVERLAY */);
+            } else if (noSystemOverlayPermission) {
+                MetricsLoggerWrapper.logAppOverlayExit(mUid, mPackageName, changed, type,
+                        true /* only log for non-TYPE_APPLICATION_OVERLAY */);
+            }
+        }
 
-            if (changed) {
-                if (mAlertWindowSurfaces.isEmpty()) {
-                    cancelAlertWindowNotification();
-                } else if (mAlertWindowNotification == null){
-                    mAlertWindowNotification = new AlertWindowNotification(mService, mPackageName);
-                    if (mShowingAlertWindowNotificationAllowed) {
-                        mAlertWindowNotification.post();
-                    }
+        if (changed && noSystemOverlayPermission) {
+            if (mAlertWindowSurfaces.isEmpty()) {
+                cancelAlertWindowNotification();
+            } else if (mAlertWindowNotification == null && !isSatellitePointingUiPackage()) {
+                mAlertWindowNotification = new AlertWindowNotification(mService, mPackageName);
+                if (mShowingAlertWindowNotificationAllowed) {
+                    mAlertWindowNotification.post();
                 }
             }
         }
 
-        if (type != TYPE_APPLICATION_OVERLAY) {
-            return;
+        if (changed && mPid != WindowManagerService.MY_PID) {
+            // Notify activity manager that the process contains overlay/alert windows, so it can
+            // adjust the importance score for the process.
+            setHasOverlayUi(!mAlertWindowSurfaces.isEmpty());
         }
+    }
 
-        if (visible) {
-            changed = mAppOverlaySurfaces.add(surfaceController);
-        } else {
-            changed = mAppOverlaySurfaces.remove(surfaceController);
+    // TODO b/349195999 - short term solution to not show the satellite pointing ui notification.
+    private boolean isSatellitePointingUiPackage() {
+        if (mPackageName == null || !mPackageName.equals(mService.mContext.getString(
+            com.android.internal.R.string.config_pointing_ui_package))) {
+            return false;
         }
-
-        if (changed) {
-            // Notify activity manager of changes to app overlay windows so it can adjust the
-            // importance score for the process.
-            setHasOverlayUi(!mAppOverlaySurfaces.isEmpty());
-        }
+        return ActivityTaskManagerService.checkPermission(
+            android.Manifest.permission.SATELLITE_COMMUNICATION, mPid, mUid) == PERMISSION_GRANTED;
     }
 
     void setShowingAlertWindowNotificationAllowed(boolean allowed) {
@@ -629,13 +858,13 @@ public class Session extends IWindowSession.Stub
             if (allowed) {
                 mAlertWindowNotification.post();
             } else {
-                mAlertWindowNotification.cancel();
+                mAlertWindowNotification.cancel(false /* deleteChannel */);
             }
         }
     }
 
     private void killSessionLocked() {
-        if (mNumWindow > 0 || !mClientDead) {
+        if (!mClientDead) {
             return;
         }
 
@@ -644,9 +873,7 @@ public class Session extends IWindowSession.Stub
             return;
         }
 
-        if (WindowManagerService.localLOGV) Slog.v(TAG_WM, "Last window removed from " + this
-                + ", destroying " + mSurfaceSession);
-        if (SHOW_TRANSACTIONS) Slog.i(TAG_WM, "  KILL SURFACE SESSION " + mSurfaceSession);
+        ProtoLog.i(WM_SHOW_TRANSACTIONS, "  KILL SURFACE SESSION %s", mSurfaceSession);
         try {
             mSurfaceSession.kill();
         } catch (Exception e) {
@@ -654,13 +881,14 @@ public class Session extends IWindowSession.Stub
                     + " in session " + this + ": " + e.toString());
         }
         mSurfaceSession = null;
+        mAddedWindows.clear();
         mAlertWindowSurfaces.clear();
-        mAppOverlaySurfaces.clear();
         setHasOverlayUi(false);
         cancelAlertWindowNotification();
     }
 
-    private void setHasOverlayUi(boolean hasOverlayUi) {
+    @VisibleForTesting
+    void setHasOverlayUi(boolean hasOverlayUi) {
         mService.mH.obtainMessage(H.SET_HAS_OVERLAY_UI, mPid, hasOverlayUi ? 1 : 0).sendToTarget();
     }
 
@@ -668,22 +896,134 @@ public class Session extends IWindowSession.Stub
         if (mAlertWindowNotification == null) {
             return;
         }
-        mAlertWindowNotification.cancel();
+        mAlertWindowNotification.cancel(true /* deleteChannel */);
         mAlertWindowNotification = null;
     }
 
     void dump(PrintWriter pw, String prefix) {
-        pw.print(prefix); pw.print("mNumWindow="); pw.print(mNumWindow);
+        pw.print(prefix); pw.print("numWindow="); pw.print(mAddedWindows.size());
                 pw.print(" mCanAddInternalSystemWindow="); pw.print(mCanAddInternalSystemWindow);
-                pw.print(" mAppOverlaySurfaces="); pw.print(mAppOverlaySurfaces);
                 pw.print(" mAlertWindowSurfaces="); pw.print(mAlertWindowSurfaces);
                 pw.print(" mClientDead="); pw.print(mClientDead);
                 pw.print(" mSurfaceSession="); pw.println(mSurfaceSession);
         pw.print(prefix); pw.print("mPackageName="); pw.println(mPackageName);
+        if (isSatellitePointingUiPackage()) {
+            pw.print(prefix); pw.println("mIsSatellitePointingUiPackage=true");
+        }
     }
 
     @Override
     public String toString() {
         return mStringName;
+    }
+
+    /** @return {@code true} if there is an alert window surface on the given display. */
+    boolean hasAlertWindowSurfaces(DisplayContent displayContent) {
+        for (int i = mAlertWindowSurfaces.size() - 1; i >= 0; i--) {
+            final WindowSurfaceController surfaceController = mAlertWindowSurfaces.valueAt(i);
+            if (surfaceController.mAnimator.mWin.getDisplayContent() == displayContent) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public void grantInputChannel(int displayId, SurfaceControl surface,
+            IBinder clientToken, @Nullable InputTransferToken hostInputTransferToken, int flags,
+            int privateFlags, int inputFeatures, int type, IBinder windowToken,
+            InputTransferToken inputTransferToken, String inputHandleName,
+            InputChannel outInputChannel) {
+        if (hostInputTransferToken == null && !mCanAddInternalSystemWindow) {
+            // Callers without INTERNAL_SYSTEM_WINDOW permission cannot grant input channel to
+            // embedded windows without providing a host window input token
+            throw new SecurityException("Requires INTERNAL_SYSTEM_WINDOW permission");
+        }
+
+        final long identity = Binder.clearCallingIdentity();
+        try {
+            mService.grantInputChannel(this, mUid, mPid, displayId, surface, clientToken,
+                    hostInputTransferToken, flags, mCanAddInternalSystemWindow ? privateFlags : 0,
+                    inputFeatures, type, windowToken, inputTransferToken, inputHandleName,
+                    outInputChannel);
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    @Override
+    public void updateInputChannel(IBinder channelToken, int displayId, SurfaceControl surface,
+            int flags, int privateFlags, int inputFeatures, Region region) {
+        final long identity = Binder.clearCallingIdentity();
+        try {
+            mService.updateInputChannel(channelToken, displayId, surface, flags,
+                    mCanAddInternalSystemWindow ? privateFlags : 0, inputFeatures, region);
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    @Override
+    public void grantEmbeddedWindowFocus(IWindow callingWindow, InputTransferToken targetInputToken,
+                                         boolean grantFocus) {
+        final long identity = Binder.clearCallingIdentity();
+        try {
+            if (callingWindow == null) {
+                if (!mCanAddInternalSystemWindow) {
+                    // Callers without INTERNAL_SYSTEM_WINDOW permission cannot request focus on
+                    // embedded windows without providing the calling window
+                    throw new SecurityException("Requires INTERNAL_SYSTEM_WINDOW permission");
+                }
+                mService.grantEmbeddedWindowFocus(this, targetInputToken, grantFocus);
+            } else {
+                mService.grantEmbeddedWindowFocus(this, callingWindow, targetInputToken,
+                        grantFocus);
+            }
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    @Override
+    public boolean moveFocusToAdjacentWindow(IWindow fromWindow, @FocusDirection int direction) {
+        final long identity = Binder.clearCallingIdentity();
+        try {
+            synchronized (mService.mGlobalLock) {
+                final WindowState win =
+                        mService.windowForClientLocked(this, fromWindow, false /* throwOnError */);
+                if (win == null) {
+                    return false;
+                }
+                return mService.moveFocusToAdjacentWindow(win, direction);
+            }
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    @Override
+    public void generateDisplayHash(IWindow window, Rect boundsInWindow, String hashAlgorithm,
+            RemoteCallback callback) {
+        final long origId = Binder.clearCallingIdentity();
+        try {
+            mService.generateDisplayHash(this, window, boundsInWindow, hashAlgorithm, callback);
+        } finally {
+            Binder.restoreCallingIdentity(origId);
+        }
+    }
+
+    @Override
+    public void setOnBackInvokedCallbackInfo(
+            IWindow window,
+            OnBackInvokedCallbackInfo callbackInfo) {
+        synchronized (mService.mGlobalLock) {
+            WindowState windowState = mService.windowForClientLocked(this, window, false);
+            if (windowState == null) {
+                Slog.i(TAG_WM,
+                        "setOnBackInvokedCallback(): No window state for package:" + mPackageName);
+            } else {
+                windowState.setOnBackInvokedCallbackInfo(callbackInfo);
+            }
+        }
     }
 }

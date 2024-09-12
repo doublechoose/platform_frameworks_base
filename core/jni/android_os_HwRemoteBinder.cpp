@@ -22,9 +22,13 @@
 
 #include "android_os_HwParcel.h"
 
-#include <nativehelper/JNIHelp.h>
+#include <android/hidl/base/1.0/IBase.h>
+#include <android/hidl/base/1.0/BpHwBase.h>
+#include <android/hidl/base/1.0/BnHwBase.h>
 #include <android_runtime/AndroidRuntime.h>
 #include <hidl/Status.h>
+#include <hidl/HidlTransportSupport.h>
+#include <nativehelper/JNIHelp.h>
 #include <nativehelper/ScopedUtfChars.h>
 #include <nativehelper/ScopedLocalRef.h>
 
@@ -77,27 +81,37 @@ public:
 
     void binderDied(const wp<hardware::IBinder>& who)
     {
-        if (mObject != NULL) {
-            JNIEnv* env = javavm_to_jnienv(mVM);
+        JNIEnv* env = javavm_to_jnienv(mVM);
 
-            env->CallStaticVoidMethod(gProxyOffsets.proxy_class, gProxyOffsets.sendDeathNotice, mObject, mCookie);
+        // Serialize with our containing HwBinderDeathRecipientList so that we can't
+        // delete the global ref on object while the list is being iterated.
+        sp<HwBinderDeathRecipientList> list = mList.promote();
+        if (list == nullptr) return;
+
+        jobject object;
+        {
+            AutoMutex _l(list->lock());
+
+            // this function now owns the global ref - to the rest of the code, it looks like
+            // this binder already died, but we won't actually delete the reference until
+            // the Java code has processed the death
+            object = mObject;
+
+            // Demote from strong ref to weak for after binderDied() has been delivered,
+            // to allow the DeathRecipient and BinderProxy to be GC'd if no longer needed.
+            mObjectWeak = env->NewWeakGlobalRef(mObject);
+            mObject = nullptr;
+        }
+
+        if (object != nullptr) {
+            env->CallStaticVoidMethod(gProxyOffsets.proxy_class, gProxyOffsets.sendDeathNotice,
+                                      object, mCookie);
             if (env->ExceptionCheck()) {
                 ALOGE("Uncaught exception returned from death notification.");
                 env->ExceptionClear();
             }
 
-            // Serialize with our containing HwBinderDeathRecipientList so that we can't
-            // delete the global ref on mObject while the list is being iterated.
-            sp<HwBinderDeathRecipientList> list = mList.promote();
-            if (list != NULL) {
-                AutoMutex _l(list->lock());
-
-                // Demote from strong ref to weak after binderDied() has been delivered,
-                // to allow the DeathRecipient and BinderProxy to be GC'd if no longer needed.
-                mObjectWeak = env->NewWeakGlobalRef(mObject);
-                env->DeleteGlobalRef(mObject);
-                mObject = NULL;
-            }
+            env->DeleteGlobalRef(object);
         }
     }
 
@@ -111,7 +125,7 @@ public:
         }
     }
 
-    bool matches(jobject obj) {
+    bool matchesLocked(jobject obj) {
         bool result;
         JNIEnv* env = javavm_to_jnienv(mVM);
 
@@ -125,7 +139,7 @@ public:
         return result;
     }
 
-    void warnIfStillLive() {
+    void warnIfStillLiveLocked() {
         if (mObject != NULL) {
             // Okay, something is wrong -- we have a hard reference to a live death
             // recipient on the VM side, but the list is being torn down.
@@ -172,7 +186,7 @@ HwBinderDeathRecipientList::~HwBinderDeathRecipientList() {
     AutoMutex _l(mLock);
 
     for (const sp<HwBinderDeathRecipient>& deathRecipient : mList) {
-        deathRecipient->warnIfStillLive();
+        deathRecipient->warnIfStillLiveLocked();
     }
 }
 
@@ -185,8 +199,7 @@ void HwBinderDeathRecipientList::add(const sp<HwBinderDeathRecipient>& recipient
 void HwBinderDeathRecipientList::remove(const sp<HwBinderDeathRecipient>& recipient) {
     AutoMutex _l(mLock);
 
-    List< sp<HwBinderDeathRecipient> >::iterator iter;
-    for (iter = mList.begin(); iter != mList.end(); iter++) {
+    for (auto iter = mList.begin(); iter != mList.end(); iter++) {
         if (*iter == recipient) {
             mList.erase(iter);
             return;
@@ -197,12 +210,13 @@ void HwBinderDeathRecipientList::remove(const sp<HwBinderDeathRecipient>& recipi
 sp<HwBinderDeathRecipient> HwBinderDeathRecipientList::find(jobject recipient) {
     AutoMutex _l(mLock);
 
-    for (const sp<HwBinderDeathRecipient>& deathRecipient : mList) {
-        if (deathRecipient->matches(recipient)) {
-            return deathRecipient;
+    for(auto iter = mList.rbegin(); iter != mList.rend(); iter++) {
+        if ((*iter)->matchesLocked(recipient)) {
+            return (*iter);
         }
     }
-    return NULL;
+
+    return nullptr;
 }
 
 Mutex& HwBinderDeathRecipientList::lock() {
@@ -265,22 +279,9 @@ jobject JHwRemoteBinder::NewObject(
     return obj;
 }
 
-JHwRemoteBinder::JHwRemoteBinder(
-        JNIEnv *env, jobject thiz, const sp<hardware::IBinder> &binder)
-    : mBinder(binder) {
-    mDeathRecipientList = new HwBinderDeathRecipientList();
-    jclass clazz = env->GetObjectClass(thiz);
-    CHECK(clazz != NULL);
-
-    mObject = env->NewWeakGlobalRef(thiz);
-}
-
-JHwRemoteBinder::~JHwRemoteBinder() {
-    JNIEnv *env = AndroidRuntime::getJNIEnv();
-
-    env->DeleteWeakGlobalRef(mObject);
-    mObject = NULL;
-}
+JHwRemoteBinder::JHwRemoteBinder(JNIEnv* env, jobject /* thiz */,
+                                 const sp<hardware::IBinder>& binder)
+      : mBinder(binder), mDeathRecipientList(new HwBinderDeathRecipientList()) {}
 
 sp<hardware::IBinder> JHwRemoteBinder::getBinder() const {
     return mBinder;
@@ -413,6 +414,44 @@ static jboolean JHwRemoteBinder_unlinkToDeath(JNIEnv* env, jobject thiz,
     return res;
 }
 
+static sp<hidl::base::V1_0::IBase> toIBase(JNIEnv* env, jclass hwRemoteBinderClazz, jobject jbinder)
+{
+    if (jbinder == nullptr) {
+        return nullptr;
+    }
+    if (!env->IsInstanceOf(jbinder, hwRemoteBinderClazz)) {
+        return nullptr;
+    }
+    sp<JHwRemoteBinder> context = JHwRemoteBinder::GetNativeContext(env, jbinder);
+    sp<hardware::IBinder> cbinder = context->getBinder();
+    return hardware::fromBinder<hidl::base::V1_0::IBase, hidl::base::V1_0::BpHwBase,
+                                hidl::base::V1_0::BnHwBase>(cbinder);
+}
+
+// equals iff other is also a non-null android.os.HwRemoteBinder object
+// and getBinder() returns the same object.
+// In particular, if other is an android.os.HwBinder object (for stubs) then
+// it returns false.
+static jboolean JHwRemoteBinder_equals(JNIEnv* env, jobject thiz, jobject other)
+{
+    if (env->IsSameObject(thiz, other)) {
+        return true;
+    }
+    if (other == NULL) {
+        return false;
+    }
+
+    ScopedLocalRef<jclass> clazz(env, FindClassOrDie(env, CLASS_PATH));
+
+    return hardware::interfacesEqual(toIBase(env, clazz.get(), thiz), toIBase(env, clazz.get(), other));
+}
+
+static jint JHwRemoteBinder_hashCode(JNIEnv* env, jobject thiz) {
+    jlong longHash = reinterpret_cast<jlong>(
+            JHwRemoteBinder::GetNativeContext(env, thiz)->getBinder().get());
+    return static_cast<jint>(longHash ^ (longHash >> 32)); // See Long.hashCode()
+}
+
 static JNINativeMethod gMethods[] = {
     { "native_init", "()J", (void *)JHwRemoteBinder_native_init },
 
@@ -430,6 +469,11 @@ static JNINativeMethod gMethods[] = {
     {"unlinkToDeath",
         "(Landroid/os/IHwBinder$DeathRecipient;)Z",
         (void*)JHwRemoteBinder_unlinkToDeath},
+
+    {"equals", "(Ljava/lang/Object;)Z",
+        (void*)JHwRemoteBinder_equals},
+
+    {"hashCode", "()I", (void*)JHwRemoteBinder_hashCode},
 };
 
 namespace android {

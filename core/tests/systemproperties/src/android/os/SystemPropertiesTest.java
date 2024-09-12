@@ -16,15 +16,37 @@
 
 package android.os;
 
-import junit.framework.TestCase;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
-import android.os.SystemProperties;
-import android.test.suitebuilder.annotation.SmallTest;
+import android.platform.test.ravenwood.RavenwoodRule;
 
-public class SystemPropertiesTest extends TestCase {
+import androidx.test.filters.SmallTest;
+
+import org.junit.Rule;
+import org.junit.Test;
+
+import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+public class SystemPropertiesTest {
+    @Rule
+    public final RavenwoodRule mRavenwood = new RavenwoodRule.Builder()
+            .setSystemPropertyMutable(KEY, null)
+            .setSystemPropertyMutable(UNSET_KEY, null)
+            .setSystemPropertyMutable(PERSIST_KEY, null)
+            .build();
+
     private static final String KEY = "sys.testkey";
+    private static final String UNSET_KEY = "Aiw7woh6ie4toh7W";
     private static final String PERSIST_KEY = "persist.sys.testkey";
 
+    @Test
     @SmallTest
     public void testStressPersistPropertyConsistency() throws Exception {
         for (int i = 0; i < 100; ++i) {
@@ -34,6 +56,7 @@ public class SystemPropertiesTest extends TestCase {
         }
     }
 
+    @Test
     @SmallTest
     public void testStressMemoryPropertyConsistency() throws Exception {
         for (int i = 0; i < 100; ++i) {
@@ -43,6 +66,7 @@ public class SystemPropertiesTest extends TestCase {
         }
     }
 
+    @Test
     @SmallTest
     public void testProperties() throws Exception {
         String value;
@@ -89,6 +113,29 @@ public class SystemPropertiesTest extends TestCase {
       assertEquals(expected, value);
     }
 
+    @Test
+    @SmallTest
+    public void testHandle() throws Exception {
+        String value;
+        SystemProperties.Handle handle = SystemProperties.find("doesnotexist_2341431");
+        assertNull(handle);
+        SystemProperties.set(KEY, "abc");
+        handle = SystemProperties.find(KEY);
+        assertNotNull(handle);
+        value = handle.get();
+        assertEquals("abc", value);
+        SystemProperties.set(KEY, "blarg");
+        value = handle.get();
+        assertEquals("blarg", value);
+        SystemProperties.set(KEY, "1");
+        assertEquals(1, handle.getInt(-1));
+        assertEquals(1, handle.getLong(-1));
+        assertEquals(true, handle.getBoolean(false));
+        SystemProperties.set(KEY, "");
+        assertEquals(12345, handle.getInt(12345));
+    }
+
+    @Test
     @SmallTest
     public void testIntegralProperties() throws Exception {
         testInt("", 123, 123);
@@ -108,6 +155,17 @@ public class SystemPropertiesTest extends TestCase {
         testLong("-3147483647", 124, -3147483647L);
     }
 
+    @Test
+    @SmallTest
+    public void testUnset() throws Exception {
+        assertEquals("abc", SystemProperties.get(UNSET_KEY, "abc"));
+        assertEquals(true, SystemProperties.getBoolean(UNSET_KEY, true));
+        assertEquals(false, SystemProperties.getBoolean(UNSET_KEY, false));
+        assertEquals(5, SystemProperties.getInt(UNSET_KEY, 5));
+        assertEquals(-10, SystemProperties.getLong(UNSET_KEY, -10));
+    }
+
+    @Test
     @SmallTest
     @SuppressWarnings("null")
     public void testNullKey() throws Exception {
@@ -140,5 +198,72 @@ public class SystemPropertiesTest extends TestCase {
             fail("Expected NullPointerException");
         } catch (NullPointerException npe) {
         }
+    }
+
+    @Test
+    @SmallTest
+    public void testCallbacks() {
+        // Latches are not really necessary, but are easy to use.
+        final CountDownLatch wait1 = new CountDownLatch(1);
+        final CountDownLatch wait2 = new CountDownLatch(1);
+
+        Runnable r1 = new Runnable() {
+            boolean done = false;
+            @Override
+            public void run() {
+                if (done) {
+                    return;
+                }
+                done = true;
+
+                wait1.countDown();
+                throw new RuntimeException("test");
+            }
+        };
+
+        Runnable r2 = new Runnable() {
+            @Override
+            public void run() {
+                wait2.countDown();
+            }
+        };
+
+        SystemProperties.addChangeCallback(r1);
+        SystemProperties.addChangeCallback(r2);
+
+        SystemProperties.reportSyspropChanged();
+
+        try {
+            assertTrue(wait1.await(5, TimeUnit.SECONDS));
+        } catch (InterruptedException e) {
+            fail("InterruptedException");
+        }
+        try {
+            assertTrue(wait2.await(5, TimeUnit.SECONDS));
+        } catch (InterruptedException e) {
+            fail("InterruptedException");
+        }
+    }
+
+    @Test
+    @SmallTest
+    public void testDigestOf() {
+        final String empty = SystemProperties.digestOf();
+        final String finger = SystemProperties.digestOf("ro.build.fingerprint");
+        final String fingerBrand = SystemProperties.digestOf(
+                "ro.build.fingerprint", "ro.product.brand");
+        final String brandFinger = SystemProperties.digestOf(
+                "ro.product.brand", "ro.build.fingerprint");
+
+        // Shouldn't change over time
+        assertTrue(Objects.equals(finger, SystemProperties.digestOf("ro.build.fingerprint")));
+
+        // Different properties means different results
+        assertFalse(Objects.equals(empty, finger));
+        assertFalse(Objects.equals(empty, fingerBrand));
+        assertFalse(Objects.equals(finger, fingerBrand));
+
+        // Same properties means same result
+        assertTrue(Objects.equals(fingerBrand, brandFinger));
     }
 }

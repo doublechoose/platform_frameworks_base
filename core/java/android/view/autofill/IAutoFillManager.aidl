@@ -16,37 +16,55 @@
 
 package android.view.autofill;
 
+import java.util.List;
+
+import android.content.ComponentName;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.os.RemoteCallback;
 import android.service.autofill.FillEventHistory;
+import android.service.autofill.UserData;
 import android.view.autofill.AutofillId;
 import android.view.autofill.AutofillValue;
 import android.view.autofill.IAutoFillManagerClient;
+import com.android.internal.os.IResultReceiver;
 
 /**
  * Mediator between apps being auto-filled and auto-fill service implementations.
  *
  * {@hide}
  */
-interface IAutoFillManager {
+oneway interface IAutoFillManager {
     // Returns flags: FLAG_ADD_CLIENT_ENABLED | FLAG_ADD_CLIENT_DEBUG | FLAG_ADD_CLIENT_VERBOSE
-    int addClient(in IAutoFillManagerClient client, int userId);
-    int startSession(IBinder activityToken, in IBinder appCallback, in AutofillId autoFillId,
-            in Rect bounds, in AutofillValue value, int userId, boolean hasCallback, int flags,
-            String packageName);
-    FillEventHistory getFillEventHistory();
-    boolean restoreSession(int sessionId, in IBinder activityToken, in IBinder appCallback);
+    void addClient(in IAutoFillManagerClient client, in ComponentName componentName, int userId,
+        in IResultReceiver result, boolean credmanRequested);
+    void removeClient(in IAutoFillManagerClient client, int userId);
+    void startSession(IBinder activityToken, in IBinder appCallback, in AutofillId autoFillId,
+        in Rect bounds, in AutofillValue value, int userId, boolean hasCallback, int flags,
+        in ComponentName componentName, boolean compatMode, in IResultReceiver result);
+    void getFillEventHistory(in IResultReceiver result);
+    void restoreSession(int sessionId, in IBinder activityToken, in IBinder appCallback,
+        in IResultReceiver result);
     void updateSession(int sessionId, in AutofillId id, in Rect bounds,
-            in AutofillValue value, int action, int flags, int userId);
-    int updateOrRestartSession(IBinder activityToken, in IBinder appCallback,
-            in AutofillId autoFillId, in Rect bounds, in AutofillValue value, int userId,
-            boolean hasCallback, int flags, String packageName, int sessionId, int action);
-    void finishSession(int sessionId, int userId);
+        in AutofillValue value, int action, int flags, int userId);
+    void setAutofillFailure(int sessionId, in List<AutofillId> ids, int userId);
+    void setViewAutofilled(int sessionId, in AutofillId id, int userId);
+    void finishSession(int sessionId, int userId, int commitReason);
     void cancelSession(int sessionId, int userId);
     void setAuthenticationResult(in Bundle data, int sessionId, int authenticationId, int userId);
     void setHasCallback(int sessionId, int userId, boolean hasIt);
     void disableOwnedAutofillServices(int userId);
-    boolean isServiceSupported(int userId);
-    boolean isServiceEnabled(int userId, String packageName);
+    void isServiceSupported(int userId, in IResultReceiver result);
+    void isServiceEnabled(int userId, String packageName, in IResultReceiver result);
+    void onPendingSaveUi(int operation, IBinder token);
+    void getUserData(in IResultReceiver result);
+    void getUserDataId(in IResultReceiver result);
+    void setUserData(in UserData userData);
+    void isFieldClassificationEnabled(in IResultReceiver result);
+    void getAutofillServiceComponentName(in IResultReceiver result);
+    void getAvailableFieldClassificationAlgorithms(in IResultReceiver result);
+    void getDefaultFieldClassificationAlgorithm(in IResultReceiver result);
+    void setAugmentedAutofillWhitelist(in List<String> packages, in List<ComponentName> activities,
+        in IResultReceiver result);
 }

@@ -16,21 +16,22 @@
 
 #include "TestSceneBase.h"
 
+#include <SkBlendMode.h>
+
 class ShadowGridAnimation;
 
 static TestScene::Registrar _ShadowGrid(TestScene::Info{
-    "shadowgrid",
-    "A grid of rounded rects that cast a shadow. Simplified scenario of an "
-    "Android TV-style launcher interface. High CPU/GPU load.",
-    TestScene::simpleCreateScene<ShadowGridAnimation>
-});
+        "shadowgrid",
+        "A grid of rounded rects that cast a shadow. Simplified scenario of an "
+        "Android TV-style launcher interface. High CPU/GPU load.",
+        TestScene::simpleCreateScene<ShadowGridAnimation>});
 
 class ShadowGridAnimation : public TestScene {
 public:
-    std::vector< sp<RenderNode> > cards;
+    std::vector<sp<RenderNode> > cards;
     void createContent(int width, int height, Canvas& canvas) override {
         canvas.drawColor(0xFFFFFFFF, SkBlendMode::kSrcOver);
-        canvas.insertReorderBarrier(true);
+        canvas.enableZ(true);
 
         for (int x = dp(16); x < (width - dp(116)); x += dp(116)) {
             for (int y = dp(16); y < (height - dp(116)); y += dp(116)) {
@@ -40,7 +41,7 @@ public:
             }
         }
 
-        canvas.insertReorderBarrier(false);
+        canvas.enableZ(false);
     }
     void doFrame(int frameNr) override {
         int curFrame = frameNr % 150;
@@ -50,14 +51,16 @@ public:
             cards[ci]->setPropertyFieldsDirty(RenderNode::X | RenderNode::Y);
         }
     }
+
 private:
     sp<RenderNode> createCard(int x, int y, int width, int height) {
         return TestUtils::createNode(x, y, x + width, y + height,
-                [width, height](RenderProperties& props, Canvas& canvas) {
-            props.setElevation(dp(16));
-            props.mutableOutline().setRoundRect(0, 0, width, height, dp(6), 1);
-            props.mutableOutline().setShouldClip(true);
-            canvas.drawColor(0xFFEEEEEE, SkBlendMode::kSrcOver);
-        });
+                                     [width, height](RenderProperties& props, Canvas& canvas) {
+                                         props.setElevation(dp(16));
+                                         props.mutableOutline().setRoundRect(0, 0, width, height,
+                                                                             dp(6), 1);
+                                         props.mutableOutline().setShouldClip(true);
+                                         canvas.drawColor(0xFFEEEEEE, SkBlendMode::kSrcOver);
+                                     });
     }
 };

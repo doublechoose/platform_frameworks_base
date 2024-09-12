@@ -18,59 +18,88 @@
 
 #include "androidfw/StringPiece.h"
 
-using android::StringPiece;
+using ::aapt::text::Printer;
+using ::android::StringPiece;
 
 namespace aapt {
 
-void ClassMember::WriteToStream(const StringPiece& prefix, bool final, std::ostream* out) const {
-  processor_.WriteToStream(out, prefix);
+void ClassMember::Print(bool /*final*/, Printer* printer, bool strip_api_annotations) const {
+  processor_.Print(printer, strip_api_annotations);
 }
 
-void MethodDefinition::AppendStatement(const StringPiece& statement) {
-  statements_.push_back(statement.to_string());
+void MethodDefinition::AppendStatement(StringPiece statement) {
+  statements_.emplace_back(statement);
 }
 
-void MethodDefinition::WriteToStream(const StringPiece& prefix, bool final,
-                                     std::ostream* out) const {
-  *out << prefix << signature_ << " {\n";
+void MethodDefinition::Print(bool final, Printer* printer, bool) const {
+  printer->Print(signature_).Println(" {");
+  printer->Indent();
   for (const auto& statement : statements_) {
-    *out << prefix << "  " << statement << "\n";
+    printer->Println(statement);
   }
-  *out << prefix << "}";
+  printer->Undent();
+  printer->Print("}");
+}
+
+ClassDefinition::Result ClassDefinition::AddMember(std::unique_ptr<ClassMember> member) {
+  Result result = Result::kAdded;
+  auto iter = indexed_members_.find(member->GetName());
+  if (iter != indexed_members_.end()) {
+    // Overwrite the entry. Be careful, as the key in indexed_members_ is actually memory owned
+    // by the value at ordered_members_[index]. Since overwriting a value for a key doesn't replace
+    // the key (the initial key inserted into the unordered_map is kept), we must erase and then
+    // insert a new key, whose memory is being kept around. We do all this to avoid using more
+    // memory for each key.
+    size_t index = iter->second;
+
+    // Erase the key + value from the map.
+    indexed_members_.erase(iter);
+
+    // Now clear the memory that was backing the key (now erased).
+    ordered_members_[index].reset();
+    result = Result::kOverridden;
+  }
+
+  indexed_members_[member->GetName()] = ordered_members_.size();
+  ordered_members_.push_back(std::move(member));
+  return result;
 }
 
 bool ClassDefinition::empty() const {
-  for (const std::unique_ptr<ClassMember>& member : members_) {
-    if (!member->empty()) {
+  for (const std::unique_ptr<ClassMember>& member : ordered_members_) {
+    if (member != nullptr && !member->empty()) {
       return false;
     }
   }
   return true;
 }
 
-void ClassDefinition::WriteToStream(const StringPiece& prefix, bool final,
-                                    std::ostream* out) const {
-  if (members_.empty() && !create_if_empty_) {
+void ClassDefinition::Print(bool final, Printer* printer, bool strip_api_annotations) const {
+  if (empty() && !create_if_empty_) {
     return;
   }
 
-  ClassMember::WriteToStream(prefix, final, out);
+  ClassMember::Print(final,  printer, strip_api_annotations);
 
-  *out << prefix << "public ";
+  printer->Print("public ");
   if (qualifier_ == ClassQualifier::kStatic) {
-    *out << "static ";
+    printer->Print("static ");
   }
-  *out << "final class " << name_ << " {\n";
+  printer->Print("final class ").Print(name_).Println(" {");
+  printer->Indent();
 
-  std::string new_prefix = prefix.to_string();
-  new_prefix.append(kIndent);
-
-  for (const std::unique_ptr<ClassMember>& member : members_) {
-    member->WriteToStream(new_prefix, final, out);
-    *out << "\n";
+  for (const std::unique_ptr<ClassMember>& member : ordered_members_) {
+    // There can be nullptr members when a member is added to the ClassDefinition
+    // and takes precedence over a previous member with the same name. The overridden member is
+    // set to nullptr.
+    if (member != nullptr) {
+      member->Print(final, printer, strip_api_annotations);
+      printer->Println();
+    }
   }
 
-  *out << prefix << "}";
+  printer->Undent();
+  printer->Print("}");
 }
 
 constexpr static const char* sWarningHeader =
@@ -81,12 +110,12 @@ constexpr static const char* sWarningHeader =
     " * should not be modified by hand.\n"
     " */\n\n";
 
-bool ClassDefinition::WriteJavaFile(const ClassDefinition* def,
-                                    const StringPiece& package, bool final,
-                                    std::ostream* out) {
-  *out << sWarningHeader << "package " << package << ";\n\n";
-  def->WriteToStream("", final, out);
-  return bool(*out);
+void ClassDefinition::WriteJavaFile(const ClassDefinition* def, StringPiece package, bool final,
+                                    bool strip_api_annotations, android::OutputStream* out) {
+  Printer printer(out);
+  printer.Print(sWarningHeader).Print("package ").Print(package).Println(";");
+  printer.Println();
+  def->Print(final, &printer, strip_api_annotations);
 }
 
 }  // namespace aapt

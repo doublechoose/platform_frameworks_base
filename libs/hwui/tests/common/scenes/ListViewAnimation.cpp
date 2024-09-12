@@ -16,17 +16,27 @@
 
 #include "TestSceneBase.h"
 #include "tests/common/TestListViewSceneBase.h"
-
+#include "hwui/Paint.h"
+#include <SkBitmap.h>
+#include <SkCanvas.h>
+#include <SkColor.h>
+#include <SkFont.h>
+#include <SkFontTypes.h>
+#include <SkPaint.h>
+#include <SkPoint.h>
+#include <SkRect.h>
+#include <SkRefCnt.h>
+#include <SkScalar.h>
 #include <cstdio>
 
 class ListViewAnimation;
 
 static TestScene::Registrar _ListView(TestScene::Info{
-    "listview",
-    "A mock ListView of scrolling content. Doesn't re-bind/re-record views as they are recycled, so"
-    "won't upload much content (either glyphs, or bitmaps).",
-    TestScene::simpleCreateScene<ListViewAnimation>
-});
+        "listview",
+        "A mock ListView of scrolling content. Doesn't re-bind/re-record views as they are "
+        "recycled, so"
+        "won't upload much content (either glyphs, or bitmaps).",
+        TestScene::simpleCreateScene<ListViewAnimation>});
 
 class ListViewAnimation : public TestListViewSceneBase {
     sk_sp<Bitmap> createRandomCharIcon(int cardHeight) {
@@ -42,16 +52,17 @@ class ListViewAnimation : public TestListViewSceneBase {
         paint.setColor(randomColor);
         canvas.drawCircle(size / 2, size / 2, size / 2, paint);
 
-        bool bgDark = SkColorGetR(randomColor) + SkColorGetG(randomColor) + SkColorGetB(randomColor)
-                < 128 * 3;
+        bool bgDark =
+                SkColorGetR(randomColor) + SkColorGetG(randomColor) + SkColorGetB(randomColor) <
+                128 * 3;
         paint.setColor(bgDark ? Color::White : Color::Grey_700);
-        paint.setTextAlign(SkPaint::kCenter_Align);
-        paint.setTextSize(size / 2);
+
+        SkFont font = TestUtils::defaultFont();
+        font.setSize(size / 2);
         char charToShow = 'A' + (rand() % 26);
-        const SkPoint pos[] = {{
-                SkIntToScalar(size / 2),
-                /*approximate centering*/ SkFloatToScalar(size * 0.7f)}};
-        canvas.drawPosText(&charToShow, 1, pos, paint);
+        const SkPoint pos = {SkIntToScalar(size / 2),
+                                /*approximate centering*/ SkFloatToScalar(size * 0.7f)};
+        canvas.drawSimpleText(&charToShow, 1, SkTextEncoding::kUTF8, pos.fX, pos.fY, font, paint);
         return bitmap;
     }
 
@@ -72,27 +83,26 @@ class ListViewAnimation : public TestListViewSceneBase {
         return bitmap;
     }
 
-    void createListItem(RenderProperties& props, Canvas& canvas, int cardId,
-            int itemWidth, int itemHeight) override {
+    void createListItem(RenderProperties& props, Canvas& canvas, int cardId, int itemWidth,
+                        int itemHeight) override {
         static sk_sp<Bitmap> filledBox(createBoxBitmap(true));
         static sk_sp<Bitmap> strokedBox(createBoxBitmap(false));
         // TODO: switch to using round rect clipping, once merging correctly handles that
-        SkPaint roundRectPaint;
+        Paint roundRectPaint;
         roundRectPaint.setAntiAlias(true);
         roundRectPaint.setColor(Color::White);
         canvas.drawRoundRect(0, 0, itemWidth, itemHeight, dp(6), dp(6), roundRectPaint);
 
-        SkPaint textPaint;
-        textPaint.setTextEncoding(SkPaint::kGlyphID_TextEncoding);
+        Paint textPaint;
         textPaint.setColor(rand() % 2 ? Color::Black : Color::Grey_500);
-        textPaint.setTextSize(dp(20));
+        textPaint.getSkFont().setSize(dp(20));
         textPaint.setAntiAlias(true);
         char buf[256];
         snprintf(buf, sizeof(buf), "This card is #%d", cardId);
         TestUtils::drawUtf8ToCanvas(&canvas, buf, textPaint, itemHeight, dp(25));
-        textPaint.setTextSize(dp(15));
+        textPaint.getSkFont().setSize(dp(15));
         TestUtils::drawUtf8ToCanvas(&canvas, "This is some more text on the card", textPaint,
-                itemHeight, dp(45));
+                                    itemHeight, dp(45));
 
         auto randomIcon = createRandomCharIcon(itemHeight);
         canvas.drawBitmap(*randomIcon, dp(10), dp(10), nullptr);

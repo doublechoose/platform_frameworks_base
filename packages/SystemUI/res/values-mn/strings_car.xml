@@ -19,6 +19,10 @@
 
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="car_lockscreen_disclaimer_title" msgid="7997539137376896441">"Жолооны аюулгүй байдал"</string>
-    <string name="car_lockscreen_disclaimer_text" msgid="3061224684092952864">"Жолоодох нөхцөлийн талаар бүрэн ойлгож, холбогдох дүрэм журмыг мөрдөөрэй. Чиглэл нь тодорхой бус, гүйцэт бус, аюултай, тохиромжгүй, хориглосон эсвэл тусгай хамгаалалттай газар нутагт нэвтэрсэн байж болзошгүй. Бизнесийн мэдээлэл мөн адил тохиромжгүй эсвэл гүйцэт бус байна. Өгөгдөл нь тухайн цаг хугацааных биш учир байршлыг зөв тодорхойлсон эсэхийг батлах боломжгүй. Жолоодож байхдаа гар утсаа болон Android Автод зориулаагүй апп-г бүү ашиглаарай."</string>
+    <string name="car_guest" msgid="3738772168718508650">"Зочин"</string>
+    <string name="start_guest_session" msgid="7055742120180595689">"Зочин"</string>
+    <string name="car_add_user" msgid="5245196248349230898">"Хэрэглэгч нэмэх"</string>
+    <string name="car_new_user" msgid="8142927244990323906">"Шинэ хэрэглэгч"</string>
+    <string name="user_add_user_message_setup" msgid="1791011504259527329">"Таныг шинэ хэрэглэгч нэмэх үед тухайн хэрэглэгч хувийн орон зайгаа тохируулах шаардлагатай."</string>
+    <string name="user_add_user_message_update" msgid="3383320289232716179">"Бусад бүх хэрэглэгчийн аппыг дурын хэрэглэгч шинэчлэх боломжтой."</string>
 </resources>

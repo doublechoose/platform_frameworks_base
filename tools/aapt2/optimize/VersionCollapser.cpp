@@ -20,6 +20,9 @@
 #include <vector>
 
 #include "ResourceTable.h"
+#include "trace/TraceBuffer.h"
+
+using android::ConfigDescription;
 
 namespace aapt {
 
@@ -63,13 +66,11 @@ FilterIterator<Iterator, Pred> make_filter_iterator(Iterator begin,
 }
 
 /**
- * Every Configuration with an SDK version specified that is less than minSdk
- * will be removed.
- * The exception is when there is no exact matching resource for the minSdk. The
- * next smallest
- * one will be kept.
+ * Every Configuration with an SDK version specified that is less than minSdk will be removed. The
+ * exception is when there is no exact matching resource for the minSdk. The next smallest one will
+ * be kept.
  */
-static void CollapseVersions(int min_sdk, ResourceEntry* entry) {
+static void CollapseVersions(IAaptContext* context, int min_sdk, ResourceEntry* entry) {
   // First look for all sdks less than minSdk.
   for (auto iter = entry->values.rbegin(); iter != entry->values.rend();
        ++iter) {
@@ -80,11 +81,9 @@ static void CollapseVersions(int min_sdk, ResourceEntry* entry) {
 
     const ConfigDescription& config = (*iter)->config;
     if (config.sdkVersion <= min_sdk) {
-      // This is the first configuration we've found with a smaller or equal SDK
-      // level
-      // to the minimum. We MUST keep this one, but remove all others we find,
-      // which get
-      // overridden by this one.
+      // This is the first configuration we've found with a smaller or equal SDK level to the
+      // minimum. We MUST keep this one, but remove all others we find, which get overridden by this
+      // one.
 
       ConfigDescription config_without_sdk = config.CopyWithoutSdkVersion();
       auto pred = [&](const std::unique_ptr<ResourceConfigValue>& val) -> bool {
@@ -103,7 +102,14 @@ static void CollapseVersions(int min_sdk, ResourceEntry* entry) {
       auto filter_iter =
           make_filter_iterator(iter + 1, entry->values.rend(), pred);
       while (filter_iter.HasNext()) {
-        filter_iter.Next() = {};
+        auto& next = filter_iter.Next();
+        if (context->IsVerbose()) {
+          context->GetDiagnostics()->Note(android::DiagMessage()
+                                          << "removing configuration " << next->config.to_string()
+                                          << " for entry: " << entry->name
+                                          << ", because its SDK version is smaller than minSdk");
+        }
+        next = {};
       }
     }
   }
@@ -115,11 +121,9 @@ static void CollapseVersions(int min_sdk, ResourceEntry* entry) {
                          -> bool { return val == nullptr; }),
       entry->values.end());
 
-  // Strip the version qualifiers for every resource with version <= minSdk.
-  // This will ensure
-  // that the resource entries are all packed together in the same ResTable_type
-  // struct
-  // and take up less space in the resources.arsc table.
+  // Strip the version qualifiers for every resource with version <= minSdk. This will ensure that
+  // the resource entries are all packed together in the same ResTable_type struct and take up less
+  // space in the resources.arsc table.
   bool modified = false;
   for (std::unique_ptr<ResourceConfigValue>& config_value : entry->values) {
     if (config_value->config.sdkVersion != 0 &&
@@ -129,6 +133,12 @@ static void CollapseVersions(int min_sdk, ResourceEntry* entry) {
           util::make_unique<ResourceConfigValue>(
               config_value->config.CopyWithoutSdkVersion(),
               config_value->product);
+      if (context->IsVerbose()) {
+        context->GetDiagnostics()->Note(android::DiagMessage()
+                                        << "overriding resource: " << entry->name
+                                        << ", removing SDK version from configuration "
+                                        << config_value->config.to_string());
+      }
       new_value->value = std::move(config_value->value);
       config_value = std::move(new_value);
 
@@ -137,8 +147,8 @@ static void CollapseVersions(int min_sdk, ResourceEntry* entry) {
   }
 
   if (modified) {
-    // We've modified the keys (ConfigDescription) by changing the sdkVersion to
-    // 0. We MUST re-sort to ensure ordering guarantees hold.
+    // We've modified the keys (ConfigDescription) by changing the sdkVersion to 0. We MUST re-sort
+    // to ensure ordering guarantees hold.
     std::sort(entry->values.begin(), entry->values.end(),
               [](const std::unique_ptr<ResourceConfigValue>& a,
                  const std::unique_ptr<ResourceConfigValue>& b) -> bool {
@@ -148,11 +158,16 @@ static void CollapseVersions(int min_sdk, ResourceEntry* entry) {
 }
 
 bool VersionCollapser::Consume(IAaptContext* context, ResourceTable* table) {
+  TRACE_NAME("VersionCollapser::Consume");
   const int min_sdk = context->GetMinSdkVersion();
+  if (context->IsVerbose()) {
+    context->GetDiagnostics()->Note(android::DiagMessage()
+                                    << "Running VersionCollapser with minSdk = " << min_sdk);
+  }
   for (auto& package : table->packages) {
     for (auto& type : package->types) {
       for (auto& entry : type->entries) {
-        CollapseVersions(min_sdk, entry.get());
+        CollapseVersions(context, min_sdk, entry.get());
       }
     }
   }

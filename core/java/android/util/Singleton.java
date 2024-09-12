@@ -16,6 +16,8 @@
 
 package android.util;
 
+import android.compat.annotation.UnsupportedAppUsage;
+
 /**
  * Singleton helper class for lazily initialization.
  *
@@ -23,11 +25,19 @@ package android.util;
  *
  * @hide
  */
+@android.ravenwood.annotation.RavenwoodKeepWholeClass
 public abstract class Singleton<T> {
+
+    @UnsupportedAppUsage
+    public Singleton() {
+    }
+
+    @UnsupportedAppUsage
     private T mInstance;
 
     protected abstract T create();
 
+    @UnsupportedAppUsage
     public final T get() {
         synchronized (this) {
             if (mInstance == null) {

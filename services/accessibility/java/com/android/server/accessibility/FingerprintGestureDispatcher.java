@@ -17,6 +17,7 @@
 package com.android.server.accessibility;
 
 import android.accessibilityservice.FingerprintGestureController;
+import android.content.res.Resources;
 import android.hardware.fingerprint.IFingerprintClientActiveCallback;
 import android.hardware.fingerprint.IFingerprintService;
 import android.os.Binder;
@@ -32,6 +33,7 @@ import java.util.List;
 /**
  * Encapsulate fingerprint gesture logic
  */
+@SuppressWarnings("MissingPermissionAnnotation")
 public class FingerprintGestureDispatcher extends IFingerprintClientActiveCallback.Stub
         implements Handler.Callback{
     private static final int MSG_REGISTER = 1;
@@ -42,6 +44,7 @@ public class FingerprintGestureDispatcher extends IFingerprintClientActiveCallba
     private final Object mLock;
     private final IFingerprintService mFingerprintService;
     private final Handler mHandler;
+    private final boolean mHardwareSupportsGestures;
 
     // This field is ground truth for whether or not we are registered. Only write to it in handler.
     private boolean mRegisteredReadOnlyExceptInHandler;
@@ -50,8 +53,11 @@ public class FingerprintGestureDispatcher extends IFingerprintClientActiveCallba
      * @param fingerprintService The system's fingerprint service
      * @param lock A lock to use when managing internal state
      */
-    public FingerprintGestureDispatcher(IFingerprintService fingerprintService, Object lock) {
+    public FingerprintGestureDispatcher(IFingerprintService fingerprintService,
+            Resources resources, Object lock) {
         mFingerprintService = fingerprintService;
+        mHardwareSupportsGestures = resources.getBoolean(
+                com.android.internal.R.bool.config_fingerprintSupportsGestures);
         mLock = lock;
         mHandler = new Handler(this);
     }
@@ -61,9 +67,11 @@ public class FingerprintGestureDispatcher extends IFingerprintClientActiveCallba
      * @param lock A lock to use when managing internal state
      * @param handler A handler to use internally. Used for testing.
      */
-    public FingerprintGestureDispatcher(IFingerprintService fingerprintService, Object lock,
-            Handler handler) {
+    public FingerprintGestureDispatcher(IFingerprintService fingerprintService,
+            Resources resources, Object lock, Handler handler) {
         mFingerprintService = fingerprintService;
+        mHardwareSupportsGestures = resources.getBoolean(
+                com.android.internal.R.bool.config_fingerprintSupportsGestures);
         mLock = lock;
         mHandler = handler;
     }
@@ -74,6 +82,8 @@ public class FingerprintGestureDispatcher extends IFingerprintClientActiveCallba
      * @param clientList The list of potential clients.
      */
     public void updateClientList(List<? extends FingerprintGestureClient> clientList) {
+        if (!mHardwareSupportsGestures) return;
+
         synchronized (mLock) {
             mCapturingClients.clear();
             for (int i = 0; i < clientList.size(); i++) {
@@ -96,6 +106,8 @@ public class FingerprintGestureDispatcher extends IFingerprintClientActiveCallba
 
     @Override
     public void onClientActiveChanged(boolean nonGestureFingerprintClientActive) {
+        if (!mHardwareSupportsGestures) return;
+
         synchronized (mLock) {
             for (int i = 0; i < mCapturingClients.size(); i++) {
                 mCapturingClients.get(i).onFingerprintGestureDetectionActiveChanged(
@@ -105,7 +117,9 @@ public class FingerprintGestureDispatcher extends IFingerprintClientActiveCallba
     }
 
     public boolean isFingerprintGestureDetectionAvailable() {
-        long identity = Binder.clearCallingIdentity();
+        if (!mHardwareSupportsGestures) return false;
+
+        final long identity = Binder.clearCallingIdentity();
         try {
             return !mFingerprintService.isClientActive();
         } catch (RemoteException re) {
@@ -160,7 +174,7 @@ public class FingerprintGestureDispatcher extends IFingerprintClientActiveCallba
     @Override
     public boolean handleMessage(Message message) {
         if (message.what == MSG_REGISTER) {
-            long identity = Binder.clearCallingIdentity();
+            final long identity = Binder.clearCallingIdentity();
             try {
                 mFingerprintService.addClientActiveCallback(this);
                 mRegisteredReadOnlyExceptInHandler = true;
@@ -171,7 +185,7 @@ public class FingerprintGestureDispatcher extends IFingerprintClientActiveCallba
             }
             return false;
         } else if (message.what == MSG_UNREGISTER) {
-            long identity = Binder.clearCallingIdentity();
+            final long identity = Binder.clearCallingIdentity();
             try {
                 mFingerprintService.removeClientActiveCallback(this);
             } catch (RemoteException re) {

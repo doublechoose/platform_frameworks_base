@@ -17,14 +17,19 @@
 #ifndef LOADEDARSC_H_
 #define LOADEDARSC_H_
 
+#include <map>
 #include <memory>
 #include <set>
 #include <vector>
+#include <unordered_map>
+#include <unordered_set>
 
-#include "android-base/macros.h"
+#include <android-base/macros.h>
+#include <android-base/result.h>
 
 #include "androidfw/ByteBucketArray.h"
 #include "androidfw/Chunk.h"
+#include "androidfw/Idmap.h"
 #include "androidfw/ResourceTypes.h"
 #include "androidfw/Util.h"
 
@@ -40,91 +45,269 @@ class DynamicPackageEntry {
   int package_id = 0;
 };
 
-struct LoadedArscEntry {
-  // A pointer to the resource table entry for this resource.
-  // If the size of the entry is > sizeof(ResTable_entry), it can be cast to
-  // a ResTable_map_entry and processed as a bag/map.
-  const ResTable_entry* entry = nullptr;
+// TypeSpec is going to be immediately proceeded by
+// an array of Type structs, all in the same block of memory.
+struct TypeSpec {
+  struct TypeEntry {
+    incfs::verified_map_ptr<ResTable_type> type;
 
-  // The dynamic package ID map for the package from which this resource came from.
-  const DynamicRefTable* dynamic_ref_table = nullptr;
+    // Type configurations are accessed frequently when setting up an AssetManager and querying
+    // resources. Access this cached configuration to minimize page faults.
+    ResTable_config config;
+  };
 
-  // The string pool reference to the type's name. This uses a different string pool than
-  // the global string pool, but this is hidden from the caller.
-  StringPoolRef type_string_ref;
+  // Pointer to the mmapped data where flags are kept. Flags denote whether the resource entry is
+  // public and under which configurations it varies.
+  incfs::verified_map_ptr<ResTable_typeSpec> type_spec;
 
-  // The string pool reference to the entry's name. This uses a different string pool than
-  // the global string pool, but this is hidden from the caller.
-  StringPoolRef entry_string_ref;
+  std::vector<TypeEntry> type_entries;
+
+  base::expected<uint32_t, NullOrIOError> GetFlagsForEntryIndex(uint16_t entry_index) const {
+    if (entry_index >= dtohl(type_spec->entryCount)) {
+      return 0U;
+    }
+    const auto entry_flags_ptr = ((type_spec + 1).convert<uint32_t>() + entry_index);
+    if (!entry_flags_ptr) {
+      return base::unexpected(IOError::PAGES_MISSING);
+    }
+    return entry_flags_ptr.value();
+  }
 };
 
-struct TypeSpec;
-class LoadedArsc;
+// Flags that change the behavior of loaded packages.
+// Keep in sync with f/b/android/content/res/ApkAssets.java
+using package_property_t = uint32_t;
+enum : package_property_t {
+  // The package contains framework resource values specified by the system.
+  // This allows some functions to filter out this package when computing
+  // what configurations/resources are available.
+  PROPERTY_SYSTEM = 1U << 0U,
+
+  // The package is a shared library or has a package id of 7f and is loaded as a shared library by
+  // force.
+  PROPERTY_DYNAMIC = 1U << 1U,
+
+  // The package has been loaded dynamically using a ResourcesProvider.
+  PROPERTY_LOADER = 1U << 2U,
+
+  // The package is a RRO.
+  PROPERTY_OVERLAY = 1U << 3U,
+
+  // The apk assets is owned by the application running in this process and incremental crash
+  // protections for this APK must be disabled.
+  PROPERTY_DISABLE_INCREMENTAL_HARDENING = 1U << 4U,
+
+  // The apk assets only contain the overlayable declarations information.
+  PROPERTY_ONLY_OVERLAYABLES = 1U << 5U,
+
+  // Optimize the resource lookups by name via an in-memory lookup table.
+  PROPERTY_OPTIMIZE_NAME_LOOKUPS = 1U << 6U,
+};
+
+struct OverlayableInfo {
+  std::string_view name;
+  std::string_view actor;
+  uint32_t policy_flags;
+};
 
 class LoadedPackage {
-  friend class LoadedArsc;
-
  public:
-  bool FindEntry(uint8_t type_idx, uint16_t entry_idx, const ResTable_config& config,
-                 LoadedArscEntry* out_entry, ResTable_config* out_selected_config,
-                 uint32_t* out_flags) const;
+  class iterator {
+   public:
+    iterator& operator=(const iterator& rhs) {
+      loadedPackage_ = rhs.loadedPackage_;
+      typeIndex_ = rhs.typeIndex_;
+      entryIndex_ = rhs.entryIndex_;
+      return *this;
+    }
 
-  // Returns the string pool where type names are stored.
-  inline const ResStringPool* GetTypeStringPool() const { return &type_string_pool_; }
+    bool operator==(const iterator& rhs) const {
+      return loadedPackage_ == rhs.loadedPackage_ &&
+             typeIndex_ == rhs.typeIndex_ &&
+             entryIndex_ == rhs.entryIndex_;
+    }
 
-  // Returns the string pool where the names of resource entries are stored.
-  inline const ResStringPool* GetKeyStringPool() const { return &key_string_pool_; }
+    bool operator!=(const iterator& rhs) const {
+      return !(*this == rhs);
+    }
 
-  inline const std::string& GetPackageName() const { return package_name_; }
+    iterator operator++(int) {
+      size_t prevTypeIndex_ = typeIndex_;
+      size_t prevEntryIndex_ = entryIndex_;
+      operator++();
+      return iterator(loadedPackage_, prevTypeIndex_, prevEntryIndex_);
+    }
 
-  inline int GetPackageId() const { return package_id_; }
+    iterator& operator++();
 
-  // Returns true if this package is dynamic (shared library) and needs to have an ID assigned.
-  inline bool IsDynamic() const { return dynamic_; }
+    uint32_t operator*() const;
 
-  // Returns true if this package originates from a system provided resource.
-  inline bool IsSystem() const { return system_; }
+   private:
+    friend class LoadedPackage;
 
-  // Returns the map of package name to package ID used in this LoadedPackage. At runtime, a
-  // package could have been assigned a different package ID than what this LoadedPackage was
-  // compiled with. AssetManager rewrites the package IDs so that they are compatible at runtime.
-  inline const std::vector<DynamicPackageEntry>& GetDynamicPackageMap() const {
-    return dynamic_package_map_;
+    iterator(const LoadedPackage* lp, size_t ti, size_t ei);
+
+    const LoadedPackage* loadedPackage_;
+    size_t typeIndex_;
+    size_t entryIndex_;
+    const size_t typeIndexEnd_;  // STL style end, so one past the last element
+  };
+
+  iterator begin() const {
+    return iterator(this, 0, 0);
   }
 
-  // Populates a set of ResTable_config structs, possibly excluding configurations defined for
-  // the mipmap type.
-  void CollectConfigurations(bool exclude_mipmap, std::set<ResTable_config>* out_configs) const;
+  iterator end() const {
+    return iterator(this, resource_ids_.size() + 1, 0);
+  }
 
-  // Populates a set of strings representing locales.
-  // If `canonicalize` is set to true, each locale is transformed into its canonical format
-  // before being inserted into the set. This may cause some equivalent locales to de-dupe.
-  void CollectLocales(bool canonicalize, std::set<std::string>* out_locales) const;
+  static std::unique_ptr<const LoadedPackage> Load(const Chunk& chunk,
+                                                   package_property_t property_flags);
 
   // Finds the entry with the specified type name and entry name. The names are in UTF-16 because
   // the underlying ResStringPool API expects this. For now this is acceptable, but since
   // the default policy in AAPT2 is to build UTF-8 string pools, this needs to change.
   // Returns a partial resource ID, with the package ID left as 0x00. The caller is responsible
   // for patching the correct package ID to the resource ID.
-  uint32_t FindEntryByName(const std::u16string& type_name, const std::u16string& entry_name) const;
+  base::expected<uint32_t, NullOrIOError> FindEntryByName(const std::u16string& type_name,
+                                                          const std::u16string& entry_name) const;
+
+  static base::expected<incfs::verified_map_ptr<ResTable_entry>, NullOrIOError>
+      GetEntry(incfs::verified_map_ptr<ResTable_type> type_chunk, uint16_t entry_index);
+
+  static base::expected<uint32_t, NullOrIOError> GetEntryOffset(
+      incfs::verified_map_ptr<ResTable_type> type_chunk, uint16_t entry_index);
+
+  static base::expected<incfs::verified_map_ptr<ResTable_entry>, NullOrIOError>
+      GetEntryFromOffset(incfs::verified_map_ptr<ResTable_type> type_chunk, uint32_t offset);
+
+  // Returns the string pool where type names are stored.
+  const ResStringPool* GetTypeStringPool() const {
+    return &type_string_pool_;
+  }
+
+  // Returns the string pool where the names of resource entries are stored.
+  const ResStringPool* GetKeyStringPool() const {
+    return &key_string_pool_;
+  }
+
+  const std::string& GetPackageName() const {
+    return package_name_;
+  }
+
+  int GetPackageId() const {
+    return package_id_;
+  }
+
+  // Returns true if this package is dynamic (shared library) and needs to have an ID assigned.
+  bool IsDynamic() const {
+    return (property_flags_ & PROPERTY_DYNAMIC) != 0;
+  }
+
+  // Returns true if this package is a Runtime Resource Overlay.
+  bool IsOverlay() const {
+    return (property_flags_ & PROPERTY_OVERLAY) != 0;
+  }
+
+  // Returns true if this package originates from a system provided resource.
+  bool IsSystem() const {
+    return (property_flags_ & PROPERTY_SYSTEM) != 0;
+  }
+
+  // Returns true if this package is a custom loader and should behave like an overlay.
+  bool IsCustomLoader() const {
+    return (property_flags_ & PROPERTY_LOADER) != 0;
+  }
+
+  package_property_t GetPropertyFlags() const {
+    return property_flags_;
+  }
+
+  // Returns the map of package name to package ID used in this LoadedPackage. At runtime, a
+  // package could have been assigned a different package ID than what this LoadedPackage was
+  // compiled with. AssetManager rewrites the package IDs so that they are compatible at runtime.
+  const std::vector<DynamicPackageEntry>& GetDynamicPackageMap() const {
+    return dynamic_package_map_;
+  }
+
+  // Populates a set of ResTable_config structs, possibly excluding configurations defined for
+  // the mipmap type.
+  base::expected<std::monostate, IOError> CollectConfigurations(
+      bool exclude_mipmap, std::set<ResTable_config>* out_configs) const;
+
+  // Populates a set of strings representing locales.
+  // If `canonicalize` is set to true, each locale is transformed into its canonical format
+  // before being inserted into the set. This may cause some equivalent locales to de-dupe.
+  void CollectLocales(bool canonicalize, std::set<std::string>* out_locales) const;
+
+  // type_idx is TT - 1 from 0xPPTTEEEE.
+  inline const TypeSpec* GetTypeSpecByTypeIndex(uint8_t type_index) const {
+    // If the type IDs are offset in this package, we need to take that into account when searching
+    // for a type.
+    const auto& type_spec = type_specs_.find(type_index + 1 - type_id_offset_);
+    if (type_spec == type_specs_.end()) {
+      return nullptr;
+    }
+    return &type_spec->second;
+  }
+
+  template <typename Func>
+  void ForEachTypeSpec(Func f) const {
+    for (const auto& type_spec : type_specs_) {
+      f(type_spec.second, type_spec.first);
+    }
+  }
+
+  // Retrieves the overlayable properties of the specified resource. If the resource is not
+  // overlayable, this will return a null pointer.
+  const OverlayableInfo* GetOverlayableInfo(uint32_t resid) const {
+    for (const std::pair<OverlayableInfo, std::unordered_set<uint32_t>>& overlayable_info_ids
+        : overlayable_infos_) {
+      if (overlayable_info_ids.second.find(resid) != overlayable_info_ids.second.end()) {
+        return &overlayable_info_ids.first;
+      }
+    }
+    return nullptr;
+  }
+
+  // Retrieves whether or not the package defines overlayable resources.
+  // TODO(123905379): Remove this when the enforcement of overlayable is turned on for all APK and
+  // not just those that defined overlayable resources.
+  bool DefinesOverlayable() const {
+    return defines_overlayable_;
+  }
+
+  const std::unordered_map<std::string, std::string>& GetOverlayableMap() const {
+    return overlayable_map_;
+  }
+
+  const std::vector<std::pair<uint32_t, uint32_t>>& GetAliasResourceIdMap() const {
+    return alias_id_map_;
+  }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(LoadedPackage);
 
-  static std::unique_ptr<LoadedPackage> Load(const Chunk& chunk);
-
-  LoadedPackage() = default;
+  explicit LoadedPackage(bool optimize_name_lookups = false)
+      : type_string_pool_(optimize_name_lookups), key_string_pool_(optimize_name_lookups) {
+  }
 
   ResStringPool type_string_pool_;
   ResStringPool key_string_pool_;
   std::string package_name_;
+  bool defines_overlayable_ = false;
   int package_id_ = -1;
   int type_id_offset_ = 0;
-  bool dynamic_ = false;
-  bool system_ = false;
+  package_property_t property_flags_ = 0U;
 
-  ByteBucketArray<util::unique_cptr<TypeSpec>> type_specs_;
+  std::unordered_map<uint8_t, TypeSpec> type_specs_;
+  ByteBucketArray<uint32_t> resource_ids_;
   std::vector<DynamicPackageEntry> dynamic_package_map_;
+  std::vector<std::pair<OverlayableInfo, std::unordered_set<uint32_t>>> overlayable_infos_;
+  std::vector<std::pair<uint32_t, uint32_t>> alias_id_map_;
+
+  // A map of overlayable name to actor
+  std::unordered_map<std::string, std::string> overlayable_map_;
 };
 
 // Read-only view into a resource table. This class validates all data
@@ -133,31 +316,26 @@ class LoadedArsc {
  public:
   // Load a resource table from memory pointed to by `data` of size `len`.
   // The lifetime of `data` must out-live the LoadedArsc returned from this method.
-  // If `system` is set to true, the LoadedArsc is considered as a system provided resource.
-  // If `load_as_shared_library` is set to true, the application package (0x7f) is treated
-  // as a shared library (0x00). When loaded into an AssetManager, the package will be assigned an
-  // ID.
-  static std::unique_ptr<const LoadedArsc> Load(const void* data, size_t len, bool system = false,
-                                                bool load_as_shared_library = false);
 
-  ~LoadedArsc();
+  static std::unique_ptr<LoadedArsc> Load(incfs::map_ptr<void> data,
+                                          size_t length,
+                                          const LoadedIdmap* loaded_idmap = nullptr,
+                                          package_property_t property_flags = 0U);
+
+  static std::unique_ptr<LoadedArsc> Load(const LoadedIdmap* loaded_idmap = nullptr);
+
+  // Create an empty LoadedArsc. This is used when an APK has no resources.arsc.
+  static std::unique_ptr<LoadedArsc> CreateEmpty();
 
   // Returns the string pool where all string resource values
   // (Res_value::dataType == Res_value::TYPE_STRING) are indexed.
-  inline const ResStringPool* GetStringPool() const { return &global_string_pool_; }
+  inline const ResStringPool* GetStringPool() const {
+    return global_string_pool_.get();
+  }
 
-  // Finds the resource with ID `resid` with the best value for configuration `config`.
-  // The parameter `out_entry` will be filled with the resulting resource entry.
-  // The resource entry can be a simple entry (ResTable_entry) or a complex bag
-  // (ResTable_entry_map).
-  bool FindEntry(uint32_t resid, const ResTable_config& config, LoadedArscEntry* out_entry,
-                 ResTable_config* selected_config, uint32_t* out_flags) const;
-
-  // Gets a pointer to the name of the package in `resid`, or nullptr if the package doesn't exist.
-  const LoadedPackage* GetPackageForId(uint32_t resid) const;
-
-  // Returns true if this is a system provided resource.
-  inline bool IsSystem() const { return system_; }
+  // Gets a pointer to the package with the specified package ID, or nullptr if no such package
+  // exists.
+  const LoadedPackage* GetPackageById(uint8_t package_id) const;
 
   // Returns a vector of LoadedPackage pointers, representing the packages in this LoadedArsc.
   inline const std::vector<std::unique_ptr<const LoadedPackage>>& GetPackages() const {
@@ -168,11 +346,12 @@ class LoadedArsc {
   DISALLOW_COPY_AND_ASSIGN(LoadedArsc);
 
   LoadedArsc() = default;
-  bool LoadTable(const Chunk& chunk, bool load_as_shared_library);
+  bool LoadTable(
+      const Chunk& chunk, const LoadedIdmap* loaded_idmap, package_property_t property_flags);
+  bool LoadStringPool(const LoadedIdmap* loaded_idmap);
 
-  ResStringPool global_string_pool_;
+  std::unique_ptr<ResStringPool> global_string_pool_ = util::make_unique<ResStringPool>();
   std::vector<std::unique_ptr<const LoadedPackage>> packages_;
-  bool system_ = false;
 };
 
 }  // namespace android

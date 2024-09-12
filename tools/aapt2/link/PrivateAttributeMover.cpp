@@ -57,12 +57,12 @@ OutputIterator move_if(InputContainer& input_container, OutputIterator result, P
 
 bool PrivateAttributeMover::Consume(IAaptContext* context, ResourceTable* table) {
   for (auto& package : table->packages) {
-    ResourceTableType* type = package->FindType(ResourceType::kAttr);
+    ResourceTableType* type = package->FindTypeWithDefaultName(ResourceType::kAttr);
     if (!type) {
       continue;
     }
 
-    if (type->symbol_status.state != SymbolState::kPublic) {
+    if (type->visibility_level != Visibility::Level::kPublic) {
       // No public attributes, so we can safely leave these private attributes
       // where they are.
       continue;
@@ -72,7 +72,7 @@ bool PrivateAttributeMover::Consume(IAaptContext* context, ResourceTable* table)
 
     move_if(type->entries, std::back_inserter(private_attr_entries),
             [](const std::unique_ptr<ResourceEntry>& entry) -> bool {
-              return entry->symbol_status.state != SymbolState::kPublic;
+              return entry->visibility.level != Visibility::Level::kPublic;
             });
 
     if (private_attr_entries.empty()) {
@@ -80,7 +80,8 @@ bool PrivateAttributeMover::Consume(IAaptContext* context, ResourceTable* table)
       continue;
     }
 
-    ResourceTableType* priv_attr_type = package->FindOrCreateType(ResourceType::kAttrPrivate);
+    auto attr_private_type = ResourceNamedTypeWithDefaultName(ResourceType::kAttrPrivate);
+    ResourceTableType* priv_attr_type = package->FindOrCreateType(attr_private_type);
     CHECK(priv_attr_type->entries.empty());
     priv_attr_type->entries = std::move(private_attr_entries);
   }

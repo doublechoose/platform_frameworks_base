@@ -59,7 +59,7 @@ public class AppCollector {
      * @param volume Volume to check for apps.
      */
     public AppCollector(Context context, @NonNull VolumeInfo volume) {
-        Preconditions.checkNotNull(volume);
+        Objects.requireNonNull(volume);
 
         mBackgroundHandler = new BackgroundHandler(BackgroundThread.get().getLooper(),
                 volume,
@@ -135,7 +135,7 @@ public class AppCollector {
                                 PackageStats packageStats = new PackageStats(app.packageName,
                                         user.id);
                                 packageStats.cacheSize = storageStats.getCacheBytes();
-                                packageStats.codeSize = storageStats.getCodeBytes();
+                                packageStats.codeSize = storageStats.getAppBytes();
                                 packageStats.dataSize = storageStats.getDataBytes();
                                 stats.add(packageStats);
                             } catch (NameNotFoundException | IOException e) {

@@ -502,10 +502,28 @@ public abstract class TextToSpeechService extends Service {
             return mCurrentSpeechItem;
         }
 
-        private synchronized SpeechItem setCurrentSpeechItem(SpeechItem speechItem) {
-            SpeechItem old = mCurrentSpeechItem;
+        private synchronized boolean setCurrentSpeechItem(SpeechItem speechItem) {
+            // Do not set as current if the item has already been flushed. The check is
+            // intentionally put inside this synchronized method. Specifically, the following
+            // racy sequence between this method and stopForApp() needs to be avoided.
+            //        (this method)          (stopForApp)
+            //     1. isFlushed
+            //     2.                        startFlushingSpeechItems
+            //     3.                        maybeRemoveCurrentSpeechItem
+            //     4. set mCurrentSpeechItem
+            // If it happens, stop() is never called on the item. The guard by synchornized(this)
+            // ensures that the step 3 cannot interrupt between 1 and 4.
+            if (speechItem != null && isFlushed(speechItem)) {
+                return false;
+            }
             mCurrentSpeechItem = speechItem;
-            return old;
+            return true;
+        }
+
+        private synchronized SpeechItem removeCurrentSpeechItem() {
+            SpeechItem current = mCurrentSpeechItem;
+            mCurrentSpeechItem = null;
+            return current;
         }
 
         private synchronized SpeechItem maybeRemoveCurrentSpeechItem(Object callerIdentity) {
@@ -527,7 +545,7 @@ public abstract class TextToSpeechService extends Service {
             // Don't process any more speech items
             getLooper().quit();
             // Stop the current speech item
-            SpeechItem current = setCurrentSpeechItem(null);
+            SpeechItem current = removeCurrentSpeechItem();
             if (current != null) {
                 current.stop();
             }
@@ -561,12 +579,12 @@ public abstract class TextToSpeechService extends Service {
             Runnable runnable = new Runnable() {
                 @Override
                 public void run() {
-                    if (isFlushed(speechItem)) {
-                        speechItem.stop();
-                    } else {
-                        setCurrentSpeechItem(speechItem);
+                    if (setCurrentSpeechItem(speechItem)) {
                         speechItem.play();
-                        setCurrentSpeechItem(null);
+                        removeCurrentSpeechItem();
+                    } else {
+                        // The item is alreadly flushed. Stopping.
+                        speechItem.stop();
                     }
                 }
             };
@@ -600,7 +618,8 @@ public abstract class TextToSpeechService extends Service {
                 return TextToSpeech.ERROR;
             }
 
-            // Flush pending messages from callerIdentity
+            // Flush pending messages from callerIdentity.
+            // See setCurrentSpeechItem on a subtlety around a race condition.
             startFlushingSpeechItems(callerIdentity);
 
             // This stops writing data to the file / or publishing
@@ -634,7 +653,7 @@ public abstract class TextToSpeechService extends Service {
             startFlushingSpeechItems(null);
 
             // Stop the current speech item unconditionally .
-            SpeechItem current = setCurrentSpeechItem(null);
+            SpeechItem current = removeCurrentSpeechItem();
             if (current != null) {
                 current.stop();
             }
@@ -723,7 +742,7 @@ public abstract class TextToSpeechService extends Service {
 
             AudioAttributes audioAttributes =
                     (AudioAttributes) paramsBundle.getParcelable(
-                            Engine.KEY_PARAM_AUDIO_ATTRIBUTES);
+                            Engine.KEY_PARAM_AUDIO_ATTRIBUTES, android.media.AudioAttributes.class);
             if (audioAttributes == null) {
                 int streamType = paramsBundle.getInt(
                         Engine.KEY_PARAM_STREAM, Engine.DEFAULT_STREAM);
@@ -990,7 +1009,7 @@ public abstract class TextToSpeechService extends Service {
                 Log.e(TAG, "null synthesis text");
                 return false;
             }
-            if (mText.length() >= TextToSpeech.getMaxSpeechInputLength()) {
+            if (mText.length() > TextToSpeech.getMaxSpeechInputLength()) {
                 Log.w(TAG, "Text too long: " + mText.length() + " chars");
                 return false;
             }
@@ -1093,7 +1112,6 @@ public abstract class TextToSpeechService extends Service {
 
         @Override
         protected void playImpl() {
-            dispatchOnStart();
             super.playImpl();
             try {
               mFileOutputStream.close();
@@ -1241,6 +1259,7 @@ public abstract class TextToSpeechService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         if (TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE.equals(intent.getAction())) {
+            Binder.allowBlocking(mBinder.asBinder());
             return mBinder;
         }
         return null;
@@ -1591,7 +1610,7 @@ public abstract class TextToSpeechService extends Service {
             synchronized (mCallerToCallback) {
                 mCallerToCallback.remove(caller);
             }
-            //mSynthHandler.stopForApp(caller);
+            mSynthHandler.stopForApp(caller);
         }
 
         @Override

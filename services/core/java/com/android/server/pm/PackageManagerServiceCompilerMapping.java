@@ -18,6 +18,8 @@ package com.android.server.pm;
 
 import android.os.SystemProperties;
 
+import com.android.server.art.model.DexoptParams;
+
 import dalvik.system.DexFile;
 
 /**
@@ -25,14 +27,34 @@ import dalvik.system.DexFile;
  */
 public class PackageManagerServiceCompilerMapping {
     // Names for compilation reasons.
-    static final String REASON_STRINGS[] = {
-            "first-boot", "boot", "install", "bg-dexopt", "ab-ota"
+    public static final String REASON_STRINGS[] = {
+        "first-boot",
+        "boot-after-ota",
+        "post-boot",
+        "install",
+        "install-fast",
+        "install-bulk",
+        "install-bulk-secondary",
+        "install-bulk-downgraded",
+        "install-bulk-secondary-downgraded",
+        "bg-dexopt",
+        "ab-ota",
+        "inactive",
+        "cmdline",
+        "boot-after-mainline-update",
+        // "shared" must be the last entry
+        "shared"
     };
+
+    static final int REASON_SHARED_INDEX = REASON_STRINGS.length - 1;
 
     // Static block to ensure the strings array is of the right length.
     static {
         if (PackageManagerService.REASON_LAST + 1 != REASON_STRINGS.length) {
             throw new IllegalStateException("REASON_STRINGS not correct");
+        }
+        if (!"shared".equals(REASON_STRINGS[REASON_SHARED_INDEX])) {
+            throw new IllegalStateException("REASON_STRINGS not correct because of shared index");
         }
     }
 
@@ -48,13 +70,21 @@ public class PackageManagerServiceCompilerMapping {
     // exception in case the reason or value are invalid.
     private static String getAndCheckValidity(int reason) {
         String sysPropValue = SystemProperties.get(getSystemPropertyName(reason));
-        if (sysPropValue == null || sysPropValue.isEmpty() ||
-                !DexFile.isValidCompilerFilter(sysPropValue)) {
+        if (sysPropValue == null || sysPropValue.isEmpty()
+                || !(sysPropValue.equals(DexoptParams.COMPILER_FILTER_NOOP)
+                        || DexFile.isValidCompilerFilter(sysPropValue))) {
             throw new IllegalStateException("Value \"" + sysPropValue +"\" not valid "
+                    + "(reason " + REASON_STRINGS[reason] + ")");
+        } else if (!isFilterAllowedForReason(reason, sysPropValue)) {
+            throw new IllegalStateException("Value \"" + sysPropValue +"\" not allowed "
                     + "(reason " + REASON_STRINGS[reason] + ")");
         }
 
         return sysPropValue;
+    }
+
+    private static boolean isFilterAllowedForReason(int reason, String filter) {
+        return reason != REASON_SHARED_INDEX || !DexFile.isProfileGuidedCompilerFilter(filter);
     }
 
     // Check that the properties are set and valid.
@@ -110,5 +140,12 @@ public class PackageManagerServiceCompilerMapping {
         }
 
         return value;
+    }
+
+    public static String getReasonName(int reason) {
+        if (reason < 0 || reason >= REASON_STRINGS.length) {
+            throw new IllegalArgumentException("reason " + reason + " invalid");
+        }
+        return REASON_STRINGS[reason];
     }
 }

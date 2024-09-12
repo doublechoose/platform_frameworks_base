@@ -17,16 +17,18 @@
 #ifndef _ANDROID_MEDIA_MEDIAMETRICSJNI_H_
 #define _ANDROID_MEDIA_MEDIAMETRICSJNI_H_
 
-#include <android_runtime/AndroidRuntime.h>
 #include <jni.h>
-#include <JNIHelp.h>
-#include <media/MediaAnalyticsItem.h>
+#include <nativehelper/JNIHelp.h>
+#include <media/MediaMetricsItem.h>
+#include <binder/PersistableBundle.h>
 
+// Copeid from core/jni/ (libandroid_runtime.so)
 namespace android {
 
 class MediaMetricsJNI {
 public:
-    static jobject writeMetricsToBundle(JNIEnv* env, MediaAnalyticsItem *item, jobject mybundle);
+    static jobject writeMetricsToBundle(JNIEnv* env, mediametrics::Item *item, jobject mybundle);
+    static jobject nativeToJavaPersistableBundle(JNIEnv*, os::PersistableBundle*);
 };
 
 };  // namespace android

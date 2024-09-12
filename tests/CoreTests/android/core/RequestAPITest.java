@@ -19,10 +19,10 @@ package android.core;
 import android.net.http.RequestHandle;
 import android.net.http.RequestQueue;
 import android.test.AndroidTestCase;
-import android.test.suitebuilder.annotation.Suppress;
 import android.util.Log;
 import android.webkit.CookieSyncManager;
-import com.google.android.collect.Maps;
+
+import androidx.test.filters.Suppress;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
@@ -87,7 +87,7 @@ public class RequestAPITest extends AndroidTestCase implements HttpConstants {
          * header is attempted to be set
          */
         Log.d(LOGTAG, "testRequestAddNullHeader start ");
-        Map<String, String> headers = Maps.newHashMap();
+        Map<String, String> headers = new HashMap<>();
         headers.put(null, null);
         verifyFailure(headers);
         Log.d(LOGTAG, "testRequestAddNullHeader - returning");
@@ -99,7 +99,7 @@ public class RequestAPITest extends AndroidTestCase implements HttpConstants {
          * value is attempted to be set
          */
         Log.d(LOGTAG, "testRequestAddNullValue start ");
-        Map<String, String> headers = Maps.newHashMap();
+        Map<String, String> headers = new HashMap<>();
         headers.put("TestHeader", null);
         verifyFailure(headers);
         Log.d(LOGTAG, "testRequestAddNullValue - returning");
@@ -111,7 +111,7 @@ public class RequestAPITest extends AndroidTestCase implements HttpConstants {
          * header is attempted to be set
          */
         Log.d(LOGTAG, "testRequestAddEmptyValue start ");
-        Map<String, String> headers = Maps.newHashMap();
+        Map<String, String> headers = new HashMap<>();
         headers.put("TestHeader", "");
         verifyFailure(headers);
         Log.d(LOGTAG, "testRequestAddEmptyValue - returning");
@@ -131,7 +131,7 @@ public class RequestAPITest extends AndroidTestCase implements HttpConstants {
          * generating and exception
          */
         Log.d(LOGTAG, "testRequestAddHeader start ");
-        Map<String, String> headers = Maps.newHashMap();
+        Map<String, String> headers = new HashMap<>();
         headers.put("TestHeader", "RequestAddHeader");
         verifySuccess(headers);
         Log.d(LOGTAG, "testRequestAddHeader - returning");
@@ -143,7 +143,7 @@ public class RequestAPITest extends AndroidTestCase implements HttpConstants {
          * can be set without generating and exception
          */
         Log.d(LOGTAG, "testRequestAddMultiHeader start ");
-        Map<String, String> headers = Maps.newHashMap();
+        Map<String, String> headers = new HashMap<>();
         headers.put("TestHeader", "RequestAddMultiHeader");
         headers.put("TestHeader2", "RequestAddMultiHeader");
         headers.put("TestHeader3", "RequestAddMultiHeader");
@@ -157,7 +157,7 @@ public class RequestAPITest extends AndroidTestCase implements HttpConstants {
          * and values can be set without generating and exception
          */
         Log.d(LOGTAG, "testRequestAddSameHeader start ");
-        Map<String, String> headers = Maps.newHashMap();
+        Map<String, String> headers = new HashMap<>();
         headers.put("TestHeader", "RequestAddSameHeader");
         headers.put("TestHeader", "RequestAddSameHeader");
         headers.put("TestHeader", "RequestAddSameHeader");

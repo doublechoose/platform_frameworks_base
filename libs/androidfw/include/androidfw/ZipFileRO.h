@@ -30,18 +30,24 @@
 #ifndef __LIBS_ZIPFILERO_H
 #define __LIBS_ZIPFILERO_H
 
-#include <utils/Compat.h>
-#include <utils/Errors.h>
-#include <utils/FileMap.h>
-#include <utils/threads.h>
-
+#include <optional>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
 
-typedef void* ZipArchiveHandle;
+#include <android-base/expected.h>
+
+#include <util/map_ptr.h>
+
+#include <utils/Compat.h>
+#include <utils/Errors.h>
+#include <utils/FileMap.h>
+#include <utils/threads.h>
+
+struct ZipArchive;
+typedef ZipArchive* ZipArchiveHandle;
 
 namespace android {
 
@@ -80,6 +86,12 @@ public:
     static ZipFileRO* open(const char* zipFileName);
 
     /*
+     * Open an archive from an already open file descriptor.
+     */
+    static ZipFileRO* openFd(int fd, const char* debugFileName,
+        bool assume_ownership = true);
+
+    /*
      * Find an entry, by name.  Returns the entry identifier, or NULL if
      * not found.
      */
@@ -92,12 +104,23 @@ public:
      */
     bool startIteration(void** cookie);
     bool startIteration(void** cookie, const char* prefix, const char* suffix);
+    /*
+     * Same as above, but returns the error code in case of failure.
+     * #see libziparchive/zip_error.h.
+     */
+    base::expected<void*, int32_t> startIterationOrError(const char* prefix, const char* suffix);
 
     /**
      * Return the next entry in iteration order, or NULL if there are no more
      * entries in this archive.
      */
     ZipEntryRO nextEntry(void* cookie);
+
+    /**
+     * Same as above, but returns the error code in case of failure.
+     * #see libziparchive/zip_error.h.
+     */
+    base::expected<ZipEntryRO, int32_t> nextEntryOrError(void* cookie);
 
     void endIteration(void* cookie);
 
@@ -124,17 +147,29 @@ public:
      * Returns "false" if "entry" is bogus or if the data in the Zip file
      * appears to be bad.
      */
-    bool getEntryInfo(ZipEntryRO entry, uint16_t* pMethod, uint32_t* pUncompLen,
-        uint32_t* pCompLen, off64_t* pOffset, uint32_t* pModWhen,
-        uint32_t* pCrc32) const;
+    bool getEntryInfo(ZipEntryRO entry, uint16_t* pMethod,
+        uint32_t* pUncompLen, uint32_t* pCompLen, off64_t* pOffset,
+        uint32_t* pModWhen, uint32_t* pCrc32, uint16_t* pExtraFieldSize) const;
 
     /*
-     * Create a new FileMap object that maps a subset of the archive.  For
+     * Create a new FileMap object that maps a subset of the archive. For
      * an uncompressed entry this effectively provides a pointer to the
      * actual data, for a compressed entry this provides the input buffer
      * for inflate().
+     *
+     * Use this function if the archive can never reside on IncFs.
      */
     FileMap* createEntryFileMap(ZipEntryRO entry) const;
+
+    /*
+     * Create a new incfs::IncFsFileMap object that maps a subset of the archive. For
+     * an uncompressed entry this effectively provides a pointer to the
+     * actual data, for a compressed entry this provides the input buffer
+     * for inflate().
+     *
+     * Use this function if the archive can potentially reside on IncFs.
+     */
+    std::optional<incfs::IncFsFileMap> createEntryIncFsFileMap(ZipEntryRO entry) const;
 
     /*
      * Uncompress the data into a buffer.  Depending on the compression
@@ -151,6 +186,8 @@ public:
      * Uncompress the data to an open file descriptor.
      */
     bool uncompressEntry(ZipEntryRO entry, int fd) const;
+
+    const char* getZipFileName();
 
     ~ZipFileRO();
 

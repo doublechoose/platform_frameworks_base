@@ -16,39 +16,32 @@
 
 package com.android.systemui.doze;
 
-import android.support.annotation.VisibleForTesting;
 import android.view.Display;
 
+import androidx.annotation.VisibleForTesting;
+
 import com.android.systemui.statusbar.phone.DozeParameters;
+
+import java.util.concurrent.Executor;
 
 /**
  * Prevents usage of doze screen states on devices that don't support them.
  */
-public class DozeScreenStatePreventingAdapter implements DozeMachine.Service {
-
-    private final DozeMachine.Service mInner;
+public class DozeScreenStatePreventingAdapter extends DozeMachine.Service.Delegate {
 
     @VisibleForTesting
-    DozeScreenStatePreventingAdapter(DozeMachine.Service inner) {
-        mInner = inner;
-    }
-
-    @Override
-    public void finish() {
-        mInner.finish();
+    DozeScreenStatePreventingAdapter(DozeMachine.Service inner, Executor bgExecutor) {
+        super(inner, bgExecutor);
     }
 
     @Override
     public void setDozeScreenState(int state) {
-        if (state == Display.STATE_DOZE || state == Display.STATE_DOZE_SUSPEND) {
+        if (state == Display.STATE_DOZE) {
             state = Display.STATE_ON;
+        } else if (state == Display.STATE_DOZE_SUSPEND) {
+            state = Display.STATE_ON_SUSPEND;
         }
-        mInner.setDozeScreenState(state);
-    }
-
-    @Override
-    public void requestWakeUp() {
-        mInner.requestWakeUp();
+        super.setDozeScreenState(state);
     }
 
     /**
@@ -56,8 +49,8 @@ public class DozeScreenStatePreventingAdapter implements DozeMachine.Service {
      * return a new instance of {@link DozeScreenStatePreventingAdapter} wrapping {@code inner}.
      */
     public static DozeMachine.Service wrapIfNeeded(DozeMachine.Service inner,
-            DozeParameters params) {
-        return isNeeded(params) ? new DozeScreenStatePreventingAdapter(inner) : inner;
+            DozeParameters params, Executor bgExecutor) {
+        return isNeeded(params) ? new DozeScreenStatePreventingAdapter(inner, bgExecutor) : inner;
     }
 
     private static boolean isNeeded(DozeParameters params) {

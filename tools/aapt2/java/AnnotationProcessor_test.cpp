@@ -16,7 +16,15 @@
 
 #include "java/AnnotationProcessor.h"
 
+#include "io/StringStream.h"
 #include "test/Test.h"
+#include "text/Printer.h"
+
+using ::aapt::io::StringOutputStream;
+using ::aapt::text::Printer;
+using ::testing::Eq;
+using ::testing::HasSubstr;
+using ::testing::Not;
 
 namespace aapt {
 
@@ -29,25 +37,135 @@ TEST(AnnotationProcessorTest, EmitsDeprecated) {
   AnnotationProcessor processor;
   processor.AppendComment(comment);
 
-  std::stringstream result;
-  processor.WriteToStream(&result, "");
-  std::string annotations = result.str();
+  std::string annotations;
+  StringOutputStream out(&annotations);
+  Printer printer(&out);
+  processor.Print(&printer);
+  out.Flush();
 
-  EXPECT_NE(std::string::npos, annotations.find("@Deprecated"));
+  EXPECT_THAT(annotations, HasSubstr("@Deprecated"));
 }
 
 TEST(AnnotationProcessorTest, EmitsSystemApiAnnotationAndRemovesFromComment) {
   AnnotationProcessor processor;
   processor.AppendComment("@SystemApi This is a system API");
 
-  std::stringstream result;
-  processor.WriteToStream(&result, "");
-  std::string annotations = result.str();
+  std::string annotations;
+  StringOutputStream out(&annotations);
+  Printer printer(&out);
+  processor.Print(&printer);
+  out.Flush();
 
-  EXPECT_NE(std::string::npos,
-            annotations.find("@android.annotation.SystemApi"));
-  EXPECT_EQ(std::string::npos, annotations.find("@SystemApi"));
-  EXPECT_NE(std::string::npos, annotations.find("This is a system API"));
+  EXPECT_THAT(annotations, HasSubstr("@android.annotation.SystemApi"));
+  EXPECT_THAT(annotations, Not(HasSubstr("@SystemApi")));
+  EXPECT_THAT(annotations, HasSubstr("This is a system API"));
+}
+
+TEST(AnnotationProcessorTest, EmitsSystemApiAnnotationParamsAndRemovesFromComment) {
+  AnnotationProcessor processor;
+  processor.AppendComment("@SystemApi (p1=k1,p2=k2) This is a system API");
+
+  std::string annotations;
+  StringOutputStream out(&annotations);
+  Printer printer(&out);
+  processor.Print(&printer);
+  out.Flush();
+
+  EXPECT_THAT(annotations, HasSubstr("@android.annotation.SystemApi(p1=k1,p2=k2)"));
+  EXPECT_THAT(annotations, Not(HasSubstr("@SystemApi")));
+  EXPECT_THAT(annotations, HasSubstr("This is a system API"));
+}
+
+TEST(AnnotationProcessorTest, EmitsFlaggedApiAnnotationAndRemovesFromComment) {
+  AnnotationProcessor processor;
+  processor.AppendComment("@FlaggedApi This is a flagged API");
+
+  std::string annotations;
+  StringOutputStream out(&annotations);
+  Printer printer(&out);
+  processor.Print(&printer);
+  out.Flush();
+
+  EXPECT_THAT(annotations, HasSubstr("@android.annotation.FlaggedApi"));
+  EXPECT_THAT(annotations, Not(HasSubstr("@FlaggedApi")));
+  EXPECT_THAT(annotations, HasSubstr("This is a flagged API"));
+}
+
+TEST(AnnotationProcessorTest, EmitsFlaggedApiAnnotationParamsAndRemovesFromComment) {
+  AnnotationProcessor processor;
+  processor.AppendComment("@FlaggedApi (\"android.flags.my_flag\") This is a flagged API");
+
+  std::string annotations;
+  StringOutputStream out(&annotations);
+  Printer printer(&out);
+  processor.Print(&printer);
+  out.Flush();
+
+  EXPECT_THAT(annotations, HasSubstr("@android.annotation.FlaggedApi(\"android.flags.my_flag\")"));
+  EXPECT_THAT(annotations, Not(HasSubstr("@FlaggedApi")));
+  EXPECT_THAT(annotations, HasSubstr("This is a flagged API"));
+}
+
+TEST(AnnotationProcessorTest, EmitsTestApiAnnotationAndRemovesFromComment) {
+  AnnotationProcessor processor;
+  processor.AppendComment("@TestApi This is a test API");
+
+  std::string annotations;
+  StringOutputStream out(&annotations);
+  Printer printer(&out);
+  processor.Print(&printer);
+  out.Flush();
+
+  EXPECT_THAT(annotations, HasSubstr("@android.annotation.TestApi"));
+  EXPECT_THAT(annotations, Not(HasSubstr("@TestApi")));
+  EXPECT_THAT(annotations, HasSubstr("This is a test API"));
+}
+
+TEST(AnnotationProcessorTest, NotEmitSystemApiAnnotation) {
+  AnnotationProcessor processor;
+  processor.AppendComment("@SystemApi This is a system API");
+
+  std::string annotations;
+  StringOutputStream out(&annotations);
+  Printer printer(&out);
+  processor.Print(&printer, true /* strip_api_annotations */);
+  out.Flush();
+
+  EXPECT_THAT(annotations, Not(HasSubstr("@android.annotation.SystemApi")));
+  EXPECT_THAT(annotations, Not(HasSubstr("@SystemApi")));
+  EXPECT_THAT(annotations, HasSubstr("This is a system API"));
+}
+
+TEST(AnnotationProcessorTest, DoNotAddApiAnnotations) {
+  AnnotationProcessor processor;
+  processor.AppendComment(
+      "@SystemApi This is a system API\n"
+      "@FlaggedApi This is a flagged API\n"
+      "@TestApi This is a test API\n"
+      "@deprecated Deprecate me\n", /*add_api_annotations=*/
+      false);
+
+  std::string annotations;
+  StringOutputStream out(&annotations);
+  Printer printer(&out);
+  processor.Print(&printer);
+  out.Flush();
+
+  EXPECT_THAT(annotations, Not(HasSubstr("@android.annotation.SystemApi")));
+  EXPECT_THAT(annotations, Not(HasSubstr("@android.annotation.FlaggedApi")));
+  EXPECT_THAT(annotations, Not(HasSubstr("@android.annotation.TestApi")));
+  EXPECT_THAT(annotations, Not(HasSubstr("@Deprecated")));
+}
+
+TEST(AnnotationProcessorTest, ExtractsFirstSentence) {
+  EXPECT_THAT(AnnotationProcessor::ExtractFirstSentence("This is the only sentence"),
+              Eq("This is the only sentence"));
+  EXPECT_THAT(AnnotationProcessor::ExtractFirstSentence(
+                  "This is the\n  first sentence.  This is the rest of the paragraph."),
+              Eq("This is the\n  first sentence."));
+  EXPECT_THAT(AnnotationProcessor::ExtractFirstSentence(
+                  "This is the first sentence with a {@link android.R.styleable.Theme}."),
+              Eq("This is the first sentence with a {@link android.R.styleable.Theme}."));
 }
 
 }  // namespace aapt

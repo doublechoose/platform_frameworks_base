@@ -16,7 +16,8 @@
 
 package android.security;
 
-import android.annotation.TestApi;
+import android.annotation.FlaggedApi;
+import android.annotation.NonNull;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.security.net.config.ApplicationConfig;
@@ -27,9 +28,6 @@ import android.security.net.config.ManifestConfigSource;
  *
  * <p>Network stacks/components should honor this policy to make it possible to centrally control
  * the relevant aspects of network security behavior.
- *
- * <p>The policy currently consists of a single flag: whether cleartext network traffic is
- * permitted. See {@link #isCleartextTrafficPermitted()}.
  */
 public class NetworkSecurityPolicy {
 
@@ -63,7 +61,8 @@ public class NetworkSecurityPolicy {
      * traffic from applications is handled by higher-level network stacks/components which can
      * honor this aspect of the policy.
      *
-     * <p>NOTE: {@link android.webkit.WebView} does not honor this flag.
+     * <p>NOTE: {@link android.webkit.WebView} honors this flag for applications targeting API level
+     * 26 and up.
      */
     public boolean isCleartextTrafficPermitted() {
         return libcore.net.NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted();
@@ -91,6 +90,22 @@ public class NetworkSecurityPolicy {
     public void setCleartextTrafficPermitted(boolean permitted) {
         FrameworkNetworkSecurityPolicy policy = new FrameworkNetworkSecurityPolicy(permitted);
         libcore.net.NetworkSecurityPolicy.setInstance(policy);
+    }
+
+    /**
+     * Returns {@code true} if Certificate Transparency information is required to be verified by
+     * the client in TLS connections to {@code hostname}.
+     *
+     * <p>See RFC6962 section 3.3 for more details.
+     *
+     * @param hostname hostname to check whether certificate transparency verification is required
+     * @return {@code true} if certificate transparency verification is required and {@code false}
+     *     otherwise
+     */
+    @FlaggedApi(Flags.FLAG_CERTIFICATE_TRANSPARENCY_CONFIGURATION)
+    public boolean isCertificateTransparencyVerificationRequired(@NonNull String hostname) {
+        return libcore.net.NetworkSecurityPolicy.getInstance()
+                .isCertificateTransparencyVerificationRequired(hostname);
     }
 
     /**

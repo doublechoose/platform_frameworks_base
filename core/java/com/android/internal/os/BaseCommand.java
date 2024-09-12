@@ -17,13 +17,17 @@
 
 package com.android.internal.os;
 
-import android.os.ShellCommand;
+import android.compat.annotation.UnsupportedAppUsage;
+import android.os.Build;
+
+import com.android.modules.utils.BasicShellCommandHandler;
 
 import java.io.PrintStream;
 
 public abstract class BaseCommand {
 
-    final protected ShellCommand mArgs = new ShellCommand() {
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
+    final protected BasicShellCommandHandler mArgs = new BasicShellCommandHandler() {
         @Override public int onCommand(String cmd) {
             return 0;
         }
@@ -38,6 +42,10 @@ public abstract class BaseCommand {
 
     private String[] mRawArgs;
 
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
+    public BaseCommand() {
+    }
+
     /**
      * Call to run the command.
      */
@@ -48,7 +56,7 @@ public abstract class BaseCommand {
         }
 
         mRawArgs = args;
-        mArgs.init(null, null, null, null, args, null, 0);
+        mArgs.init(null, null, null, null, args, 0);
 
         try {
             onRun();
@@ -103,6 +111,14 @@ public abstract class BaseCommand {
      */
     public String nextArg() {
         return mArgs.getNextArg();
+    }
+
+    /**
+     * Peek the next argument on the command line, whatever it is; if there are
+     * no arguments left, return null.
+     */
+    public String peekNextArg() {
+        return mArgs.peekNextArg();
     }
 
     /**

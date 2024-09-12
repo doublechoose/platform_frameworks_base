@@ -17,7 +17,10 @@
 package android.util;
 
 /**
+ * @deprecated This class will be removed from a future version of the Android API.
  */
+@Deprecated
+@android.ravenwood.annotation.RavenwoodKeepWholeClass
 public final class MutableDouble {
     public double value;
 

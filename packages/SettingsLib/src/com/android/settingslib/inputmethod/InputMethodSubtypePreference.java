@@ -17,13 +17,13 @@
 package com.android.settingslib.inputmethod;
 
 import android.content.Context;
-import android.support.v14.preference.SwitchPreference;
-import android.support.v7.preference.Preference;
 import android.text.TextUtils;
 import android.view.inputmethod.InputMethodInfo;
 import android.view.inputmethod.InputMethodSubtype;
 
-import com.android.internal.inputmethod.InputMethodUtils;
+import androidx.preference.Preference;
+
+import com.android.internal.annotations.VisibleForTesting;
 
 import java.text.Collator;
 import java.util.Locale;
@@ -39,22 +39,31 @@ public class InputMethodSubtypePreference extends SwitchWithNoTextPreference {
 
     public InputMethodSubtypePreference(final Context context, final InputMethodSubtype subtype,
             final InputMethodInfo imi) {
+        this(context,
+                imi.getId() + subtype.hashCode(),
+                InputMethodAndSubtypeUtil.getSubtypeLocaleNameAsSentence(subtype, context, imi),
+                subtype.getLocaleObject(),
+                context.getResources().getConfiguration().locale);
+    }
+
+    @VisibleForTesting
+    InputMethodSubtypePreference(
+            final Context context,
+            final String prefKey,
+            final CharSequence title,
+            final Locale subtypeLocale,
+            final Locale systemLocale) {
         super(context);
         setPersistent(false);
-        setKey(imi.getId() + subtype.hashCode());
-        final CharSequence subtypeLabel =
-                InputMethodAndSubtypeUtil.getSubtypeLocaleNameAsSentence(subtype, context, imi);
-        setTitle(subtypeLabel);
-        final String subtypeLocaleString = subtype.getLocale();
-        if (TextUtils.isEmpty(subtypeLocaleString)) {
+        setKey(prefKey);
+        setTitle(title);
+        if (subtypeLocale == null) {
             mIsSystemLocale = false;
             mIsSystemLanguage = false;
         } else {
-            final Locale systemLocale = context.getResources().getConfiguration().locale;
-            mIsSystemLocale = subtypeLocaleString.equals(systemLocale.toString());
+            mIsSystemLocale = subtypeLocale.equals(systemLocale);
             mIsSystemLanguage = mIsSystemLocale
-                    || InputMethodUtils.getLanguageFromLocaleString(subtypeLocaleString)
-                            .equals(systemLocale.getLanguage());
+                    || TextUtils.equals(subtypeLocale.getLanguage(), systemLocale.getLanguage());
         }
     }
 
@@ -76,15 +85,15 @@ public class InputMethodSubtypePreference extends SwitchWithNoTextPreference {
             if (!mIsSystemLanguage && rhsPref.mIsSystemLanguage) {
                 return 1;
             }
-            final CharSequence t0 = getTitle();
-            final CharSequence t1 = rhs.getTitle();
-            if (t0 == null && t1 == null) {
-                return Integer.compare(hashCode(), rhs.hashCode());
+            final CharSequence title = getTitle();
+            final CharSequence rhsTitle = rhs.getTitle();
+            final boolean emptyTitle = TextUtils.isEmpty(title);
+            final boolean rhsEmptyTitle = TextUtils.isEmpty(rhsTitle);
+            if (!emptyTitle && !rhsEmptyTitle) {
+                return collator.compare(title.toString(), rhsTitle.toString());
             }
-            if (t0 != null && t1 != null) {
-                return collator.compare(t0.toString(), t1.toString());
-            }
-            return t0 == null ? -1 : 1;
+            // For historical reasons, an empty text needs to be put at the first.
+            return (emptyTitle ? -1 : 0) - (rhsEmptyTitle ? -1 : 0);
         }
         return super.compareTo(rhs);
     }

@@ -35,15 +35,14 @@ package com.android.internal.graphics.palette;
 import android.graphics.Color;
 import android.util.TimingLogger;
 
+import com.android.internal.graphics.palette.Palette.Swatch;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.PriorityQueue;
-
-import com.android.internal.graphics.ColorUtils;
-import com.android.internal.graphics.palette.Palette.Swatch;
 
 /**
  * Copied from: frameworks/support/v7/palette/src/main/java/android/support/v7/
@@ -61,7 +60,7 @@ import com.android.internal.graphics.palette.Palette.Swatch;
  * This means that the color space is divided into distinct colors, rather than representative
  * colors.
  */
-final class ColorCutQuantizer {
+final class ColorCutQuantizer implements Quantizer {
 
     private static final String LOG_TAG = "ColorCutQuantizer";
     private static final boolean LOG_TIMINGS = false;
@@ -73,24 +72,21 @@ final class ColorCutQuantizer {
     private static final int QUANTIZE_WORD_WIDTH = 5;
     private static final int QUANTIZE_WORD_MASK = (1 << QUANTIZE_WORD_WIDTH) - 1;
 
-    final int[] mColors;
-    final int[] mHistogram;
-    final List<Swatch> mQuantizedColors;
-    final TimingLogger mTimingLogger;
-    final Palette.Filter[] mFilters;
+    int[] mColors;
+    int[] mHistogram;
+    List<Swatch> mQuantizedColors;
+    TimingLogger mTimingLogger;
 
     private final float[] mTempHsl = new float[3];
 
     /**
-     * Constructor.
+     * Execute color quantization.
      *
-     * @param pixels histogram representing an image's pixel data
+     * @param pixels    histogram representing an image's pixel data
      * @param maxColors The maximum number of colors that should be in the result palette.
-     * @param filters Set of filters to use in the quantization stage
      */
-    ColorCutQuantizer(final int[] pixels, final int maxColors, final Palette.Filter[] filters) {
+    public void quantize(final int[] pixels, final int maxColors) {
         mTimingLogger = LOG_TIMINGS ? new TimingLogger(LOG_TAG, "Creation") : null;
-        mFilters = filters;
 
         final int[] hist = mHistogram = new int[1 << (QUANTIZE_WORD_WIDTH * 3)];
         for (int i = 0; i < pixels.length; i++) {
@@ -108,10 +104,6 @@ final class ColorCutQuantizer {
         // Now let's count the number of distinct colors
         int distinctColorCount = 0;
         for (int color = 0; color < hist.length; color++) {
-            if (hist[color] > 0 && shouldIgnoreColor(color)) {
-                // If we should ignore the color, set the population to 0
-                hist[color] = 0;
-            }
             if (hist[color] > 0) {
                 // If the color has population, increase the distinct color count
                 distinctColorCount++;
@@ -160,7 +152,7 @@ final class ColorCutQuantizer {
     /**
      * @return the list of quantized colors
      */
-    List<Swatch> getQuantizedColors() {
+    public List<Swatch> getQuantizedColors() {
         return mQuantizedColors;
     }
 
@@ -186,7 +178,7 @@ final class ColorCutQuantizer {
      * and splitting them. Once split, the new box and the remaining box are offered back to the
      * queue.
      *
-     * @param queue {@link java.util.PriorityQueue} to poll for boxes
+     * @param queue   {@link java.util.PriorityQueue} to poll for boxes
      * @param maxSize Maximum amount of boxes to split
      */
     private void splitBoxes(final PriorityQueue<Vbox> queue, final int maxSize) {
@@ -216,11 +208,7 @@ final class ColorCutQuantizer {
         ArrayList<Swatch> colors = new ArrayList<>(vboxes.size());
         for (Vbox vbox : vboxes) {
             Swatch swatch = vbox.getAverageColor();
-            if (!shouldIgnoreColor(swatch)) {
-                // As we're averaging a color box, we can still get colors which we do not want, so
-                // we check again here
-                colors.add(swatch);
-            }
+            colors.add(swatch);
         }
         return colors;
     }
@@ -230,7 +218,7 @@ final class ColorCutQuantizer {
      */
     private class Vbox {
         // lower and upper index are inclusive
-        private int mLowerIndex;
+        private final int mLowerIndex;
         private int mUpperIndex;
         // Population of colors within this box
         private int mPopulation;
@@ -373,10 +361,12 @@ final class ColorCutQuantizer {
             modifySignificantOctet(colors, longestDimension, mLowerIndex, mUpperIndex);
 
             final int midPoint = mPopulation / 2;
-            for (int i = mLowerIndex, count = 0; i <= mUpperIndex; i++)  {
+            for (int i = mLowerIndex, count = 0; i <= mUpperIndex; i++) {
                 count += hist[colors[i]];
                 if (count >= midPoint) {
-                    return i;
+                    // we never want to split on the upperIndex, as this will result in the same
+                    // box
+                    return Math.min(mUpperIndex - 1, i);
                 }
             }
 
@@ -445,27 +435,6 @@ final class ColorCutQuantizer {
         }
     }
 
-    private boolean shouldIgnoreColor(int color565) {
-        final int rgb = approximateToRgb888(color565);
-        ColorUtils.colorToHSL(rgb, mTempHsl);
-        return shouldIgnoreColor(rgb, mTempHsl);
-    }
-
-    private boolean shouldIgnoreColor(Swatch color) {
-        return shouldIgnoreColor(color.getRgb(), color.getHsl());
-    }
-
-    private boolean shouldIgnoreColor(int rgb, float[] hsl) {
-        if (mFilters != null && mFilters.length > 0) {
-            for (int i = 0, count = mFilters.length; i < count; i++) {
-                if (!mFilters[i].isAllowed(rgb, hsl)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
     /**
      * Comparator which sorts {@link Vbox} instances based on their volume, in descending order
      */
@@ -496,7 +465,8 @@ final class ColorCutQuantizer {
     }
 
     private static int approximateToRgb888(int color) {
-        return approximateToRgb888(quantizedRed(color), quantizedGreen(color), quantizedBlue(color));
+        return approximateToRgb888(quantizedRed(color), quantizedGreen(color),
+                quantizedBlue(color));
     }
 
     /**

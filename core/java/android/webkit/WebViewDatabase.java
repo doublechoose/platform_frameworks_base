@@ -16,6 +16,7 @@
 
 package android.webkit;
 
+import android.annotation.Nullable;
 import android.content.Context;
 
 /**
@@ -30,6 +31,14 @@ import android.content.Context;
  */
 public abstract class WebViewDatabase {
     /**
+     * @deprecated This class should not be constructed by applications, use {@link
+     * #getInstance(Context)} instead to fetch the singleton instance.
+     */
+    // TODO(ntfschr): mark this as @SystemApi after a year.
+    @Deprecated
+    public WebViewDatabase() {}
+
+    /**
      * @hide Since API level {@link android.os.Build.VERSION_CODES#JELLY_BEAN_MR1}
      */
     protected static final String LOGTAG = "webviewdatabase";
@@ -42,7 +51,7 @@ public abstract class WebViewDatabase {
      * Gets whether there are any saved username/password pairs for web forms.
      * Note that these are unrelated to HTTP authentication credentials.
      *
-     * @return true if there are any saved username/password pairs
+     * @return {@code true} if there are any saved username/password pairs
      * @see WebView#savePassword
      * @see #clearUsernamePassword
      * @deprecated Saving passwords in WebView will not be supported in future versions.
@@ -129,12 +138,13 @@ public abstract class WebViewDatabase {
      * @param host the host to which the credentials apply
      * @param realm the realm to which the credentials apply
      * @return the credentials as a String array, if found. The first element
-     *         is the username and the second element is the password. Null if
+     *         is the username and the second element is the password. {@code null} if
      *         no credentials are found.
      * @see #setHttpAuthUsernamePassword
      * @see #hasHttpAuthUsernamePassword
      * @see #clearHttpAuthUsernamePassword
      */
+    @Nullable
     public abstract String[] getHttpAuthUsernamePassword(String host, String realm);
 
     /**

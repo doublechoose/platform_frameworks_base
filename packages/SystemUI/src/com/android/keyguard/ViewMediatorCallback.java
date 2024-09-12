@@ -29,11 +29,9 @@ public interface ViewMediatorCallback {
     /**
      * Report that the keyguard is done.
      *
-     * @param strongAuth whether the user has authenticated with strong authentication like
-     *                   pattern, password or PIN but not by trust agents or fingerprint
      * @param targetUserId a user that needs to be the foreground user at the completion.
      */
-    void keyguardDone(boolean strongAuth, int targetUserId);
+    void keyguardDone(int targetUserId);
 
     /**
      * Report that the keyguard is done drawing.
@@ -47,13 +45,11 @@ public interface ViewMediatorCallback {
     void setNeedsInput(boolean needsInput);
 
     /**
-     * Report that the keyguard is dismissable, pending the next keyguardDone call.
+     * Report that the keyguard is dismissible, pending the next keyguardDone call.
      *
-     * @param strongAuth whether the user has authenticated with strong authentication like
-     *                   pattern, password or PIN but not by trust agents or fingerprint
      * @param targetUserId a user that needs to be the foreground user at the completion.
      */
-    void keyguardDonePending(boolean strongAuth, int targetUserId);
+    void keyguardDonePending(int targetUserId);
 
     /**
      * Report when keyguard is actually gone
@@ -88,4 +84,25 @@ public interface ViewMediatorCallback {
      *         {@link KeyguardSecurityView#PROMPT_REASON_TIMEOUT}.
      */
     int getBouncerPromptReason();
+
+    /**
+     * Consumes a message that was enqueued to be displayed on the next time the bouncer shows up.
+     * @return Message that should be displayed above the challenge.
+     */
+    CharSequence consumeCustomMessage();
+
+    /**
+     * Sets a message to be consumed the next time the bouncer shows up.
+     */
+    void setCustomMessage(CharSequence customMessage);
+
+    /**
+     * Call when cancel button is pressed in bouncer.
+     */
+    void onCancelClicked();
+
+    /**
+     * Determines if bouncer has swiped down.
+     */
+    void onBouncerSwipeDown();
 }

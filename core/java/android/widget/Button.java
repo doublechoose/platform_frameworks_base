@@ -16,12 +16,17 @@
 
 package android.widget;
 
+import static android.view.flags.Flags.enableArrowIconOnHoverWhenClickable;
+import static android.view.flags.Flags.FLAG_ENABLE_ARROW_ICON_ON_HOVER_WHEN_CLICKABLE;
+
+import android.annotation.FlaggedApi;
 import android.content.Context;
 import android.util.AttributeSet;
+import android.view.InputDevice;
+import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.PointerIcon;
 import android.widget.RemoteViews.RemoteView;
-
 
 /**
  * A user interface element the user can tap or click to perform an action.
@@ -54,7 +59,7 @@ import android.widget.RemoteViews.RemoteView;
  *     }
  * }</pre>
  *
- * <p>The above snippet creates an instance of {@link View.OnClickListener} and wires
+ * <p>The above snippet creates an instance of {@link android.view.View.OnClickListener} and wires
  * the listener to the button using
  * {@link #setOnClickListener setOnClickListener(View.OnClickListener)}.
  * As a result, the system executes the code you write in {@code onClick(View)} after the
@@ -77,15 +82,8 @@ import android.widget.RemoteViews.RemoteView;
  * {@link android.R.styleable#Button Button Attributes},
  * {@link android.R.styleable#TextView TextView Attributes},
  * {@link android.R.styleable#View View Attributes}.  See the
- * {@link <a href="{@docRoot}guide/topics/ui/themes.html#ApplyingStyles">Styles and Themes</a>
+ * <a href="{@docRoot}guide/topics/ui/themes.html#ApplyingStyles">Styles and Themes</a>
  * guide to learn how to implement and organize overrides to style-related attributes.</p>
- *
- * @see
- * <a href="{@docRoot}guide/topics/ui/controls/button.html">Buttons Guide</a>
- * {@link android.R.styleable#Button Styleable Button Attributes},
- * {@link android.R.styleable#TextView Styleable TextView Attributes},
- * {@link android.R.styleable#View Styleable View Attributes},
- *
  */
 @RemoteView
 public class Button extends TextView {
@@ -177,9 +175,16 @@ public class Button extends TextView {
         return Button.class.getName();
     }
 
+    @FlaggedApi(FLAG_ENABLE_ARROW_ICON_ON_HOVER_WHEN_CLICKABLE)
     @Override
     public PointerIcon onResolvePointerIcon(MotionEvent event, int pointerIndex) {
-        if (getPointerIcon() == null && isClickable() && isEnabled()) {
+        // By default the pointer icon is an arrow. More specifically, when the pointer icon is set
+        // to null, it will be an arrow. Therefore, we don't need to change the icon when
+        // enableArrowIconOnHoverWhenClickable() and the pointer icon is a null. We only need to do
+        // that when we want the hand icon for hover.
+        if (!enableArrowIconOnHoverWhenClickable() && getPointerIcon() == null && isClickable()
+                && isEnabled() && event.isFromSource(InputDevice.SOURCE_MOUSE)
+        ) {
             return PointerIcon.getSystemIcon(getContext(), PointerIcon.TYPE_HAND);
         }
         return super.onResolvePointerIcon(event, pointerIndex);

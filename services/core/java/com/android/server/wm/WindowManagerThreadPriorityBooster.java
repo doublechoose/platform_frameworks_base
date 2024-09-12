@@ -17,11 +17,11 @@
 package com.android.server.wm;
 
 import static android.os.Process.THREAD_PRIORITY_DISPLAY;
+import static android.os.Process.THREAD_PRIORITY_TOP_APP_BOOST;
 import static android.os.Process.myTid;
 import static android.os.Process.setThreadPriority;
 
 import static com.android.server.LockGuard.INDEX_WINDOW;
-import static com.android.server.am.ActivityManagerService.TOP_APP_PRIORITY_BOOST;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.server.AnimationThread;
@@ -36,6 +36,7 @@ class WindowManagerThreadPriorityBooster extends ThreadPriorityBooster {
     private final Object mLock = new Object();
 
     private final int mAnimationThreadId;
+    private final int mSurfaceAnimationThreadId;
 
     @GuardedBy("mLock")
     private boolean mAppTransitionRunning;
@@ -45,14 +46,16 @@ class WindowManagerThreadPriorityBooster extends ThreadPriorityBooster {
     WindowManagerThreadPriorityBooster() {
         super(THREAD_PRIORITY_DISPLAY, INDEX_WINDOW);
         mAnimationThreadId = AnimationThread.get().getThreadId();
+        mSurfaceAnimationThreadId = SurfaceAnimationThread.get().getThreadId();
     }
 
     @Override
     public void boost() {
 
-        // Do not boost the animation thread. As the animation thread is changing priorities,
+        // Do not boost the animation threads. As the animation threads are changing priorities,
         // boosting it might mess up the priority because we reset it the the previous priority.
-        if (myTid() == mAnimationThreadId) {
+        final int myTid = myTid();
+        if (myTid == mAnimationThreadId || myTid == mSurfaceAnimationThreadId) {
             return;
         }
         super.boost();
@@ -62,7 +65,8 @@ class WindowManagerThreadPriorityBooster extends ThreadPriorityBooster {
     public void reset() {
 
         // See comment in boost().
-        if (myTid() == mAnimationThreadId) {
+        final int myTid = myTid();
+        if (myTid == mAnimationThreadId || myTid == mSurfaceAnimationThreadId) {
             return;
         }
         super.reset();
@@ -89,8 +93,9 @@ class WindowManagerThreadPriorityBooster extends ThreadPriorityBooster {
     @GuardedBy("mLock")
     private void updatePriorityLocked() {
         int priority = (mAppTransitionRunning || mBoundsAnimationRunning)
-                ? TOP_APP_PRIORITY_BOOST : THREAD_PRIORITY_DISPLAY;
+                ? THREAD_PRIORITY_TOP_APP_BOOST : THREAD_PRIORITY_DISPLAY;
         setBoostToPriority(priority);
         setThreadPriority(mAnimationThreadId, priority);
+        setThreadPriority(mSurfaceAnimationThreadId, priority);
     }
 }

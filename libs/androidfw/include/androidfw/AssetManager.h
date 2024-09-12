@@ -59,11 +59,15 @@ class AssetManager : public AAssetManager {
 public:
     static const char* RESOURCES_FILENAME;
     static const char* IDMAP_BIN;
-    static const char* OVERLAY_DIR;
+    static const char* VENDOR_OVERLAY_DIR;
+    static const char* PRODUCT_OVERLAY_DIR;
+    static const char* SYSTEM_EXT_OVERLAY_DIR;
+    static const char* ODM_OVERLAY_DIR;
+    static const char* OEM_OVERLAY_DIR;
     /*
      * If OVERLAY_THEME_DIR_PROPERTY is set, search for runtime resource overlay
-     * APKs in OVERLAY_DIR/<value of OVERLAY_THEME_DIR_PROPERTY> in addition to
-     * OVERLAY_DIR.
+     * APKs in VENDOR_OVERLAY_DIR/<value of OVERLAY_THEME_DIR_PROPERTY> in
+     * addition to VENDOR_OVERLAY_DIR.
      */
     static const char* OVERLAY_THEME_DIR_PROPERTY;
     static const char* TARGET_PACKAGE_NAME;
@@ -90,6 +94,20 @@ public:
     bool addAssetPath(const String8& path, int32_t* cookie,
         bool appAsLib=false, bool isSystemAsset=false);
     bool addOverlayPath(const String8& path, int32_t* cookie);
+
+    /*
+     * Add a new source for assets from an already open file descriptor.
+     * This does not give full AssetManager functionality for these assets,
+     * since the origin of the file is not known for purposes of sharing,
+     * overlay resolution, and other features.  However it does allow you
+     * to do simple access to the contents of the given fd as an apk file.
+     *
+     * Returns "true" on success, "false" on failure.  If 'cookie' is non-NULL,
+     * then on success, *cookie is set to the value corresponding to the
+     * newly-added asset source.
+     */
+    bool addAssetFd(int fd, const String8& debugPathName, int32_t* cookie,
+        bool appAsLib=false, bool assume_ownership=true);
 
     /*
      * Convenience for adding the standard system assets.  Uses the
@@ -195,24 +213,29 @@ public:
         uint32_t targetCrc, uint32_t overlayCrc, uint32_t** outData, size_t* outSize);
 
 private:
+    class SharedZip;
+
     struct asset_path
     {
-        asset_path() : path(""), type(kFileTypeRegular), idmap(""),
-                       isSystemOverlay(false), isSystemAsset(false) {}
+        asset_path() : path(""), rawFd(-1), type(kFileTypeRegular), idmap(""),
+                       isSystemOverlay(false), isSystemAsset(false), assumeOwnership(false) {}
         String8 path;
+        int rawFd;
         FileType type;
         String8 idmap;
         bool isSystemOverlay;
         bool isSystemAsset;
+        bool assumeOwnership;
+        sp<SharedZip> zip;
     };
 
     Asset* openNonAssetInPathLocked(const char* fileName, AccessMode mode,
-        const asset_path& path);
+        asset_path& path);
     String8 createPathNameLocked(const asset_path& path, const char* rootDir);
     String8 createZipSourceNameLocked(const String8& zipFileName,
         const String8& dirName, const String8& fileName);
 
-    ZipFileRO* getZipFileLocked(const asset_path& path);
+    ZipFileRO* getZipFileLocked(asset_path& path);
     Asset* openAssetFromFileLocked(const String8& fileName, AccessMode mode);
     Asset* openAssetFromZipLocked(const ZipFileRO* pZipFile,
         const ZipEntryRO entry, AccessMode mode, const String8& entryName);
@@ -228,7 +251,7 @@ private:
     const ResTable* getResTable(bool required = true) const;
     void setLocaleLocked(const char* locale);
     void updateResourceParamsLocked() const;
-    bool appendPathToResTable(const asset_path& ap, bool appAsLib=false) const;
+    bool appendPathToResTable(asset_path& ap, bool appAsLib=false) const;
 
     Asset* openIdmapLocked(const struct asset_path& ap) const;
 
@@ -238,6 +261,7 @@ private:
     class SharedZip : public RefBase {
     public:
         static sp<SharedZip> get(const String8& path, bool createIfNotPresent = true);
+        static sp<SharedZip> create(int fd, const String8& path);
 
         ZipFileRO* getZip();
 
@@ -257,6 +281,7 @@ private:
 
     private:
         SharedZip(const String8& path, time_t modWhen);
+        SharedZip(int fd, const String8& path);
         SharedZip(); // <-- not implemented
 
         String8 mPath;
@@ -289,6 +314,8 @@ private:
          * parameters.
          */
         ZipFileRO* getZip(const String8& path);
+
+        const sp<SharedZip> getSharedZip(const String8& path);
 
         Asset* getZipResourceTableAsset(const String8& path);
         Asset* setZipResourceTableAsset(const String8& path, Asset* asset);

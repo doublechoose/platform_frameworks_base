@@ -16,14 +16,17 @@
 
 package android.text.method;
 
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.platform.test.annotations.Presubmit;
 import android.text.InputType;
 import android.util.KeyUtils;
 import android.view.KeyEvent;
 import android.widget.EditText;
 import android.widget.TextView.BufferType;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
+
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -34,6 +37,8 @@ import org.junit.runner.RunWith;
  * Only contains edge cases. For normal cases, see {@see android.text.method.cts.BackspaceTest}.
  * TODO: introduce test cases for surrogate pairs and replacement span.
  */
+
+@Presubmit
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class BackspaceTest {
@@ -188,8 +193,12 @@ public class BackspaceTest {
         backspace(state, 0);
         state.assertEquals("|");
 
-        // Emoji modifier can be appended to the first emoji.
+        // Emoji modifier can be appended to each emoji.
         state.setByString("U+1F469 U+1F3FB U+200D U+1F4BC |");
+        backspace(state, 0);
+        state.assertEquals("|");
+
+        state.setByString("U+1F468 U+1F3FF U+200D U+2764 U+FE0F U+200D U+1F468 U+1F3FB |");
         backspace(state, 0);
         state.assertEquals("|");
 

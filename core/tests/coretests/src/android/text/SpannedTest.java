@@ -20,12 +20,14 @@ import static org.junit.Assert.assertEquals;
 
 import android.graphics.Typeface;
 import android.os.Parcel;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.platform.test.annotations.Presubmit;
 import android.text.style.CharacterStyle;
 import android.text.style.StyleSpan;
 import android.text.style.TextAppearanceSpan;
 import android.text.style.TypefaceSpan;
+
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -33,6 +35,7 @@ import org.junit.runner.RunWith;
 /**
  * SpannedTest tests some features of Spanned
  */
+@Presubmit
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class SpannedTest {

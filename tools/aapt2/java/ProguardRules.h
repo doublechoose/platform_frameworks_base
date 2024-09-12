@@ -23,36 +23,105 @@
 #include <string>
 
 #include "Resource.h"
-#include "Source.h"
+#include "ResourceTable.h"
+#include "ValueVisitor.h"
+#include "androidfw/Source.h"
+#include "androidfw/Streams.h"
+#include "androidfw/StringPiece.h"
+#include "process/IResourceTableConsumer.h"
 #include "xml/XmlDom.h"
 
 namespace aapt {
 namespace proguard {
 
+struct UsageLocation {
+  ResourceName name;
+  android::Source source;
+};
+
+struct NameAndSignature {
+  std::string name;
+  std::string signature;
+};
+
 class KeepSet {
  public:
-  inline void AddClass(const Source& source, const std::string& class_name) {
-    keep_set_[class_name].insert(source);
+  KeepSet() = default;
+
+  explicit KeepSet(bool conditional_keep_rules) : conditional_keep_rules_(conditional_keep_rules) {
   }
 
-  inline void AddMethod(const Source& source, const std::string& method_name) {
-    keep_method_set_[method_name].insert(source);
+  inline void AddManifestClass(const UsageLocation& file, const std::string& class_name) {
+    manifest_class_set_[class_name].insert(file);
+  }
+
+  inline void AddConditionalClass(const UsageLocation& file,
+                                  const NameAndSignature& class_and_signature) {
+    conditional_class_set_[class_and_signature].insert(file);
+  }
+
+  inline void AddMethod(const UsageLocation& file, const NameAndSignature& name_and_signature) {
+    method_set_[name_and_signature].insert(file);
+  }
+
+  inline void AddReference(const UsageLocation& file, const ResourceName& resource_name) {
+    reference_set_[resource_name].insert(file);
   }
 
  private:
-  friend bool WriteKeepSet(std::ostream* out, const KeepSet& keep_set);
+  friend void WriteKeepSet(const KeepSet& keep_set, android::OutputStream* out, bool minimal_keep,
+                           bool no_location_reference);
 
-  std::map<std::string, std::set<Source>> keep_set_;
-  std::map<std::string, std::set<Source>> keep_method_set_;
+  friend bool CollectLocations(const UsageLocation& location, const KeepSet& keep_set,
+                               std::set<UsageLocation>* locations);
+
+  bool conditional_keep_rules_ = false;
+  std::map<std::string, std::set<UsageLocation>> manifest_class_set_;
+  std::map<NameAndSignature, std::set<UsageLocation>> method_set_;
+  std::map<NameAndSignature, std::set<UsageLocation>> conditional_class_set_;
+  std::map<ResourceName, std::set<UsageLocation>> reference_set_;
 };
 
-bool CollectProguardRulesForManifest(const Source& source,
-                                     xml::XmlResource* res, KeepSet* keep_set,
+bool CollectProguardRulesForManifest(xml::XmlResource* res, KeepSet* keep_set,
                                      bool main_dex_only = false);
-bool CollectProguardRules(const Source& source, xml::XmlResource* res,
-                          KeepSet* keep_set);
 
-bool WriteKeepSet(std::ostream* out, const KeepSet& keep_set);
+bool CollectProguardRules(IAaptContext* context, xml::XmlResource* res, KeepSet* keep_set);
+
+bool CollectResourceReferences(IAaptContext* context, ResourceTable* table, KeepSet* keep_set);
+
+void WriteKeepSet(const KeepSet& keep_set, android::OutputStream* out, bool minimal_keep,
+                  bool no_location_reference);
+
+bool CollectLocations(const UsageLocation& location, const KeepSet& keep_set,
+                      std::set<UsageLocation>* locations);
+
+//
+// UsageLocation implementation.
+//
+
+inline bool operator==(const UsageLocation& lhs, const UsageLocation& rhs) {
+  // The "source" member is ignored because we only need "name" for outputting
+  // keep rules; "source" is used for comments.
+  return lhs.name == rhs.name;
+}
+
+inline bool operator<(const UsageLocation& lhs, const UsageLocation& rhs) {
+  return lhs.name.compare(rhs.name) < 0;
+}
+
+//
+// NameAndSignature implementation.
+//
+
+inline bool operator<(const NameAndSignature& lhs, const NameAndSignature& rhs) {
+  if (lhs.name < rhs.name) {
+    return true;
+  }
+  if (lhs.name == rhs.name) {
+    return lhs.signature < rhs.signature;
+  }
+  return false;
+}
 
 }  // namespace proguard
 }  // namespace aapt

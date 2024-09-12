@@ -20,6 +20,7 @@ import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.os.Parcel;
 import android.os.Parcelable;
+
 import com.android.internal.util.Preconditions;
 
 /**
@@ -106,6 +107,17 @@ public class UsbConfiguration implements Parcelable {
     }
 
     /**
+     * Returns the attributes of this configuration
+     *
+     * @return the configuration's attributes
+     *
+     * @hide
+     */
+    public int getAttributes() {
+        return mAttributes;
+    }
+
+    /**
      * Returns the configuration's max power consumption, in milliamps.
      *
      * @return the configuration's max power
@@ -153,14 +165,15 @@ public class UsbConfiguration implements Parcelable {
         return builder.toString();
     }
 
-    public static final Parcelable.Creator<UsbConfiguration> CREATOR =
+    public static final @android.annotation.NonNull Parcelable.Creator<UsbConfiguration> CREATOR =
         new Parcelable.Creator<UsbConfiguration>() {
         public UsbConfiguration createFromParcel(Parcel in) {
             int id = in.readInt();
             String name = in.readString();
             int attributes = in.readInt();
             int maxPower = in.readInt();
-            Parcelable[] interfaces = in.readParcelableArray(UsbInterface.class.getClassLoader());
+            Parcelable[] interfaces = in.readParcelableArray(
+                    UsbInterface.class.getClassLoader(), UsbInterface.class);
             UsbConfiguration configuration = new UsbConfiguration(id, name, attributes, maxPower);
             configuration.setInterfaces(interfaces);
             return configuration;

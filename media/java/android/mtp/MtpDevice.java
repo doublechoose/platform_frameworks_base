@@ -123,7 +123,10 @@ public final class MtpDevice {
     @Override
     protected void finalize() throws Throwable {
         try {
-            mCloseGuard.warnIfOpen();
+            if (mCloseGuard != null) {
+                mCloseGuard.warnIfOpen();
+            }
+
             close();
         } finally {
             super.finalize();
@@ -164,6 +167,18 @@ public final class MtpDevice {
      */
     public @Nullable MtpDeviceInfo getDeviceInfo() {
         return native_get_device_info();
+    }
+
+    /**
+     * Set device property SESSION_INITIATOR_VERSION_INFO
+     *
+     * @param propertyStr string value for device property SESSION_INITIATOR_VERSION_INFO
+     * @return -1 for error, 0 for success
+     *
+     * {@hide}
+     */
+    public int setDevicePropertyInitVersion(@NonNull String propertyStr) {
+        return native_set_device_property_init_version(propertyStr);
     }
 
     /**
@@ -418,6 +433,7 @@ public final class MtpDevice {
     private native boolean native_open(String deviceName, int fd);
     private native void native_close();
     private native MtpDeviceInfo native_get_device_info();
+    private native int native_set_device_property_init_version(String propertyStr);
     private native int[] native_get_storage_ids();
     private native MtpStorageInfo native_get_storage_info(int storageId);
     private native int[] native_get_object_handles(int storageId, int format, int objectHandle);

@@ -21,31 +21,43 @@ import static org.junit.Assert.assertEquals;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.os.LocaleList;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.platform.test.annotations.Presubmit;
 
-import java.util.Locale;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
+
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.text.DateFormat;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.Locale;
+import java.util.TimeZone;
+
+@Presubmit
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class DateUtilsTest {
 
     private static final LocaleList LOCALE_LIST_US = new LocaleList(Locale.US);
     private LocaleList mOriginalLocales;
+    private TimeZone mOriginalTimeZone;
 
     @Before
     public void setup() {
         mOriginalLocales = Resources.getSystem().getConfiguration().getLocales();
         setLocales(LOCALE_LIST_US);
+        mOriginalTimeZone = TimeZone.getDefault();
+        TimeZone.setDefault(TimeZone.getTimeZone("GMT"));
     }
 
     @After
     public void teardown() {
         setLocales(mOriginalLocales);
+        TimeZone.setDefault(mOriginalTimeZone);
     }
 
     @Test
@@ -101,6 +113,43 @@ public class DateUtilsTest {
 
         assertEquals("1h", DateUtils.formatDuration(3600000, DateUtils.LENGTH_SHORTEST));
         assertEquals("48h", DateUtils.formatDuration(172800000, DateUtils.LENGTH_SHORTEST));
+    }
+
+    @Test
+    public void testFormatSameDayTime() {
+        // This test assumes a default DateFormat.is24Hour setting.
+        DateFormat.set24HourTimePref(null);
+        Date date = new Date(109, 0, 19, 3, 30, 15);
+        long fixedTime = date.getTime();
+
+        int currentYear = Calendar.getInstance().get(Calendar.YEAR);
+        Date dateWithCurrentYear = new Date(currentYear - 1900, 0, 19, 3, 30, 15);
+
+        final long dayDuration = 5 * 24 * 60 * 60 * 1000;
+        assertEquals("Saturday, January 24, 2009", DateUtils.formatSameDayTime(
+                fixedTime + dayDuration, fixedTime, java.text.DateFormat.FULL,
+                java.text.DateFormat.FULL));
+        assertEquals("Jan 24, 2009", DateUtils.formatSameDayTime(fixedTime + dayDuration,
+                fixedTime, java.text.DateFormat.DEFAULT, java.text.DateFormat.FULL));
+        assertEquals("January 24, 2009", DateUtils.formatSameDayTime(fixedTime + dayDuration,
+                fixedTime, java.text.DateFormat.LONG, java.text.DateFormat.FULL));
+        assertEquals("Jan 24, 2009", DateUtils.formatSameDayTime(fixedTime + dayDuration,
+                fixedTime, java.text.DateFormat.MEDIUM, java.text.DateFormat.FULL));
+        assertEquals("1/24/09", DateUtils.formatSameDayTime(fixedTime + dayDuration,
+                fixedTime, java.text.DateFormat.SHORT, java.text.DateFormat.FULL));
+
+        final long hourDuration = 2 * 60 * 60 * 1000;
+        assertEquals("5:30:15 AM Greenwich Mean Time", DateUtils.formatSameDayTime(
+                fixedTime + hourDuration, fixedTime, java.text.DateFormat.FULL,
+                java.text.DateFormat.FULL));
+        assertEquals("5:30:15 AM", DateUtils.formatSameDayTime(fixedTime + hourDuration,
+                fixedTime, java.text.DateFormat.FULL, java.text.DateFormat.DEFAULT));
+        assertEquals("5:30:15 AM GMT", DateUtils.formatSameDayTime(fixedTime + hourDuration,
+                fixedTime, java.text.DateFormat.FULL, java.text.DateFormat.LONG));
+        assertEquals("5:30:15 AM", DateUtils.formatSameDayTime(fixedTime + hourDuration,
+                fixedTime, java.text.DateFormat.FULL, java.text.DateFormat.MEDIUM));
+        assertEquals("5:30 AM", DateUtils.formatSameDayTime(fixedTime + hourDuration,
+                fixedTime, java.text.DateFormat.FULL, java.text.DateFormat.SHORT));
     }
 
     private void setLocales(LocaleList locales) {

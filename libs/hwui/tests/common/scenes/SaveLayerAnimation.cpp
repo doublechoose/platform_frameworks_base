@@ -16,28 +16,29 @@
 
 #include "TestSceneBase.h"
 
+#include <SkBlendMode.h>
+
 class SaveLayerAnimation;
 
 static TestScene::Registrar _SaveLayer(TestScene::Info{
-    "savelayer",
-    "A nested pair of clipped saveLayer operations. "
-    "Tests the clipped saveLayer codepath. Draws content into offscreen buffers and back again.",
-    TestScene::simpleCreateScene<SaveLayerAnimation>
-});
+        "savelayer",
+        "A nested pair of clipped saveLayer operations. "
+        "Tests the clipped saveLayer codepath. Draws content into offscreen buffers and back "
+        "again.",
+        TestScene::simpleCreateScene<SaveLayerAnimation>});
 
 class SaveLayerAnimation : public TestScene {
 public:
     sp<RenderNode> card;
     void createContent(int width, int height, Canvas& canvas) override {
-        canvas.drawColor(Color::White, SkBlendMode::kSrcOver); // background
+        canvas.drawColor(Color::White, SkBlendMode::kSrcOver);  // background
 
-        card = TestUtils::createNode(0, 0, 400, 800,
-                [](RenderProperties& props, Canvas& canvas) {
+        card = TestUtils::createNode(0, 0, 400, 800, [](RenderProperties& props, Canvas& canvas) {
             // nested clipped saveLayers
-            canvas.saveLayerAlpha(0, 0, 400, 400, 200, SaveFlags::ClipToLayer);
+            canvas.saveLayerAlpha(0, 0, 400, 400, 200);
             canvas.drawColor(Color::Green_700, SkBlendMode::kSrcOver);
             canvas.clipRect(50, 50, 350, 350, SkClipOp::kIntersect);
-            canvas.saveLayerAlpha(100, 100, 300, 300, 128, SaveFlags::ClipToLayer);
+            canvas.saveLayerAlpha(100, 100, 300, 300, 128);
             canvas.drawColor(Color::Blue_500, SkBlendMode::kSrcOver);
             canvas.restore();
             canvas.restore();
@@ -45,12 +46,14 @@ public:
             // single unclipped saveLayer
             canvas.save(SaveFlags::MatrixClip);
             canvas.translate(0, 400);
-            canvas.saveLayerAlpha(100, 100, 300, 300, 128, SaveFlags::Flags(0)); // unclipped
-            SkPaint paint;
+            int unclippedSaveLayer = canvas.saveUnclippedLayer(100, 100, 300, 300);
+            Paint paint;
             paint.setAntiAlias(true);
             paint.setColor(Color::Green_700);
             canvas.drawCircle(200, 200, 200, paint);
-            canvas.restore();
+            Paint alphaPaint;
+            alphaPaint.setAlpha(128);
+            canvas.restoreUnclippedLayer(unclippedSaveLayer, alphaPaint);
             canvas.restore();
         });
 

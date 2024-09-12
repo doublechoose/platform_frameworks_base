@@ -20,94 +20,213 @@ import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.UiThread;
 import android.annotation.WorkerThread;
+import android.app.RemoteAction;
+import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.PointF;
+import android.graphics.RectF;
 import android.os.AsyncTask;
+import android.os.Build;
+import android.os.Bundle;
 import android.os.LocaleList;
+import android.text.Layout;
 import android.text.Selection;
 import android.text.Spannable;
 import android.text.TextUtils;
+import android.text.method.OffsetMapping;
+import android.text.util.Linkify;
+import android.util.Log;
 import android.view.ActionMode;
+import android.view.ViewConfiguration;
+import android.view.textclassifier.ExtrasUtils;
+import android.view.textclassifier.SelectionEvent;
+import android.view.textclassifier.SelectionEvent.InvocationMethod;
 import android.view.textclassifier.TextClassification;
+import android.view.textclassifier.TextClassificationConstants;
+import android.view.textclassifier.TextClassificationContext;
+import android.view.textclassifier.TextClassificationManager;
 import android.view.textclassifier.TextClassifier;
+import android.view.textclassifier.TextClassifierEvent;
 import android.view.textclassifier.TextSelection;
 import android.widget.Editor.SelectionModifierCursorController;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.Preconditions;
 
+import java.text.BreakIterator;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 /**
  * Helper class for starting selection action mode
  * (synchronously without the TextClassifier, asynchronously with the TextClassifier).
+ * @hide
  */
 @UiThread
-final class SelectionActionModeHelper {
+@VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
+public class SelectionActionModeHelper {
 
-    /**
-     * Maximum time (in milliseconds) to wait for a result before timing out.
-     */
-    // TODO: Consider making this a ViewConfiguration.
-    private static final int TIMEOUT_DURATION = 200;
+    private static final String LOG_TAG = "SelectActionModeHelper";
 
     private final Editor mEditor;
+    private final TextView mTextView;
     private final TextClassificationHelper mTextClassificationHelper;
 
-    private TextClassification mTextClassification;
+    @Nullable private TextClassification mTextClassification;
     private AsyncTask mTextClassificationAsyncTask;
 
     private final SelectionTracker mSelectionTracker;
 
+    // TODO remove nullable marker once the switch gating the feature gets removed
+    @Nullable
+    private final SmartSelectSprite mSmartSelectSprite;
+
     SelectionActionModeHelper(@NonNull Editor editor) {
-        mEditor = Preconditions.checkNotNull(editor);
-        final TextView textView = mEditor.getTextView();
+        mEditor = Objects.requireNonNull(editor);
+        mTextView = mEditor.getTextView();
         mTextClassificationHelper = new TextClassificationHelper(
-                textView.getTextClassifier(), textView.getText(), 0, 1, textView.getTextLocales());
-        mSelectionTracker = new SelectionTracker(textView.getTextClassifier());
+                mTextView.getContext(),
+                mTextView::getTextClassificationSession,
+                getText(mTextView),
+                0, 1, mTextView.getTextLocales());
+        mSelectionTracker = new SelectionTracker(mTextView);
+
+        if (getTextClassificationSettings().isSmartSelectionAnimationEnabled()) {
+            mSmartSelectSprite = new SmartSelectSprite(mTextView.getContext(),
+                    editor.getTextView().mHighlightColor, mTextView::invalidate);
+        } else {
+            mSmartSelectSprite = null;
+        }
     }
 
-    public void startActionModeAsync(boolean adjustSelection) {
+    /**
+     * Swap the selection index if the start index is greater than end index.
+     *
+     * @return the swap result, index 0 is the start index and index 1 is the end index.
+     */
+    private static int[] sortSelectionIndices(int selectionStart, int selectionEnd) {
+        if (selectionStart < selectionEnd) {
+            return new int[]{selectionStart, selectionEnd};
+        }
+        return new int[]{selectionEnd, selectionStart};
+    }
+
+    /**
+     * The {@link TextView} selection start and end index may not be sorted, this method will swap
+     * the {@link TextView} selection index if the start index is greater than end index.
+     *
+     * @param textView the selected TextView.
+     * @return the swap result, index 0 is the start index and index 1 is the end index.
+     */
+    private static int[] sortSelectionIndicesFromTextView(TextView textView) {
+        int selectionStart = textView.getSelectionStart();
+        int selectionEnd = textView.getSelectionEnd();
+
+        return sortSelectionIndices(selectionStart, selectionEnd);
+    }
+
+    /**
+     * Starts Selection ActionMode.
+     */
+    public void startSelectionActionModeAsync(boolean adjustSelection) {
+        // Check if the smart selection should run for editable text.
+        adjustSelection &= getTextClassificationSettings().isSmartSelectionEnabled();
+        int[] sortedSelectionIndices = sortSelectionIndicesFromTextView(mTextView);
+
+        mSelectionTracker.onOriginalSelection(
+                getText(mTextView),
+                sortedSelectionIndices[0],
+                sortedSelectionIndices[1],
+                false /*isLink*/);
         cancelAsyncTask();
-        if (isNoOpTextClassifier() || !hasSelection()) {
-            // No need to make an async call for a no-op TextClassifier.
-            // Do not call the TextClassifier if there is no selection.
-            startActionMode(null);
+        if (skipTextClassification()) {
+            startSelectionActionMode(null);
         } else {
-            resetTextClassificationHelper(true /* resetSelectionTag */);
-            final TextView tv = mEditor.getTextView();
+            resetTextClassificationHelper();
+            if (mSmartSelectSprite != null && mSmartSelectSprite.isAnimationActive()) {
+                mSmartSelectSprite.cancelAnimation();
+            }
             mTextClassificationAsyncTask = new TextClassificationAsyncTask(
-                    tv,
-                    TIMEOUT_DURATION,
+                    mTextView,
+                    mTextClassificationHelper.getTimeoutDuration(),
                     adjustSelection
                             ? mTextClassificationHelper::suggestSelection
                             : mTextClassificationHelper::classifyText,
-                    this::startActionMode)
+                    mSmartSelectSprite != null
+                            ? this::startSelectionActionModeWithSmartSelectAnimation
+                            : this::startSelectionActionMode,
+                    mTextClassificationHelper::getOriginalSelection)
+                    .execute();
+        }
+    }
+
+    /**
+     * Starts Link ActionMode.
+     */
+    public void startLinkActionModeAsync(int start, int end) {
+        int[] indexResult = sortSelectionIndices(start, end);
+        mSelectionTracker.onOriginalSelection(getText(mTextView), indexResult[0], indexResult[1],
+                true /*isLink*/);
+        cancelAsyncTask();
+        if (skipTextClassification()) {
+            startLinkActionMode(null);
+        } else {
+            resetTextClassificationHelper(indexResult[0], indexResult[1]);
+            mTextClassificationAsyncTask = new TextClassificationAsyncTask(
+                    mTextView,
+                    mTextClassificationHelper.getTimeoutDuration(),
+                    mTextClassificationHelper::classifyText,
+                    this::startLinkActionMode,
+                    mTextClassificationHelper::getOriginalSelection)
                     .execute();
         }
     }
 
     public void invalidateActionModeAsync() {
         cancelAsyncTask();
-        if (isNoOpTextClassifier() || !hasSelection()) {
-            // No need to make an async call for a no-op TextClassifier.
-            // Do not call the TextClassifier if there is no selection.
+        if (skipTextClassification()) {
             invalidateActionMode(null);
         } else {
-            resetTextClassificationHelper(false /* resetSelectionTag */);
+            resetTextClassificationHelper();
             mTextClassificationAsyncTask = new TextClassificationAsyncTask(
-                    mEditor.getTextView(), TIMEOUT_DURATION,
-                    mTextClassificationHelper::classifyText, this::invalidateActionMode)
+                    mTextView,
+                    mTextClassificationHelper.getTimeoutDuration(),
+                    mTextClassificationHelper::classifyText,
+                    this::invalidateActionMode,
+                    mTextClassificationHelper::getOriginalSelection)
                     .execute();
         }
     }
 
-    public void onSelectionAction() {
-        mSelectionTracker.onSelectionAction(mTextClassificationHelper.getSelectionTag());
+    /** Reports a selection action event. */
+    public void onSelectionAction(int menuItemId, @Nullable String actionLabel) {
+        int[] sortedSelectionIndices = sortSelectionIndicesFromTextView(mTextView);
+        mSelectionTracker.onSelectionAction(
+                sortedSelectionIndices[0], sortedSelectionIndices[1],
+                getActionType(menuItemId), actionLabel, mTextClassification);
+    }
+
+    public void onSelectionDrag() {
+        int[] sortedSelectionIndices = sortSelectionIndicesFromTextView(mTextView);
+        mSelectionTracker.onSelectionAction(
+                sortedSelectionIndices[0], sortedSelectionIndices[1],
+                SelectionEvent.ACTION_DRAG, /* actionLabel= */ null, mTextClassification);
+    }
+
+    public void onTextChanged(int start, int end) {
+        int[] sortedSelectionIndices = sortSelectionIndices(start, end);
+        mSelectionTracker.onTextChanged(sortedSelectionIndices[0], sortedSelectionIndices[1],
+                mTextClassification);
     }
 
     public boolean resetSelection(int textIndex) {
-        if (mSelectionTracker.resetSelection(
-                textIndex, mEditor, mTextClassificationHelper.getSelectionTag())) {
+        if (mSelectionTracker.resetSelection(textIndex, mEditor)) {
             invalidateActionModeAsync();
             return true;
         }
@@ -120,8 +239,23 @@ final class SelectionActionModeHelper {
     }
 
     public void onDestroyActionMode() {
+        cancelSmartSelectAnimation();
         mSelectionTracker.onSelectionDestroyed();
         cancelAsyncTask();
+    }
+
+    public void onDraw(final Canvas canvas) {
+        if (isDrawingHighlight() && mSmartSelectSprite != null) {
+            mSmartSelectSprite.draw(canvas);
+        }
+    }
+
+    public boolean isDrawingHighlight() {
+        return mSmartSelectSprite != null && mSmartSelectSprite.isAnimationActive();
+    }
+
+    private TextClassificationConstants getTextClassificationSettings() {
+        return TextClassificationManager.getSettings(mTextView.getContext());
     }
 
     private void cancelAsyncTask() {
@@ -132,58 +266,265 @@ final class SelectionActionModeHelper {
         mTextClassification = null;
     }
 
-    private boolean isNoOpTextClassifier() {
-        return mEditor.getTextView().getTextClassifier() == TextClassifier.NO_OP;
+    private boolean skipTextClassification() {
+        // No need to make an async call for a no-op TextClassifier.
+        final boolean noOpTextClassifier = mTextView.usesNoOpTextClassifier();
+        // Do not call the TextClassifier if there is no selection.
+        final boolean noSelection = mTextView.getSelectionEnd() == mTextView.getSelectionStart();
+        // Do not call the TextClassifier if this is a password field.
+        final boolean password = mTextView.hasPasswordTransformationMethod()
+                || TextView.isPasswordInputType(mTextView.getInputType());
+        return noOpTextClassifier || noSelection || password;
     }
 
-    private boolean hasSelection() {
-        final TextView textView = mEditor.getTextView();
-        return textView.getSelectionEnd() > textView.getSelectionStart();
+    private void startLinkActionMode(@Nullable SelectionResult result) {
+        startActionMode(Editor.TextActionMode.TEXT_LINK, result);
     }
 
-    private void startActionMode(@Nullable SelectionResult result) {
-        final TextView textView = mEditor.getTextView();
-        final CharSequence text = textView.getText();
-        mSelectionTracker.setOriginalSelection(
-                textView.getSelectionStart(), textView.getSelectionEnd());
-        if (result != null && text instanceof Spannable) {
-            Selection.setSelection((Spannable) text, result.mStart, result.mEnd);
+    private void startSelectionActionMode(@Nullable SelectionResult result) {
+        startActionMode(Editor.TextActionMode.SELECTION, result);
+    }
+
+    private void startActionMode(
+            @Editor.TextActionMode int actionMode, @Nullable SelectionResult result) {
+        final CharSequence text = getText(mTextView);
+        if (result != null && text instanceof Spannable
+                && (mTextView.isTextSelectable() || mTextView.isTextEditable())) {
+            // Do not change the selection if TextClassifier should be dark launched.
+            if (!getTextClassificationSettings().isModelDarkLaunchEnabled()) {
+                Selection.setSelection((Spannable) text, result.mStart, result.mEnd);
+                mTextView.invalidate();
+            }
+            mTextClassification = result.mClassification;
+        } else if (result != null && actionMode == Editor.TextActionMode.TEXT_LINK) {
             mTextClassification = result.mClassification;
         } else {
             mTextClassification = null;
         }
-        if (mEditor.startSelectionActionModeInternal()) {
+        if (mEditor.startActionModeInternal(actionMode)) {
             final SelectionModifierCursorController controller = mEditor.getSelectionController();
-            if (controller != null) {
-                controller.show();
+            if (controller != null
+                    && (mTextView.isTextSelectable() || mTextView.isTextEditable())) {
+                if (mTextView.showUIForTouchScreen()) {
+                    controller.show();
+                } else {
+                    controller.hide();
+                }
             }
             if (result != null) {
-                mSelectionTracker.onSelectionStarted(
-                        result.mStart, result.mEnd, mTextClassificationHelper.getSelectionTag());
+                switch (actionMode) {
+                    case Editor.TextActionMode.SELECTION:
+                        mSelectionTracker.onSmartSelection(result);
+                        break;
+                    case Editor.TextActionMode.TEXT_LINK:
+                        mSelectionTracker.onLinkSelected(result);
+                        break;
+                    default:
+                        break;
+                }
             }
         }
         mEditor.setRestartActionModeOnNextRefresh(false);
         mTextClassificationAsyncTask = null;
     }
 
+    private void startSelectionActionModeWithSmartSelectAnimation(
+            @Nullable SelectionResult result) {
+        final Runnable onAnimationEndCallback = () -> {
+            final SelectionResult startSelectionResult;
+            if (result != null && result.mStart >= 0 && result.mEnd <= getText(mTextView).length()
+                    && result.mStart <= result.mEnd) {
+                startSelectionResult = result;
+            } else {
+                startSelectionResult = null;
+            }
+            startSelectionActionMode(startSelectionResult);
+        };
+        // TODO do not trigger the animation if the change included only non-printable characters
+        int[] sortedSelectionIndices = sortSelectionIndicesFromTextView(mTextView);
+        final boolean didSelectionChange =
+                result != null && (sortedSelectionIndices[0] != result.mStart
+                        || sortedSelectionIndices[1] != result.mEnd);
+        if (!didSelectionChange) {
+            onAnimationEndCallback.run();
+            return;
+        }
+
+        final List<SmartSelectSprite.RectangleWithTextSelectionLayout> selectionRectangles =
+                convertSelectionToRectangles(mTextView, result.mStart, result.mEnd);
+
+        final PointF touchPoint = new PointF(
+                mEditor.getLastUpPositionX(),
+                mEditor.getLastUpPositionY());
+
+        final PointF animationStartPoint =
+                movePointInsideNearestRectangle(touchPoint, selectionRectangles,
+                        SmartSelectSprite.RectangleWithTextSelectionLayout::getRectangle);
+
+        mSmartSelectSprite.startAnimation(
+                animationStartPoint,
+                selectionRectangles,
+                onAnimationEndCallback);
+    }
+
+    private List<SmartSelectSprite.RectangleWithTextSelectionLayout> convertSelectionToRectangles(
+            final TextView textView, final int start, final int end) {
+        final List<SmartSelectSprite.RectangleWithTextSelectionLayout> result = new ArrayList<>();
+
+        final Layout.SelectionRectangleConsumer consumer =
+                (left, top, right, bottom, textSelectionLayout) -> mergeRectangleIntoList(
+                        result,
+                        new RectF(left, top, right, bottom),
+                        SmartSelectSprite.RectangleWithTextSelectionLayout::getRectangle,
+                        r -> new SmartSelectSprite.RectangleWithTextSelectionLayout(r,
+                                textSelectionLayout)
+                );
+
+        final int startTransformed =
+                textView.originalToTransformed(start, OffsetMapping.MAP_STRATEGY_CURSOR);
+        final int endTransformed =
+                textView.originalToTransformed(end, OffsetMapping.MAP_STRATEGY_CURSOR);
+        textView.getLayout().getSelection(startTransformed, endTransformed, consumer);
+
+        result.sort(Comparator.comparing(
+                SmartSelectSprite.RectangleWithTextSelectionLayout::getRectangle,
+                SmartSelectSprite.RECTANGLE_COMPARATOR));
+
+        return result;
+    }
+
+    // TODO: Move public pure functions out of this class and make it package-private.
+    /**
+     * Merges a {@link RectF} into an existing list of any objects which contain a rectangle.
+     * While merging, this method makes sure that:
+     *
+     * <ol>
+     * <li>No rectangle is redundant (contained within a bigger rectangle)</li>
+     * <li>Rectangles of the same height and vertical position that intersect get merged</li>
+     * </ol>
+     *
+     * @param list      the list of rectangles (or other rectangle containers) to merge the new
+     *                  rectangle into
+     * @param candidate the {@link RectF} to merge into the list
+     * @param extractor a function that can extract a {@link RectF} from an element of the given
+     *                  list
+     * @param packer    a function that can wrap the resulting {@link RectF} into an element that
+     *                  the list contains
+     * @hide
+     */
+    @VisibleForTesting
+    public static <T> void mergeRectangleIntoList(final List<T> list,
+            final RectF candidate, final Function<T, RectF> extractor,
+            final Function<RectF, T> packer) {
+        if (candidate.isEmpty()) {
+            return;
+        }
+
+        final int elementCount = list.size();
+        for (int index = 0; index < elementCount; ++index) {
+            final RectF existingRectangle = extractor.apply(list.get(index));
+            if (existingRectangle.contains(candidate)) {
+                return;
+            }
+            if (candidate.contains(existingRectangle)) {
+                existingRectangle.setEmpty();
+                continue;
+            }
+
+            final boolean rectanglesContinueEachOther = candidate.left == existingRectangle.right
+                    || candidate.right == existingRectangle.left;
+            final boolean canMerge = candidate.top == existingRectangle.top
+                    && candidate.bottom == existingRectangle.bottom
+                    && (RectF.intersects(candidate, existingRectangle)
+                    || rectanglesContinueEachOther);
+
+            if (canMerge) {
+                candidate.union(existingRectangle);
+                existingRectangle.setEmpty();
+            }
+        }
+
+        for (int index = elementCount - 1; index >= 0; --index) {
+            final RectF rectangle = extractor.apply(list.get(index));
+            if (rectangle.isEmpty()) {
+                list.remove(index);
+            }
+        }
+
+        list.add(packer.apply(candidate));
+    }
+
+
+    /** @hide */
+    @VisibleForTesting
+    public static <T> PointF movePointInsideNearestRectangle(final PointF point,
+            final List<T> list, final Function<T, RectF> extractor) {
+        float bestX = -1;
+        float bestY = -1;
+        double bestDistance = Double.MAX_VALUE;
+
+        final int elementCount = list.size();
+        for (int index = 0; index < elementCount; ++index) {
+            final RectF rectangle = extractor.apply(list.get(index));
+            final float candidateY = rectangle.centerY();
+            final float candidateX;
+
+            if (point.x > rectangle.right) {
+                candidateX = rectangle.right;
+            } else if (point.x < rectangle.left) {
+                candidateX = rectangle.left;
+            } else {
+                candidateX = point.x;
+            }
+
+            final double candidateDistance = Math.pow(point.x - candidateX, 2)
+                    + Math.pow(point.y - candidateY, 2);
+
+            if (candidateDistance < bestDistance) {
+                bestX = candidateX;
+                bestY = candidateY;
+                bestDistance = candidateDistance;
+            }
+        }
+
+        return new PointF(bestX, bestY);
+    }
+
     private void invalidateActionMode(@Nullable SelectionResult result) {
+        cancelSmartSelectAnimation();
         mTextClassification = result != null ? result.mClassification : null;
         final ActionMode actionMode = mEditor.getTextActionMode();
         if (actionMode != null) {
             actionMode.invalidate();
         }
-        final TextView textView = mEditor.getTextView();
+        final int[] sortedSelectionIndices = sortSelectionIndicesFromTextView(mTextView);
         mSelectionTracker.onSelectionUpdated(
-                textView.getSelectionStart(), textView.getSelectionEnd(),
-                mTextClassificationHelper.getSelectionTag());
+                sortedSelectionIndices[0], sortedSelectionIndices[1], mTextClassification);
         mTextClassificationAsyncTask = null;
     }
 
-    private void resetTextClassificationHelper(boolean resetSelectionTag) {
-        final TextView textView = mEditor.getTextView();
-        mTextClassificationHelper.reset(textView.getTextClassifier(), textView.getText(),
-                textView.getSelectionStart(), textView.getSelectionEnd(),
-                resetSelectionTag, textView.getTextLocales());
+    private void resetTextClassificationHelper(int selectionStart, int selectionEnd) {
+        if (selectionStart < 0 || selectionEnd < 0) {
+            // Use selection indices
+            int[] sortedSelectionIndices = sortSelectionIndicesFromTextView(mTextView);
+            selectionStart = sortedSelectionIndices[0];
+            selectionEnd = sortedSelectionIndices[1];
+        }
+        mTextClassificationHelper.init(
+                mTextView::getTextClassificationSession,
+                getText(mTextView),
+                selectionStart, selectionEnd,
+                mTextView.getTextLocales());
+    }
+
+    private void resetTextClassificationHelper() {
+        resetTextClassificationHelper(-1, -1);
+    }
+
+    private void cancelSmartSelectAnimation() {
+        if (mSmartSelectSprite != null) {
+            mSmartSelectSprite.cancelAnimation();
+        }
     }
 
     /**
@@ -193,84 +534,80 @@ final class SelectionActionModeHelper {
      */
     private static final class SelectionTracker {
 
-        // Log event: Smart selection happened.
-        private static final String LOG_EVENT_MULTI_SELECTION =
-                "textClassifier_multiSelection";
-        private static final String LOG_EVENT_SINGLE_SELECTION =
-                "textClassifier_singleSelection";
-
-        // Log event: Smart selection acted upon.
-        private static final String LOG_EVENT_MULTI_SELECTION_ACTION =
-                "textClassifier_multiSelection_action";
-        private static final String LOG_EVENT_SINGLE_SELECTION_ACTION =
-                "textClassifier_singleSelection_action";
-
-        // Log event: Smart selection was reset to original selection.
-        private static final String LOG_EVENT_MULTI_SELECTION_RESET =
-                "textClassifier_multiSelection_reset";
-
-        // Log event: Smart selection was user modified.
-        private static final String LOG_EVENT_MULTI_SELECTION_MODIFIED =
-                "textClassifier_multiSelection_modified";
-        private static final String LOG_EVENT_SINGLE_SELECTION_MODIFIED =
-                "textClassifier_singleSelection_modified";
-
-        private final TextClassifier mClassifier;
+        private final TextView mTextView;
+        private SelectionMetricsLogger mLogger;
 
         private int mOriginalStart;
         private int mOriginalEnd;
         private int mSelectionStart;
         private int mSelectionEnd;
+        private boolean mAllowReset;
+        private final LogAbandonRunnable mDelayedLogAbandon = new LogAbandonRunnable();
 
-        private boolean mMultiSelection;
-        private boolean mClassifierSelection;
-
-        SelectionTracker(TextClassifier classifier) {
-            mClassifier = classifier;
+        SelectionTracker(TextView textView) {
+            mTextView = Objects.requireNonNull(textView);
+            mLogger = new SelectionMetricsLogger(textView);
         }
 
         /**
-         * Called to initialize the original selection before smart selection is triggered.
+         * Called when the original selection happens, before smart selection is triggered.
          */
-        public void setOriginalSelection(int selectionStart, int selectionEnd) {
-            mOriginalStart = selectionStart;
-            mOriginalEnd = selectionEnd;
-            resetSelectionFlags();
+        public void onOriginalSelection(
+                CharSequence text, int selectionStart, int selectionEnd, boolean isLink) {
+            // If we abandoned a selection and created a new one very shortly after, we may still
+            // have a pending request to log ABANDON, which we flush here.
+            mDelayedLogAbandon.flush();
+
+            mOriginalStart = mSelectionStart = selectionStart;
+            mOriginalEnd = mSelectionEnd = selectionEnd;
+            mAllowReset = false;
+            maybeInvalidateLogger();
+            mLogger.logSelectionStarted(
+                    mTextView.getTextClassificationSession(),
+                    mTextView.getTextClassificationContext(),
+                    text,
+                    selectionStart,
+                    isLink ? SelectionEvent.INVOCATION_LINK : SelectionEvent.INVOCATION_MANUAL);
         }
 
         /**
          * Called when selection action mode is started and the results come from a classifier.
-         * If the selection indices are different from the original selection indices, we have a
-         * smart selection.
          */
-        public void onSelectionStarted(int selectionStart, int selectionEnd, String logTag) {
-            mClassifierSelection = !logTag.isEmpty();
-            mSelectionStart = selectionStart;
-            mSelectionEnd = selectionEnd;
-            // If the started selection is different from the original selection, we have a
-            // smart selection.
-            mMultiSelection =
-                    mSelectionStart != mOriginalStart || mSelectionEnd != mOriginalEnd;
-            if (mMultiSelection) {
-                mClassifier.logEvent(logTag, LOG_EVENT_MULTI_SELECTION);
-            } else if (mClassifierSelection) {
-                mClassifier.logEvent(logTag, LOG_EVENT_SINGLE_SELECTION);
+        public void onSmartSelection(SelectionResult result) {
+            onClassifiedSelection(result);
+            mTextView.notifyContentCaptureTextChanged();
+            mLogger.logSelectionModified(
+                    result.mStart, result.mEnd, result.mClassification, result.mSelection);
+        }
+
+        /**
+         * Called when link action mode is started and the classification comes from a classifier.
+         */
+        public void onLinkSelected(SelectionResult result) {
+            onClassifiedSelection(result);
+            // TODO: log (b/70246800)
+        }
+
+        private void onClassifiedSelection(SelectionResult result) {
+            if (isSelectionStarted()) {
+                mSelectionStart = result.mStart;
+                mSelectionEnd = result.mEnd;
+                mAllowReset = mSelectionStart != mOriginalStart || mSelectionEnd != mOriginalEnd;
             }
         }
 
         /**
          * Called when selection bounds change.
          */
-        public void onSelectionUpdated(int selectionStart, int selectionEnd, String logTag) {
-            final boolean selectionChanged =
-                    selectionStart != mSelectionStart || selectionEnd != mSelectionEnd;
-            if (selectionChanged) {
-                if (mMultiSelection) {
-                    mClassifier.logEvent(logTag, LOG_EVENT_MULTI_SELECTION_MODIFIED);
-                } else if (mClassifierSelection) {
-                    mClassifier.logEvent(logTag, LOG_EVENT_SINGLE_SELECTION_MODIFIED);
-                }
-                resetSelectionFlags();
+        public void onSelectionUpdated(
+                int selectionStart, int selectionEnd,
+                @Nullable TextClassification classification) {
+            if (isSelectionStarted()) {
+                mSelectionStart = selectionStart;
+                mSelectionEnd = selectionEnd;
+                mAllowReset = false;
+                mTextView.notifyContentCaptureTextChanged();
+                mLogger.logSelectionModified(selectionStart, selectionEnd, classification, null);
             }
         }
 
@@ -278,17 +615,24 @@ final class SelectionActionModeHelper {
          * Called when the selection action mode is destroyed.
          */
         public void onSelectionDestroyed() {
-            resetSelectionFlags();
+            mAllowReset = false;
+            mTextView.notifyContentCaptureTextChanged();
+            // Wait a few ms to see if the selection was destroyed because of a text change event.
+            mDelayedLogAbandon.schedule(100 /* ms */);
         }
 
         /**
-         * Logs if the action was taken on a smart selection.
+         * Called when an action is taken on a smart selection.
          */
-        public void onSelectionAction(String logTag) {
-            if (mMultiSelection) {
-                mClassifier.logEvent(logTag, LOG_EVENT_MULTI_SELECTION_ACTION);
-            } else if (mClassifierSelection) {
-                mClassifier.logEvent(logTag, LOG_EVENT_SINGLE_SELECTION_ACTION);
+        public void onSelectionAction(
+                int selectionStart, int selectionEnd,
+                @SelectionEvent.ActionType int action,
+                @Nullable String actionLabel,
+                @Nullable TextClassification classification) {
+            if (isSelectionStarted()) {
+                mAllowReset = false;
+                mLogger.logSelectionAction(
+                        selectionStart, selectionEnd, action, actionLabel, classification);
             }
         }
 
@@ -298,22 +642,355 @@ final class SelectionActionModeHelper {
          * The expected UX here is to allow the user to select a word inside of the smart selection
          * on a single tap.
          */
-        public boolean resetSelection(int textIndex, Editor editor, String logTag) {
-            final CharSequence text = editor.getTextView().getText();
-            if (mMultiSelection
+        public boolean resetSelection(int textIndex, Editor editor) {
+            final TextView textView = editor.getTextView();
+            if (isSelectionStarted()
+                    && mAllowReset
                     && textIndex >= mSelectionStart && textIndex <= mSelectionEnd
-                    && text instanceof Spannable) {
-                // Only allow a reset once.
-                resetSelectionFlags();
-                mClassifier.logEvent(logTag, LOG_EVENT_MULTI_SELECTION_RESET);
-                return editor.selectCurrentWord();
+                    && getText(textView) instanceof Spannable) {
+                mAllowReset = false;
+                boolean selected = editor.selectCurrentWord();
+                if (selected) {
+                    final int[] sortedSelectionIndices = sortSelectionIndicesFromTextView(textView);
+                    mSelectionStart = sortedSelectionIndices[0];
+                    mSelectionEnd = sortedSelectionIndices[1];
+                    mLogger.logSelectionAction(
+                            sortedSelectionIndices[0], sortedSelectionIndices[1],
+                            SelectionEvent.ACTION_RESET,
+                            /* actionLabel= */ null, /* classification= */ null);
+                }
+                return selected;
             }
             return false;
         }
 
-        private void resetSelectionFlags() {
-            mMultiSelection = false;
-            mClassifierSelection = false;
+        public void onTextChanged(int start, int end, TextClassification classification) {
+            if (isSelectionStarted() && start == mSelectionStart && end == mSelectionEnd) {
+                onSelectionAction(
+                        start, end, SelectionEvent.ACTION_OVERTYPE,
+                        /* actionLabel= */ null, classification);
+            }
+        }
+
+        private void maybeInvalidateLogger() {
+            if (mLogger.isEditTextLogger() != mTextView.isTextEditable()) {
+                mLogger = new SelectionMetricsLogger(mTextView);
+            }
+        }
+
+        private boolean isSelectionStarted() {
+            return mSelectionStart >= 0 && mSelectionEnd >= 0 && mSelectionStart != mSelectionEnd;
+        }
+
+        /** A helper for keeping track of pending abandon logging requests. */
+        private final class LogAbandonRunnable implements Runnable {
+            private boolean mIsPending;
+
+            /** Schedules an abandon to be logged with the given delay. Flush if necessary. */
+            void schedule(int delayMillis) {
+                if (mIsPending) {
+                    Log.e(LOG_TAG, "Force flushing abandon due to new scheduling request");
+                    flush();
+                }
+                mIsPending = true;
+                mTextView.postDelayed(this, delayMillis);
+            }
+
+            /** If there is a pending log request, execute it now. */
+            void flush() {
+                mTextView.removeCallbacks(this);
+                run();
+            }
+
+            @Override
+            public void run() {
+                if (mIsPending) {
+                    mLogger.logSelectionAction(
+                            mSelectionStart, mSelectionEnd,
+                            SelectionEvent.ACTION_ABANDON,
+                            /* actionLabel= */ null, /* classification= */ null);
+                    mSelectionStart = mSelectionEnd = -1;
+                    mLogger.endTextClassificationSession();
+                    mIsPending = false;
+                }
+            }
+        }
+    }
+
+    // TODO: Write tests
+    /**
+     * Metrics logging helper.
+     *
+     * This logger logs selection by word indices. The initial (start) single word selection is
+     * logged at [0, 1) -- end index is exclusive. Other word indices are logged relative to the
+     * initial single word selection.
+     * e.g. New York city, NY. Suppose the initial selection is "York" in
+     * "New York city, NY", then "York" is at [0, 1), "New" is at [-1, 0], and "city" is at [1, 2).
+     * "New York" is at [-1, 1).
+     * Part selection of a word e.g. "or" is counted as selecting the
+     * entire word i.e. equivalent to "York", and each special character is counted as a word, e.g.
+     * "," is at [2, 3). Whitespaces are ignored.
+     *
+     * NOTE that the definition of a word is defined by the TextClassifier's Logger's token
+     * iterator.
+     */
+    private static final class SelectionMetricsLogger {
+
+        private static final String LOG_TAG = "SelectionMetricsLogger";
+        private static final Pattern PATTERN_WHITESPACE = Pattern.compile("\\s+");
+
+        private final boolean mEditTextLogger;
+        private final BreakIterator mTokenIterator;
+
+        @Nullable private TextClassifier mClassificationSession;
+        @Nullable private TextClassificationContext mClassificationContext;
+
+        @Nullable private TextClassifierEvent mTranslateViewEvent;
+        @Nullable private TextClassifierEvent mTranslateClickEvent;
+
+        private int mStartIndex;
+        private String mText;
+
+        SelectionMetricsLogger(TextView textView) {
+            Objects.requireNonNull(textView);
+            mEditTextLogger = textView.isTextEditable();
+            mTokenIterator = BreakIterator.getWordInstance(textView.getTextLocale());
+        }
+
+        public void logSelectionStarted(
+                TextClassifier classificationSession,
+                TextClassificationContext classificationContext,
+                CharSequence text, int index,
+                @InvocationMethod int invocationMethod) {
+            try {
+                Objects.requireNonNull(text);
+                Preconditions.checkArgumentInRange(index, 0, text.length(), "index");
+                if (mText == null || !mText.contentEquals(text)) {
+                    mText = text.toString();
+                }
+                mTokenIterator.setText(mText);
+                mStartIndex = index;
+                mClassificationSession = classificationSession;
+                mClassificationContext = classificationContext;
+                if (hasActiveClassificationSession()) {
+                    mClassificationSession.onSelectionEvent(
+                            SelectionEvent.createSelectionStartedEvent(invocationMethod, 0));
+                }
+            } catch (Exception e) {
+                // Avoid crashes due to logging.
+                Log.e(LOG_TAG, "" + e.getMessage(), e);
+            }
+        }
+
+        public void logSelectionModified(int start, int end,
+                @Nullable TextClassification classification, @Nullable TextSelection selection) {
+            try {
+                if (hasActiveClassificationSession()) {
+                    Preconditions.checkArgumentInRange(start, 0, mText.length(), "start");
+                    Preconditions.checkArgumentInRange(end, start, mText.length(), "end");
+                    int[] wordIndices = getWordDelta(start, end);
+                    if (selection != null) {
+                        mClassificationSession.onSelectionEvent(
+                                SelectionEvent.createSelectionModifiedEvent(
+                                        wordIndices[0], wordIndices[1], selection));
+                    } else if (classification != null) {
+                        mClassificationSession.onSelectionEvent(
+                                SelectionEvent.createSelectionModifiedEvent(
+                                        wordIndices[0], wordIndices[1], classification));
+                    } else {
+                        mClassificationSession.onSelectionEvent(
+                                SelectionEvent.createSelectionModifiedEvent(
+                                        wordIndices[0], wordIndices[1]));
+                    }
+                    maybeGenerateTranslateViewEvent(classification);
+                }
+            } catch (Exception e) {
+                // Avoid crashes due to logging.
+                Log.e(LOG_TAG, "" + e.getMessage(), e);
+            }
+        }
+
+        public void logSelectionAction(
+                int start, int end,
+                @SelectionEvent.ActionType int action,
+                @Nullable String actionLabel,
+                @Nullable TextClassification classification) {
+            try {
+                if (hasActiveClassificationSession()) {
+                    Preconditions.checkArgumentInRange(start, 0, mText.length(), "start");
+                    Preconditions.checkArgumentInRange(end, start, mText.length(), "end");
+                    int[] wordIndices = getWordDelta(start, end);
+                    if (classification != null) {
+                        mClassificationSession.onSelectionEvent(
+                                SelectionEvent.createSelectionActionEvent(
+                                        wordIndices[0], wordIndices[1], action,
+                                        classification));
+                    } else {
+                        mClassificationSession.onSelectionEvent(
+                                SelectionEvent.createSelectionActionEvent(
+                                        wordIndices[0], wordIndices[1], action));
+                    }
+
+                    maybeGenerateTranslateClickEvent(classification, actionLabel);
+
+                    if (SelectionEvent.isTerminal(action)) {
+                        endTextClassificationSession();
+                    }
+                }
+            } catch (Exception e) {
+                // Avoid crashes due to logging.
+                Log.e(LOG_TAG, "" + e.getMessage(), e);
+            }
+        }
+
+        public boolean isEditTextLogger() {
+            return mEditTextLogger;
+        }
+
+        public void endTextClassificationSession() {
+            if (hasActiveClassificationSession()) {
+                maybeReportTranslateEvents();
+                mClassificationSession.destroy();
+            }
+        }
+
+        private boolean hasActiveClassificationSession() {
+            return mClassificationSession != null && !mClassificationSession.isDestroyed();
+        }
+
+        private int[] getWordDelta(int start, int end) {
+            int[] wordIndices = new int[2];
+
+            if (start == mStartIndex) {
+                wordIndices[0] = 0;
+            } else if (start < mStartIndex) {
+                wordIndices[0] = -countWordsForward(start);
+            } else {  // start > mStartIndex
+                wordIndices[0] = countWordsBackward(start);
+
+                // For the selection start index, avoid counting a partial word backwards.
+                if (!mTokenIterator.isBoundary(start)
+                        && !isWhitespace(
+                        mTokenIterator.preceding(start),
+                        mTokenIterator.following(start))) {
+                    // We counted a partial word. Remove it.
+                    wordIndices[0]--;
+                }
+            }
+
+            if (end == mStartIndex) {
+                wordIndices[1] = 0;
+            } else if (end < mStartIndex) {
+                wordIndices[1] = -countWordsForward(end);
+            } else {  // end > mStartIndex
+                wordIndices[1] = countWordsBackward(end);
+            }
+
+            return wordIndices;
+        }
+
+        private int countWordsBackward(int from) {
+            Preconditions.checkArgument(from >= mStartIndex);
+            int wordCount = 0;
+            int offset = from;
+            while (offset > mStartIndex) {
+                int start = mTokenIterator.preceding(offset);
+                if (!isWhitespace(start, offset)) {
+                    wordCount++;
+                }
+                offset = start;
+            }
+            return wordCount;
+        }
+
+        private int countWordsForward(int from) {
+            Preconditions.checkArgument(from <= mStartIndex);
+            int wordCount = 0;
+            int offset = from;
+            while (offset < mStartIndex) {
+                int end = mTokenIterator.following(offset);
+                if (!isWhitespace(offset, end)) {
+                    wordCount++;
+                }
+                offset = end;
+            }
+            return wordCount;
+        }
+
+        private boolean isWhitespace(int start, int end) {
+            return PATTERN_WHITESPACE.matcher(mText.substring(start, end)).matches();
+        }
+
+        private void maybeGenerateTranslateViewEvent(@Nullable TextClassification classification) {
+            if (classification != null) {
+                final TextClassifierEvent event = generateTranslateEvent(
+                        TextClassifierEvent.TYPE_ACTIONS_SHOWN,
+                        classification, mClassificationContext, /* actionLabel= */null);
+                mTranslateViewEvent = (event != null) ? event : mTranslateViewEvent;
+            }
+        }
+
+        private void maybeGenerateTranslateClickEvent(
+                @Nullable TextClassification classification, String actionLabel) {
+            if (classification != null) {
+                mTranslateClickEvent = generateTranslateEvent(
+                        TextClassifierEvent.TYPE_SMART_ACTION,
+                        classification, mClassificationContext, actionLabel);
+            }
+        }
+
+        private void maybeReportTranslateEvents() {
+            // Translate view and click events should only be logged once per selection session.
+            if (mTranslateViewEvent != null) {
+                mClassificationSession.onTextClassifierEvent(mTranslateViewEvent);
+                mTranslateViewEvent = null;
+            }
+            if (mTranslateClickEvent != null) {
+                mClassificationSession.onTextClassifierEvent(mTranslateClickEvent);
+                mTranslateClickEvent = null;
+            }
+        }
+
+        @Nullable
+        private static TextClassifierEvent generateTranslateEvent(
+                int eventType, TextClassification classification,
+                TextClassificationContext classificationContext, @Nullable String actionLabel) {
+
+            // The platform attempts to log "views" and "clicks" of the "Translate" action.
+            // Views are logged if a user is presented with the translate action during a selection
+            // session.
+            // Clicks are logged if the user clicks on the translate action.
+            // The index of the translate action is also logged to indicate whether it might have
+            // been in the main panel or overflow panel of the selection toolbar.
+            // NOTE that the "views" metric may be flawed if a TextView removes the translate menu
+            // item via a custom action mode callback or does not show a selection menu item.
+
+            final RemoteAction translateAction = ExtrasUtils.findTranslateAction(classification);
+            if (translateAction == null) {
+                // No translate action present. Nothing to log. Exit.
+                return null;
+            }
+
+            if (eventType == TextClassifierEvent.TYPE_SMART_ACTION
+                    && !translateAction.getTitle().toString().equals(actionLabel)) {
+                // Clicked action is not a translate action. Nothing to log. Exit.
+                // Note that we don't expect an actionLabel for "view" events.
+                return null;
+            }
+
+            final Bundle foreignLanguageExtra = ExtrasUtils.getForeignLanguageExtra(classification);
+            final String language = ExtrasUtils.getEntityType(foreignLanguageExtra);
+            final float score = ExtrasUtils.getScore(foreignLanguageExtra);
+            final String model = ExtrasUtils.getModelName(foreignLanguageExtra);
+            return new TextClassifierEvent.LanguageDetectionEvent.Builder(eventType)
+                    .setEventContext(classificationContext)
+                    .setResultId(classification.getId())
+                    // b/158481016: Disable language logging.
+                    //.setEntityTypes(language)
+                    .setScores(score)
+                    .setActionIndices(classification.getActions().indexOf(translateAction))
+                    .setModelName(model)
+                    .build();
         }
     }
 
@@ -328,6 +1005,7 @@ final class SelectionActionModeHelper {
         private final int mTimeOutDuration;
         private final Supplier<SelectionResult> mSelectionResultSupplier;
         private final Consumer<SelectionResult> mSelectionResultCallback;
+        private final Supplier<SelectionResult> mTimeOutResultSupplier;
         private final TextView mTextView;
         private final String mOriginalText;
 
@@ -336,18 +1014,21 @@ final class SelectionActionModeHelper {
          * @param timeOut time in milliseconds to timeout the query if it has not completed
          * @param selectionResultSupplier fetches the selection results. Runs on a background thread
          * @param selectionResultCallback receives the selection results. Runs on the UiThread
+         * @param timeOutResultSupplier default result if the task times out
          */
         TextClassificationAsyncTask(
                 @NonNull TextView textView, int timeOut,
                 @NonNull Supplier<SelectionResult> selectionResultSupplier,
-                @NonNull Consumer<SelectionResult> selectionResultCallback) {
+                @NonNull Consumer<SelectionResult> selectionResultCallback,
+                @NonNull Supplier<SelectionResult> timeOutResultSupplier) {
             super(textView != null ? textView.getHandler() : null);
-            mTextView = Preconditions.checkNotNull(textView);
+            mTextView = Objects.requireNonNull(textView);
             mTimeOutDuration = timeOut;
-            mSelectionResultSupplier = Preconditions.checkNotNull(selectionResultSupplier);
-            mSelectionResultCallback = Preconditions.checkNotNull(selectionResultCallback);
+            mSelectionResultSupplier = Objects.requireNonNull(selectionResultSupplier);
+            mSelectionResultCallback = Objects.requireNonNull(selectionResultCallback);
+            mTimeOutResultSupplier = Objects.requireNonNull(timeOutResultSupplier);
             // Make a copy of the original text.
-            mOriginalText = mTextView.getText().toString();
+            mOriginalText = getText(mTextView).toString();
         }
 
         @Override
@@ -355,7 +1036,13 @@ final class SelectionActionModeHelper {
         protected SelectionResult doInBackground(Void... params) {
             final Runnable onTimeOut = this::onTimeOut;
             mTextView.postDelayed(onTimeOut, mTimeOutDuration);
-            final SelectionResult result = mSelectionResultSupplier.get();
+            SelectionResult result = null;
+            try {
+                result = mSelectionResultSupplier.get();
+            } catch (IllegalStateException e) {
+                // TODO(b/174300371): Only swallows the exception if the TCSession is destroyed
+                Log.w(LOG_TAG, "TextClassificationAsyncTask failed.", e);
+            }
             mTextView.removeCallbacks(onTimeOut);
             return result;
         }
@@ -363,13 +1050,14 @@ final class SelectionActionModeHelper {
         @Override
         @UiThread
         protected void onPostExecute(SelectionResult result) {
-            result = TextUtils.equals(mOriginalText, mTextView.getText()) ? result : null;
+            result = TextUtils.equals(mOriginalText, getText(mTextView)) ? result : null;
             mSelectionResultCallback.accept(result);
         }
 
         private void onTimeOut() {
+            Log.d(LOG_TAG, "Timeout in TextClassificationAsyncTask");
             if (getStatus() == Status.RUNNING) {
-                onPostExecute(null);
+                onPostExecute(mTimeOutResultSupplier.get());
             }
             cancel(true);
         }
@@ -382,9 +1070,12 @@ final class SelectionActionModeHelper {
      */
     private static final class TextClassificationHelper {
 
-        private static final int TRIM_DELTA = 120;  // characters
+        // The fixed upper bound of context size.
+        private static final int TRIM_DELTA_UPPER_BOUND = 240;
 
-        private TextClassifier mTextClassifier;
+        private final Context mContext;
+        private Supplier<TextClassifier> mTextClassifier;
+        private final ViewConfiguration mViewConfiguration;
 
         /** The original TextView text. **/
         private String mText;
@@ -392,9 +1083,9 @@ final class SelectionActionModeHelper {
         private int mSelectionStart;
         /** End index relative to mText. */
         private int mSelectionEnd;
-        private LocaleList mLocales;
-        /** A tag for the classifier that returned the latest smart selection. */
-        private String mSelectionTag = "";
+
+        @Nullable
+        private LocaleList mDefaultLocales;
 
         /** Trimmed text starting from mTrimStart in mText. */
         private CharSequence mTrimmedText;
@@ -412,68 +1103,129 @@ final class SelectionActionModeHelper {
         private LocaleList mLastClassificationLocales;
         private SelectionResult mLastClassificationResult;
 
-        TextClassificationHelper(TextClassifier textClassifier,
+        /** Whether the TextClassifier has been initialized. */
+        private boolean mInitialized;
+
+        TextClassificationHelper(Context context, Supplier<TextClassifier> textClassifier,
                 CharSequence text, int selectionStart, int selectionEnd, LocaleList locales) {
-            reset(textClassifier, text, selectionStart, selectionEnd, true, locales);
+            init(textClassifier, text, selectionStart, selectionEnd, locales);
+            mContext = Objects.requireNonNull(context);
+            mViewConfiguration = ViewConfiguration.get(mContext);
         }
 
         @UiThread
-        public void reset(TextClassifier textClassifier,
-                CharSequence text, int selectionStart, int selectionEnd,
-                boolean resetSelectionTag, LocaleList locales) {
-            mTextClassifier = Preconditions.checkNotNull(textClassifier);
-            mText = Preconditions.checkNotNull(text).toString();
+        public void init(Supplier<TextClassifier> textClassifier, CharSequence text,
+                int selectionStart, int selectionEnd, LocaleList locales) {
+            mTextClassifier = Objects.requireNonNull(textClassifier);
+            mText = Objects.requireNonNull(text).toString();
             mLastClassificationText = null; // invalidate.
             Preconditions.checkArgument(selectionEnd > selectionStart);
             mSelectionStart = selectionStart;
             mSelectionEnd = selectionEnd;
-            mLocales = locales;
-            if (resetSelectionTag) {
-                mSelectionTag = "";
-            }
+            mDefaultLocales = locales;
         }
 
         @WorkerThread
         public SelectionResult classifyText() {
+            mInitialized = true;
+            return performClassification(null /* selection */);
+        }
+
+        @WorkerThread
+        public SelectionResult suggestSelection() {
+            mInitialized = true;
+            trimText();
+            final TextSelection selection;
+            if (mContext.getApplicationInfo().targetSdkVersion >= Build.VERSION_CODES.P) {
+                final TextSelection.Request request = new TextSelection.Request.Builder(
+                        mTrimmedText, mRelativeStart, mRelativeEnd)
+                        .setDefaultLocales(mDefaultLocales)
+                        .setDarkLaunchAllowed(true)
+                        .setIncludeTextClassification(true)
+                        .build();
+                selection = mTextClassifier.get().suggestSelection(request);
+            } else {
+                // Use old APIs.
+                selection = mTextClassifier.get().suggestSelection(
+                        mTrimmedText, mRelativeStart, mRelativeEnd, mDefaultLocales);
+            }
+            // Do not classify new selection boundaries if TextClassifier should be dark launched.
+            if (!isDarkLaunchEnabled()) {
+                mSelectionStart = Math.max(0, selection.getSelectionStartIndex() + mTrimStart);
+                mSelectionEnd = Math.min(
+                        mText.length(), selection.getSelectionEndIndex() + mTrimStart);
+            }
+            return performClassification(selection);
+        }
+
+        public SelectionResult getOriginalSelection() {
+            return new SelectionResult(mSelectionStart, mSelectionEnd, null, null);
+        }
+
+        /**
+         * Maximum time (in milliseconds) to wait for a textclassifier result before timing out.
+         */
+        public int getTimeoutDuration() {
+            if (mInitialized) {
+                return mViewConfiguration.getSmartSelectionInitializedTimeout();
+            } else {
+                // Return a slightly larger number than usual when the TextClassifier is first
+                // initialized. Initialization would usually take longer than subsequent calls to
+                // the TextClassifier. The impact of this on the UI is that we do not show the
+                // selection handles or toolbar until after this timeout.
+                return mViewConfiguration.getSmartSelectionInitializingTimeout();
+            }
+        }
+
+        private boolean isDarkLaunchEnabled() {
+            return TextClassificationManager.getSettings(mContext).isModelDarkLaunchEnabled();
+        }
+
+        private SelectionResult performClassification(@Nullable TextSelection selection) {
             if (!Objects.equals(mText, mLastClassificationText)
                     || mSelectionStart != mLastClassificationSelectionStart
                     || mSelectionEnd != mLastClassificationSelectionEnd
-                    || !Objects.equals(mLocales, mLastClassificationLocales)) {
+                    || !Objects.equals(mDefaultLocales, mLastClassificationLocales)) {
 
                 mLastClassificationText = mText;
                 mLastClassificationSelectionStart = mSelectionStart;
                 mLastClassificationSelectionEnd = mSelectionEnd;
-                mLastClassificationLocales = mLocales;
+                mLastClassificationLocales = mDefaultLocales;
 
                 trimText();
+                final TextClassification classification;
+                if (Linkify.containsUnsupportedCharacters(mText)) {
+                    // Do not show smart actions for text containing unsupported characters.
+                    android.util.EventLog.writeEvent(0x534e4554, "116321860", -1, "");
+                    classification = TextClassification.EMPTY;
+                } else if (selection != null && selection.getTextClassification() != null) {
+                    classification = selection.getTextClassification();
+                } else if (mContext.getApplicationInfo().targetSdkVersion
+                        >= Build.VERSION_CODES.P) {
+                    final TextClassification.Request request =
+                            new TextClassification.Request.Builder(
+                                    mTrimmedText, mRelativeStart, mRelativeEnd)
+                                    .setDefaultLocales(mDefaultLocales)
+                                    .build();
+                    classification = mTextClassifier.get().classifyText(request);
+                } else {
+                    // Use old APIs.
+                    classification = mTextClassifier.get().classifyText(
+                            mTrimmedText, mRelativeStart, mRelativeEnd, mDefaultLocales);
+                }
                 mLastClassificationResult = new SelectionResult(
-                        mSelectionStart,
-                        mSelectionEnd,
-                        mTextClassifier.classifyText(
-                                mTrimmedText, mRelativeStart, mRelativeEnd, mLocales));
+                        mSelectionStart, mSelectionEnd, classification, selection);
 
             }
             return mLastClassificationResult;
         }
 
-        @WorkerThread
-        public SelectionResult suggestSelection() {
-            trimText();
-            final TextSelection sel = mTextClassifier.suggestSelection(
-                    mTrimmedText, mRelativeStart, mRelativeEnd, mLocales);
-            mSelectionStart = Math.max(0, sel.getSelectionStartIndex() + mTrimStart);
-            mSelectionEnd = Math.min(mText.length(), sel.getSelectionEndIndex() + mTrimStart);
-            mSelectionTag = sel.getSourceClassifier();
-            return classifyText();
-        }
-
-        String getSelectionTag() {
-            return mSelectionTag;
-        }
-
         private void trimText() {
-            mTrimStart = Math.max(0, mSelectionStart - TRIM_DELTA);
-            final int referenceEnd = Math.min(mText.length(), mSelectionEnd + TRIM_DELTA);
+            final int trimDelta = Math.min(
+                    TextClassificationManager.getSettings(mContext).getSmartSelectionTrimDelta(),
+                    TRIM_DELTA_UPPER_BOUND);
+            mTrimStart = Math.max(0, mSelectionStart - trimDelta);
+            final int referenceEnd = Math.min(mText.length(), mSelectionEnd + trimDelta);
             mTrimmedText = mText.subSequence(mTrimStart, referenceEnd);
             mRelativeStart = mSelectionStart - mTrimStart;
             mRelativeEnd = mSelectionEnd - mTrimStart;
@@ -486,12 +1238,47 @@ final class SelectionActionModeHelper {
     private static final class SelectionResult {
         private final int mStart;
         private final int mEnd;
-        private final TextClassification mClassification;
+        @Nullable private final TextClassification mClassification;
+        @Nullable private final TextSelection mSelection;
 
-        SelectionResult(int start, int end, TextClassification classification) {
-            mStart = start;
-            mEnd = end;
-            mClassification = Preconditions.checkNotNull(classification);
+        SelectionResult(int start, int end,
+                @Nullable TextClassification classification, @Nullable TextSelection selection) {
+            int[] sortedIndices = sortSelectionIndices(start, end);
+            mStart = sortedIndices[0];
+            mEnd = sortedIndices[1];
+            mClassification = classification;
+            mSelection = selection;
         }
+    }
+
+    @SelectionEvent.ActionType
+    private static int getActionType(int menuItemId) {
+        switch (menuItemId) {
+            case TextView.ID_SELECT_ALL:
+                return SelectionEvent.ACTION_SELECT_ALL;
+            case TextView.ID_CUT:
+                return SelectionEvent.ACTION_CUT;
+            case TextView.ID_COPY:
+                return SelectionEvent.ACTION_COPY;
+            case TextView.ID_PASTE:  // fall through
+            case TextView.ID_PASTE_AS_PLAIN_TEXT:
+                return SelectionEvent.ACTION_PASTE;
+            case TextView.ID_SHARE:
+                return SelectionEvent.ACTION_SHARE;
+            case TextView.ID_ASSIST:
+                return SelectionEvent.ACTION_SMART_SHARE;
+            default:
+                return SelectionEvent.ACTION_OTHER;
+        }
+    }
+
+    private static CharSequence getText(TextView textView) {
+        // Extracts the textView's text.
+        // TODO: Investigate why/when TextView.getText() is null.
+        final CharSequence text = textView.getText();
+        if (text != null) {
+            return text;
+        }
+        return "";
     }
 }

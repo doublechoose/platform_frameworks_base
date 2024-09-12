@@ -16,10 +16,11 @@
 
 package com.android.internal.util;
 
-import java.io.PrintWriter;
-import java.util.ArrayList;
-
+import android.util.IndentingPrintWriter;
 import android.util.Slog;
+import android.util.proto.ProtoOutputStream;
+
+import java.util.ArrayList;
 
 /**
  * Helper class for logging serious issues, which also keeps a small
@@ -27,6 +28,8 @@ import android.util.Slog;
  * of a system service's dumpsys output.
  * @hide
  */
+// Exported to Mainline modules; cannot use annotations
+// @android.ravenwood.annotation.RavenwoodKeepWholeClass
 public class LocalLog {
     private final String mTag;
     private final int mMaxLines = 20;
@@ -46,21 +49,34 @@ public class LocalLog {
         }
     }
 
-    public boolean dump(PrintWriter pw, String header, String prefix) {
+    public boolean dump(IndentingPrintWriter pw, String header) {
         synchronized (mLines) {
             if (mLines.size() <= 0) {
                 return false;
             }
             if (header != null) {
                 pw.println(header);
+                pw.increaseIndent();
             }
             for (int i=0; i<mLines.size(); i++) {
-                if (prefix != null) {
-                    pw.print(prefix);
-                }
                 pw.println(mLines.get(i));
+            }
+            if (header != null) {
+                pw.decreaseIndent();
             }
             return true;
         }
+    }
+
+    public void dumpDebug(ProtoOutputStream proto, long fieldId) {
+        final long token = proto.start(fieldId);
+
+        synchronized (mLines) {
+            for (int i = 0; i < mLines.size(); ++i) {
+                proto.write(LocalLogProto.LINES, mLines.get(i));
+            }
+        }
+
+        proto.end(token);
     }
 }

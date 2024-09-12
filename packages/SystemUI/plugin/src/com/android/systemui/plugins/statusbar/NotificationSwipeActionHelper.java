@@ -14,14 +14,15 @@
 
 package com.android.systemui.plugins.statusbar;
 
-import com.android.systemui.plugins.annotations.DependsOn;
-import com.android.systemui.plugins.annotations.ProvidesInterface;
-import com.android.systemui.plugins.statusbar.NotificationSwipeActionHelper.SnoozeOption;
-
 import android.service.notification.SnoozeCriterion;
 import android.service.notification.StatusBarNotification;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction;
+
+import com.android.systemui.plugins.annotations.DependsOn;
+import com.android.systemui.plugins.annotations.ProvidesInterface;
+import com.android.systemui.plugins.statusbar.NotificationSwipeActionHelper.SnoozeOption;
 
 @ProvidesInterface(version = NotificationSwipeActionHelper.VERSION)
 @DependsOn(target = SnoozeOption.class)
@@ -38,7 +39,7 @@ public interface NotificationSwipeActionHelper {
     /**
      * Call this to snap a notification to provided {@code targetLeft}.
      */
-    public void snap(View animView, float velocity, float targetLeft);
+    public void snapOpen(View animView, int targetLeft, float velocity);
 
     /**
      * Call this to snooze a notification based on the provided {@link SnoozeOption}.
@@ -49,26 +50,21 @@ public interface NotificationSwipeActionHelper {
 
     public boolean isDismissGesture(MotionEvent ev);
 
-    public boolean isFalseGesture(MotionEvent ev);
-
-    public boolean swipedFarEnough(float translation, float viewSize);
-
-    public boolean swipedFastEnough(float translation, float velocity);
+    /** Returns true if the gesture should be rejected. */
+    boolean isFalseGesture();
 
     @ProvidesInterface(version = SnoozeOption.VERSION)
-    public static class SnoozeOption {
-        public static final int VERSION = 1;
-        public int snoozeForMinutes;
-        public SnoozeCriterion criterion;
-        public CharSequence description;
-        public CharSequence confirmation;
+    public interface SnoozeOption {
+        public static final int VERSION = 2;
 
-        public SnoozeOption(SnoozeCriterion crit, int minsToSnoozeFor, CharSequence desc,
-                CharSequence confirm) {
-            criterion = crit;
-            snoozeForMinutes = minsToSnoozeFor;
-            description = desc;
-            confirmation = confirm;
-        }
+        public SnoozeCriterion getSnoozeCriterion();
+
+        public CharSequence getDescription();
+
+        public CharSequence getConfirmation();
+
+        public int getMinutesToSnoozeFor();
+
+        public AccessibilityAction getAccessibilityAction();
     }
 }

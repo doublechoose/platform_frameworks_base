@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 The Android Open Source Project
+ * Copyright (C) 2018 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,121 +20,323 @@ import android.annotation.FloatRange;
 import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.icu.util.ULocale;
+import android.os.Bundle;
+import android.os.Parcel;
+import android.os.Parcelable;
+import android.util.ArrayMap;
 
-import com.android.internal.util.Preconditions;
+import com.android.internal.annotations.VisibleForTesting;
 
-import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
 
 /**
- * Specifies detected languages for a section of text indicated by a start and end index.
- * @hide
+ * Represents the result of language detection of a piece of text.
+ * <p>
+ * This contains a list of locales, each paired with a confidence score, sorted in decreasing
+ * order of those scores. E.g., for a given input text, the model may return
+ * {@code [<"en", 0.85>, <"fr", 0.15>]}. This sample result means the model reports that it is
+ * 85% likely that the entire text is in English and 15% likely that the entire text is in French,
+ * etc. It does not mean that 85% of the input is in English and 15% is in French.
  */
-public final class TextLanguage {
+public final class TextLanguage implements Parcelable {
 
-    private final int mStartIndex;
-    private final int mEndIndex;
-    @NonNull private final EntityConfidence<Locale> mLanguageConfidence;
-    @NonNull private final List<Locale> mLanguages;
+    public static final @android.annotation.NonNull Creator<TextLanguage> CREATOR = new Creator<TextLanguage>() {
+        @Override
+        public TextLanguage createFromParcel(Parcel in) {
+            return readFromParcel(in);
+        }
+
+        @Override
+        public TextLanguage[] newArray(int size) {
+            return new TextLanguage[size];
+        }
+    };
+
+    static final TextLanguage EMPTY = new Builder().build();
+
+    @Nullable private final String mId;
+    private final EntityConfidence mEntityConfidence;
+    private final Bundle mBundle;
 
     private TextLanguage(
-            int startIndex, int endIndex, @NonNull EntityConfidence<Locale> languageConfidence) {
-        mStartIndex = startIndex;
-        mEndIndex = endIndex;
-        mLanguageConfidence = new EntityConfidence<>(languageConfidence);
-        mLanguages = mLanguageConfidence.getEntities();
+            @Nullable String id,
+            EntityConfidence entityConfidence,
+            Bundle bundle) {
+        mId = id;
+        mEntityConfidence = entityConfidence;
+        mBundle = bundle;
     }
 
     /**
-     * Returns the start index of the detected languages in the text provided to generate this
-     * object.
+     * Returns the id, if one exists, for this object.
      */
-    public int getStartIndex() {
-        return mStartIndex;
+    @Nullable
+    public String getId() {
+        return mId;
     }
 
     /**
-     * Returns the end index of the detected languages in the text provided to generate this object.
-     */
-    public int getEndIndex() {
-        return mEndIndex;
-    }
-
-    /**
-     * Returns the number of languages found in the classified text.
+     * Returns the number of possible locales for the processed text.
      */
     @IntRange(from = 0)
-    public int getLanguageCount() {
-        return mLanguages.size();
+    public int getLocaleHypothesisCount() {
+        return mEntityConfidence.getEntities().size();
     }
 
     /**
-     * Returns the language locale at the specified index.
-     * Language locales are ordered from high confidence to low confidence.
+     * Returns the language locale at the specified index. Locales are ordered from high
+     * confidence to low confidence.
+     * <p>
+     * See {@link #getLocaleHypothesisCount()} for the number of locales available.
      *
      * @throws IndexOutOfBoundsException if the specified index is out of range.
-     * @see #getLanguageCount() for the number of language locales available.
      */
     @NonNull
-    public Locale getLanguage(int index) {
-        return mLanguages.get(index);
+    public ULocale getLocale(int index) {
+        return ULocale.forLanguageTag(mEntityConfidence.getEntities().get(index));
     }
 
     /**
-     * Returns the confidence score for the specified language. The value ranges from
-     * 0 (low confidence) to 1 (high confidence). 0 indicates that the language was
-     * not found for the classified text.
+     * Returns the confidence score for the specified language locale. The value ranges from
+     * 0 (low confidence) to 1 (high confidence). 0 indicates that the locale was not found for
+     * the processed text.
      */
     @FloatRange(from = 0.0, to = 1.0)
-    public float getConfidenceScore(@Nullable Locale language) {
-        return mLanguageConfidence.getConfidenceScore(language);
+    public float getConfidenceScore(@NonNull ULocale locale) {
+        return mEntityConfidence.getConfidenceScore(locale.toLanguageTag());
+    }
+
+    /**
+     * Returns a bundle containing non-structured extra information about this result. What is
+     * returned in the extras is specific to the {@link TextClassifier} implementation.
+     *
+     * <p><b>NOTE: </b>Do not modify this bundle.
+     */
+    @NonNull
+    public Bundle getExtras() {
+        return mBundle;
     }
 
     @Override
     public String toString() {
-        return String.format("TextLanguage {%d, %d, %s}",
-                mStartIndex, mEndIndex, mLanguageConfidence);
+        return String.format(
+                Locale.US,
+                "TextLanguage {id=%s, locales=%s, bundle=%s}",
+                mId, mEntityConfidence, mBundle);
+    }
+
+    @Override
+    public int describeContents() {
+        return 0;
+    }
+
+    @Override
+    public void writeToParcel(Parcel dest, int flags) {
+        dest.writeString(mId);
+        mEntityConfidence.writeToParcel(dest, flags);
+        dest.writeBundle(mBundle);
+    }
+
+    private static TextLanguage readFromParcel(Parcel in) {
+        return new TextLanguage(
+                in.readString(),
+                EntityConfidence.CREATOR.createFromParcel(in),
+                in.readBundle());
     }
 
     /**
-     * Builder to build {@link TextLanguage} objects.
+     * Builder used to build TextLanguage objects.
      */
     public static final class Builder {
 
-        private final int mStartIndex;
-        private final int mEndIndex;
-        @NonNull private final EntityConfidence<Locale> mLanguageConfidence =
-                new EntityConfidence<>();
+        @Nullable private String mId;
+        private final Map<String, Float> mEntityConfidenceMap = new ArrayMap<>();
+        @Nullable private Bundle mBundle;
 
         /**
-         * Creates a builder to build {@link TextLanguage} objects.
+         * Sets a language locale for the processed text and assigns a confidence score. If the
+         * locale has already been set, this updates it.
          *
-         * @param startIndex the start index of the detected languages in the text provided
-         *      to generate the result
-         * @param endIndex the end index of the detected languages in the text provided
-         *      to generate the result. Must be greater than startIndex
+         * @param confidenceScore a value from 0 (low confidence) to 1 (high confidence).
+         *      0 implies the locale does not exist for the processed text.
+         *      Values greater than 1 are clamped to 1.
          */
-        public Builder(@IntRange(from = 0) int startIndex, @IntRange(from = 0) int endIndex) {
-            Preconditions.checkArgument(startIndex >= 0);
-            Preconditions.checkArgument(endIndex > startIndex);
-            mStartIndex = startIndex;
-            mEndIndex = endIndex;
-        }
-
-        /**
-         * Sets a language locale with the associated confidence score.
-         */
-        public Builder setLanguage(
-                @NonNull Locale locale, @FloatRange(from = 0.0, to = 1.0) float confidenceScore) {
-            mLanguageConfidence.setEntityType(locale, confidenceScore);
+        @NonNull
+        public Builder putLocale(
+                @NonNull ULocale locale,
+                @FloatRange(from = 0.0, to = 1.0) float confidenceScore) {
+            Objects.requireNonNull(locale);
+            mEntityConfidenceMap.put(locale.toLanguageTag(), confidenceScore);
             return this;
         }
 
         /**
-         * Builds and returns a {@link TextLanguage}.
+         * Sets an optional id for the TextLanguage object.
          */
+        @NonNull
+        public Builder setId(@Nullable String id) {
+            mId = id;
+            return this;
+        }
+
+        /**
+         * Sets a bundle containing non-structured extra information about the TextLanguage object.
+         */
+        @NonNull
+        public Builder setExtras(@NonNull Bundle bundle) {
+            mBundle = Objects.requireNonNull(bundle);
+            return this;
+        }
+
+        /**
+         * Builds and returns a new TextLanguage object.
+         * <p>
+         * If necessary, this method will verify fields, clamp them, and make them immutable.
+         */
+        @NonNull
         public TextLanguage build() {
-            return new TextLanguage(mStartIndex, mEndIndex, mLanguageConfidence);
+            mBundle = mBundle == null ? Bundle.EMPTY : mBundle;
+            return new TextLanguage(
+                    mId,
+                    new EntityConfidence(mEntityConfidenceMap),
+                    mBundle);
+        }
+    }
+
+    /**
+     * A request object for detecting the language of a piece of text.
+     */
+    public static final class Request implements Parcelable {
+
+        public static final @android.annotation.NonNull Creator<Request> CREATOR = new Creator<Request>() {
+            @Override
+            public Request createFromParcel(Parcel in) {
+                return readFromParcel(in);
+            }
+
+            @Override
+            public Request[] newArray(int size) {
+                return new Request[size];
+            }
+        };
+
+        private final CharSequence mText;
+        private final Bundle mExtra;
+        @Nullable private SystemTextClassifierMetadata mSystemTcMetadata;
+
+        private Request(CharSequence text, Bundle bundle) {
+            mText = text;
+            mExtra = bundle;
+        }
+
+        /**
+         * Returns the text to process.
+         */
+        @NonNull
+        public CharSequence getText() {
+            return mText;
+        }
+
+        /**
+         * Returns the name of the package that sent this request.
+         * This returns null if no calling package name is set.
+         */
+        @Nullable
+        public String getCallingPackageName() {
+            return mSystemTcMetadata != null ? mSystemTcMetadata.getCallingPackageName() : null;
+        }
+
+        /**
+         * Sets the information about the {@link SystemTextClassifier} that sent this request.
+         *
+         * @hide
+         */
+        @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
+        public void setSystemTextClassifierMetadata(
+                @Nullable SystemTextClassifierMetadata systemTcMetadata) {
+            mSystemTcMetadata = systemTcMetadata;
+        }
+
+        /**
+         * Returns the information about the {@link SystemTextClassifier} that sent this request.
+         *
+         * @hide
+         */
+        @Nullable
+        public SystemTextClassifierMetadata getSystemTextClassifierMetadata() {
+            return mSystemTcMetadata;
+        }
+
+        /**
+         * Returns a bundle containing non-structured extra information about this request.
+         *
+         * <p><b>NOTE: </b>Do not modify this bundle.
+         */
+        @NonNull
+        public Bundle getExtras() {
+            return mExtra;
+        }
+
+        @Override
+        public int describeContents() {
+            return 0;
+        }
+
+        @Override
+        public void writeToParcel(Parcel dest, int flags) {
+            dest.writeCharSequence(mText);
+            dest.writeBundle(mExtra);
+            dest.writeParcelable(mSystemTcMetadata, flags);
+        }
+
+        private static Request readFromParcel(Parcel in) {
+            final CharSequence text = in.readCharSequence();
+            final Bundle extra = in.readBundle();
+            final SystemTextClassifierMetadata systemTcMetadata = in.readParcelable(null, android.view.textclassifier.SystemTextClassifierMetadata.class);
+
+            final Request request = new Request(text, extra);
+            request.setSystemTextClassifierMetadata(systemTcMetadata);
+            return request;
+        }
+
+        /**
+         * A builder for building TextLanguage requests.
+         */
+        public static final class Builder {
+
+            private final CharSequence mText;
+            @Nullable private Bundle mBundle;
+
+            /**
+             * Creates a builder to build TextLanguage requests.
+             *
+             * @param text the text to process.
+             */
+            public Builder(@NonNull CharSequence text) {
+                mText = Objects.requireNonNull(text);
+            }
+
+            /**
+             * Sets a bundle containing non-structured extra information about the request.
+             */
+            @NonNull
+            public Builder setExtras(@NonNull Bundle bundle) {
+                mBundle = Objects.requireNonNull(bundle);
+                return this;
+            }
+
+            /**
+             * Builds and returns a new TextLanguage request object.
+             * <p>
+             * If necessary, this method will verify fields, clamp them, and make them immutable.
+             */
+            @NonNull
+            public Request build() {
+                return new Request(mText.toString(), mBundle == null ? Bundle.EMPTY : mBundle);
+            }
         }
     }
 }

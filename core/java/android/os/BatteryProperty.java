@@ -28,12 +28,14 @@ import android.os.Parcelable;
  */
 public class BatteryProperty implements Parcelable {
     private long mValueLong;
+    private String mValueString;
 
     /**
      * @hide
      */
     public BatteryProperty() {
         mValueLong = Long.MIN_VALUE;
+        mValueString = null;
     }
 
     /**
@@ -43,10 +45,26 @@ public class BatteryProperty implements Parcelable {
         return mValueLong;
     }
 
-    /*
-     * Parcel read/write code must be kept in sync with
-     * frameworks/native/services/batteryservice/BatteryProperty.cpp
+    /**
+     * @hide
      */
+    public String getString() {
+        return mValueString;
+    }
+
+    /**
+     * @hide
+     */
+    public void setLong(long val) {
+        mValueLong = val;
+    }
+
+    /**
+     * @hide
+     */
+    public void setString(String val) {
+        mValueString = val;
+    }
 
     private BatteryProperty(Parcel p) {
         readFromParcel(p);
@@ -54,13 +72,15 @@ public class BatteryProperty implements Parcelable {
 
     public void readFromParcel(Parcel p) {
         mValueLong = p.readLong();
+        mValueString = p.readString8();
     }
 
     public void writeToParcel(Parcel p, int flags) {
         p.writeLong(mValueLong);
+        p.writeString8(mValueString);
     }
 
-    public static final Parcelable.Creator<BatteryProperty> CREATOR
+    public static final @android.annotation.NonNull Parcelable.Creator<BatteryProperty> CREATOR
         = new Parcelable.Creator<BatteryProperty>() {
         public BatteryProperty createFromParcel(Parcel p) {
             return new BatteryProperty(p);

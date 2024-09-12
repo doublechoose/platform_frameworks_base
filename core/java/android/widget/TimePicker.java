@@ -21,11 +21,14 @@ import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.TestApi;
 import android.annotation.Widget;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.res.TypedArray;
+import android.icu.text.DateFormatSymbols;
 import android.icu.util.Calendar;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.text.format.DateFormat;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.util.MathUtils;
@@ -34,10 +37,9 @@ import android.view.ViewStructure;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.autofill.AutofillManager;
 import android.view.autofill.AutofillValue;
+import android.view.inspector.InspectableProperty;
 
 import com.android.internal.R;
-
-import libcore.icu.LocaleData;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -77,10 +79,14 @@ public class TimePicker extends FrameLayout {
     public static final int MODE_CLOCK = 2;
 
     /** @hide */
-    @IntDef({MODE_SPINNER, MODE_CLOCK})
+    @IntDef(prefix = { "MODE_" }, value = {
+            MODE_SPINNER,
+            MODE_CLOCK
+    })
     @Retention(RetentionPolicy.SOURCE)
     public @interface TimePickerMode {}
 
+    @UnsupportedAppUsage
     private final TimePickerDelegate mDelegate;
 
     @TimePickerMode
@@ -121,6 +127,8 @@ public class TimePicker extends FrameLayout {
 
         final TypedArray a = context.obtainStyledAttributes(
                 attrs, R.styleable.TimePicker, defStyleAttr, defStyleRes);
+        saveAttributeDataForStyleable(context, R.styleable.TimePicker,
+                attrs, a, defStyleAttr, defStyleRes);
         final boolean isDialogMode = a.getBoolean(R.styleable.TimePicker_dialogMode, false);
         final int requestedMode = a.getInt(R.styleable.TimePicker_timePickerMode, MODE_SPINNER);
         a.recycle();
@@ -160,6 +168,10 @@ public class TimePicker extends FrameLayout {
      */
     @TimePickerMode
     @TestApi
+    @InspectableProperty(name = "timePickerMode", enumMapping = {
+            @InspectableProperty.EnumEntry(name = "clock", value = MODE_CLOCK),
+            @InspectableProperty.EnumEntry(name = "spinner", value = MODE_SPINNER)
+    })
     public int getMode() {
         return mMode;
     }
@@ -180,6 +192,7 @@ public class TimePicker extends FrameLayout {
      * @return the currently selected hour, in the range (0-23)
      * @see #setHour(int)
      */
+    @InspectableProperty(hasAttributeId = false)
     public int getHour() {
         return mDelegate.getHour();
     }
@@ -200,6 +213,7 @@ public class TimePicker extends FrameLayout {
      * @return the currently selected minute, in the range (0-59)
      * @see #setMinute(int)
      */
+    @InspectableProperty(hasAttributeId = false)
     public int getMinute() {
         return mDelegate.getMinute();
     }
@@ -267,6 +281,7 @@ public class TimePicker extends FrameLayout {
      *         {@code false} otherwise}
      * @see #setIs24HourView(Boolean)
      */
+    @InspectableProperty(hasAttributeId = false, name = "24Hour")
     public boolean is24HourView() {
         return mDelegate.is24Hour();
     }
@@ -366,8 +381,11 @@ public class TimePicker extends FrameLayout {
         void setMinute(@IntRange(from = 0, to = 59) int minute);
         int getMinute();
 
-        void setDate(long date);
-        long getDate();
+        void setDate(@IntRange(from = 0, to = 23) int hour,
+                @IntRange(from = 0, to = 59) int minute);
+
+        void autofill(AutofillValue value);
+        AutofillValue getAutofillValue();
 
         void setIs24Hour(boolean is24Hour);
         boolean is24Hour();
@@ -403,11 +421,13 @@ public class TimePicker extends FrameLayout {
 
     static String[] getAmPmStrings(Context context) {
         final Locale locale = context.getResources().getConfiguration().locale;
-        final LocaleData d = LocaleData.get(locale);
+        DateFormatSymbols dfs = DateFormat.getIcuDateFormatSymbols(locale);
+        String[] amPm = dfs.getAmPmStrings();
+        String[] narrowAmPm = dfs.getAmpmNarrowStrings();
 
         final String[] result = new String[2];
-        result[0] = d.amPm[0].length() > 4 ? d.narrowAm : d.amPm[0];
-        result[1] = d.amPm[1].length() > 4 ? d.narrowPm : d.amPm[1];
+        result[0] = amPm[0].length() > 4 ? narrowAmPm[0] : amPm[0];
+        result[1] = amPm[1].length() > 4 ? narrowAmPm[1] : amPm[1];
         return result;
     }
 
@@ -421,6 +441,11 @@ public class TimePicker extends FrameLayout {
 
         protected OnTimeChangedListener mOnTimeChangedListener;
         protected OnTimeChangedListener mAutoFillChangeListener;
+
+        // The value that was passed to autofill() - it must be stored because it getAutofillValue()
+        // must return the exact same value that was autofilled, otherwise the widget will not be
+        // properly highlighted after autofill().
+        private long mAutofilledValue;
 
         public AbstractTimePickerDelegate(@NonNull TimePicker delegator, @NonNull Context context) {
             mDelegator = delegator;
@@ -439,19 +464,41 @@ public class TimePicker extends FrameLayout {
         }
 
         @Override
-        public void setDate(long date) {
-            Calendar cal = Calendar.getInstance(mLocale);
-            cal.setTimeInMillis(date);
-            setHour(cal.get(Calendar.HOUR_OF_DAY));
-            setMinute(cal.get(Calendar.MINUTE));
+        public final void autofill(AutofillValue value) {
+            if (value == null || !value.isDate()) {
+                Log.w(LOG_TAG, value + " could not be autofilled into " + this);
+                return;
+            }
+
+            final long time = value.getDateValue();
+
+            final Calendar cal = Calendar.getInstance(mLocale);
+            cal.setTimeInMillis(time);
+            setDate(cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE));
+
+            // Must set mAutofilledValue *after* calling subclass method to make sure the value
+            // returned by getAutofillValue() matches it.
+            mAutofilledValue = time;
         }
 
         @Override
-        public long getDate() {
-            Calendar cal = Calendar.getInstance(mLocale);
+        public final AutofillValue getAutofillValue() {
+            if (mAutofilledValue != 0) {
+                return AutofillValue.forDate(mAutofilledValue);
+            }
+
+            final Calendar cal = Calendar.getInstance(mLocale);
             cal.set(Calendar.HOUR_OF_DAY, getHour());
             cal.set(Calendar.MINUTE, getMinute());
-            return cal.getTimeInMillis();
+            return AutofillValue.forDate(cal.getTimeInMillis());
+        }
+
+        /**
+         * This method must be called every time the value of the hour and/or minute is changed by
+         * a subclass method.
+         */
+        protected void resetAutofilledValue() {
+            mAutofilledValue = 0;
         }
 
         protected static class SavedState extends View.BaseSavedState {
@@ -507,7 +554,7 @@ public class TimePicker extends FrameLayout {
             }
 
             @SuppressWarnings({"unused", "hiding"})
-            public static final Creator<SavedState> CREATOR = new Creator<SavedState>() {
+            public static final @android.annotation.NonNull Creator<SavedState> CREATOR = new Creator<SavedState>() {
                 public SavedState createFromParcel(Parcel in) {
                     return new SavedState(in);
                 }
@@ -532,12 +579,7 @@ public class TimePicker extends FrameLayout {
     public void autofill(AutofillValue value) {
         if (!isEnabled()) return;
 
-        if (!value.isDate()) {
-            Log.w(LOG_TAG, value + " could not be autofilled into " + this);
-            return;
-        }
-
-        mDelegate.setDate(value.getDateValue());
+        mDelegate.autofill(value);
     }
 
     @Override
@@ -547,6 +589,6 @@ public class TimePicker extends FrameLayout {
 
     @Override
     public AutofillValue getAutofillValue() {
-        return isEnabled() ? AutofillValue.forDate(mDelegate.getDate()) : null;
+        return isEnabled() ? mDelegate.getAutofillValue() : null;
     }
 }

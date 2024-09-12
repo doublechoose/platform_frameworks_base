@@ -16,7 +16,6 @@
 
 package com.android.server.connectivity;
 
-import static android.net.NetworkCapabilities.MAX_TRANSPORT;
 import static android.net.NetworkCapabilities.TRANSPORT_BLUETOOTH;
 import static android.net.NetworkCapabilities.TRANSPORT_CELLULAR;
 import static android.net.NetworkCapabilities.TRANSPORT_ETHERNET;
@@ -28,11 +27,11 @@ import static android.net.NetworkCapabilities.TRANSPORT_WIFI_AWARE;
 import android.net.ConnectivityMetricsEvent;
 import android.net.metrics.ApfProgramEvent;
 import android.net.metrics.ApfStats;
+import android.net.metrics.ConnectStats;
 import android.net.metrics.DefaultNetworkEvent;
 import android.net.metrics.DhcpClientEvent;
 import android.net.metrics.DhcpErrorEvent;
 import android.net.metrics.DnsEvent;
-import android.net.metrics.ConnectStats;
 import android.net.metrics.IpManagerEvent;
 import android.net.metrics.IpReachabilityEvent;
 import android.net.metrics.NetworkEvent;
@@ -40,13 +39,13 @@ import android.net.metrics.RaEvent;
 import android.net.metrics.ValidationProbeEvent;
 import android.net.metrics.WakeupStats;
 import android.os.Parcelable;
-import android.util.SparseArray;
 import android.util.SparseIntArray;
+
 import com.android.server.connectivity.metrics.nano.IpConnectivityLogClass;
 import com.android.server.connectivity.metrics.nano.IpConnectivityLogClass.IpConnectivityEvent;
 import com.android.server.connectivity.metrics.nano.IpConnectivityLogClass.IpConnectivityLog;
-import com.android.server.connectivity.metrics.nano.IpConnectivityLogClass.NetworkId;
 import com.android.server.connectivity.metrics.nano.IpConnectivityLogClass.Pair;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -127,8 +126,31 @@ final public class IpConnectivityEventBuilder {
         wakeupStats.nonApplicationWakeups = in.nonApplicationWakeups;
         wakeupStats.applicationWakeups = in.applicationWakeups;
         wakeupStats.noUidWakeups = in.noUidWakeups;
+        wakeupStats.l2UnicastCount = in.l2UnicastCount;
+        wakeupStats.l2MulticastCount = in.l2MulticastCount;
+        wakeupStats.l2BroadcastCount = in.l2BroadcastCount;
+        wakeupStats.ethertypeCounts = toPairArray(in.ethertypes);
+        wakeupStats.ipNextHeaderCounts = toPairArray(in.ipNextHeaders);
         final IpConnectivityEvent out = buildEvent(0, 0, in.iface);
         out.setWakeupStats(wakeupStats);
+        return out;
+    }
+
+    public static IpConnectivityEvent toProto(DefaultNetworkEvent in) {
+        IpConnectivityLogClass.DefaultNetworkEvent ev =
+                new IpConnectivityLogClass.DefaultNetworkEvent();
+        ev.finalScore = in.finalScore;
+        ev.initialScore = in.initialScore;
+        ev.ipSupport = ipSupportOf(in);
+        ev.defaultNetworkDurationMs = in.durationMs;
+        ev.validationDurationMs = in.validatedMs;
+        ev.previousDefaultNetworkLinkLayer = transportsToLinkLayer(in.previousTransports);
+        final IpConnectivityEvent out = buildEvent(in.netId, in.transports, null);
+        if (in.transports == 0) {
+            // Set link layer to NONE for events representing the absence of a default network.
+            out.linkLayer = IpConnectivityLogClass.NONE;
+        }
+        out.setDefaultNetworkEvent(ev);
         return out;
     }
 
@@ -161,11 +183,6 @@ final public class IpConnectivityEventBuilder {
 
         if (in instanceof IpReachabilityEvent) {
             setIpReachabilityEvent(out, (IpReachabilityEvent) in);
-            return true;
-        }
-
-        if (in instanceof DefaultNetworkEvent) {
-            setDefaultNetworkEvent(out, (DefaultNetworkEvent) in);
             return true;
         }
 
@@ -225,20 +242,9 @@ final public class IpConnectivityEventBuilder {
         out.setIpReachabilityEvent(ipReachabilityEvent);
     }
 
-    private static void setDefaultNetworkEvent(IpConnectivityEvent out, DefaultNetworkEvent in) {
-        IpConnectivityLogClass.DefaultNetworkEvent defaultNetworkEvent =
-                new IpConnectivityLogClass.DefaultNetworkEvent();
-        defaultNetworkEvent.networkId = netIdOf(in.netId);
-        defaultNetworkEvent.previousNetworkId = netIdOf(in.prevNetId);
-        defaultNetworkEvent.transportTypes = in.transportTypes;
-        defaultNetworkEvent.previousNetworkIpSupport = ipSupportOf(in);
-        out.setDefaultNetworkEvent(defaultNetworkEvent);
-    }
-
     private static void setNetworkEvent(IpConnectivityEvent out, NetworkEvent in) {
         IpConnectivityLogClass.NetworkEvent networkEvent =
                 new IpConnectivityLogClass.NetworkEvent();
-        networkEvent.networkId = netIdOf(in.netId);
         networkEvent.eventType = in.eventType;
         networkEvent.latencyMs = (int) in.durationMs;
         out.setNetworkEvent(networkEvent);
@@ -317,20 +323,14 @@ final public class IpConnectivityEventBuilder {
         return pairs;
     }
 
-    private static NetworkId netIdOf(int netid) {
-        final NetworkId ni = new NetworkId();
-        ni.networkId = netid;
-        return ni;
-    }
-
     private static int ipSupportOf(DefaultNetworkEvent in) {
-        if (in.prevIPv4 && in.prevIPv6) {
+        if (in.ipv4 && in.ipv6) {
             return IpConnectivityLogClass.DefaultNetworkEvent.DUAL;
         }
-        if (in.prevIPv6) {
+        if (in.ipv6) {
             return IpConnectivityLogClass.DefaultNetworkEvent.IPV6;
         }
-        if (in.prevIPv4) {
+        if (in.ipv4) {
             return IpConnectivityLogClass.DefaultNetworkEvent.IPV4;
         }
         return IpConnectivityLogClass.DefaultNetworkEvent.NONE;
@@ -360,29 +360,22 @@ final public class IpConnectivityEventBuilder {
                 return IpConnectivityLogClass.UNKNOWN;
             case 1:
                 int t = Long.numberOfTrailingZeros(transports);
-                return transportToLinkLayer(t);
+                return TRANSPORT_LINKLAYER_MAP.get(t, IpConnectivityLogClass.UNKNOWN);
             default:
                 return IpConnectivityLogClass.MULTIPLE;
         }
     }
 
-    private static int transportToLinkLayer(int transport) {
-        if (0 <= transport && transport < TRANSPORT_LINKLAYER_MAP.length) {
-            return TRANSPORT_LINKLAYER_MAP[transport];
-        }
-        return IpConnectivityLogClass.UNKNOWN;
-    }
-
-    private static final int[] TRANSPORT_LINKLAYER_MAP = new int[MAX_TRANSPORT + 1];
+    private static final SparseIntArray TRANSPORT_LINKLAYER_MAP = new SparseIntArray();
     static {
-        TRANSPORT_LINKLAYER_MAP[TRANSPORT_CELLULAR]   = IpConnectivityLogClass.CELLULAR;
-        TRANSPORT_LINKLAYER_MAP[TRANSPORT_WIFI]       = IpConnectivityLogClass.WIFI;
-        TRANSPORT_LINKLAYER_MAP[TRANSPORT_BLUETOOTH]  = IpConnectivityLogClass.BLUETOOTH;
-        TRANSPORT_LINKLAYER_MAP[TRANSPORT_ETHERNET]   = IpConnectivityLogClass.ETHERNET;
-        TRANSPORT_LINKLAYER_MAP[TRANSPORT_VPN]        = IpConnectivityLogClass.UNKNOWN;
-        TRANSPORT_LINKLAYER_MAP[TRANSPORT_WIFI_AWARE] = IpConnectivityLogClass.WIFI_NAN;
-        TRANSPORT_LINKLAYER_MAP[TRANSPORT_LOWPAN]     = IpConnectivityLogClass.LOWPAN;
-    };
+        TRANSPORT_LINKLAYER_MAP.append(TRANSPORT_CELLULAR, IpConnectivityLogClass.CELLULAR);
+        TRANSPORT_LINKLAYER_MAP.append(TRANSPORT_WIFI, IpConnectivityLogClass.WIFI);
+        TRANSPORT_LINKLAYER_MAP.append(TRANSPORT_BLUETOOTH, IpConnectivityLogClass.BLUETOOTH);
+        TRANSPORT_LINKLAYER_MAP.append(TRANSPORT_ETHERNET, IpConnectivityLogClass.ETHERNET);
+        TRANSPORT_LINKLAYER_MAP.append(TRANSPORT_VPN, IpConnectivityLogClass.UNKNOWN);
+        TRANSPORT_LINKLAYER_MAP.append(TRANSPORT_WIFI_AWARE, IpConnectivityLogClass.WIFI_NAN);
+        TRANSPORT_LINKLAYER_MAP.append(TRANSPORT_LOWPAN, IpConnectivityLogClass.LOWPAN);
+    }
 
     private static int ifnameToLinkLayer(String ifname) {
         // Do not try to catch all interface names with regexes, instead only catch patterns that

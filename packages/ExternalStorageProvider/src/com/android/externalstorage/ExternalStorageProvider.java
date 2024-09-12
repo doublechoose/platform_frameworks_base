@@ -16,10 +16,13 @@
 
 package com.android.externalstorage;
 
+import static java.util.regex.Pattern.CASE_INSENSITIVE;
+
+import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.usage.StorageStatsManager;
+import android.content.AttributionSource;
 import android.content.ContentResolver;
-import android.content.Context;
 import android.content.UriPermission;
 import android.database.Cursor;
 import android.database.MatrixCursor;
@@ -29,7 +32,9 @@ import android.os.Binder;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.UserHandle;
+import android.os.UserManager;
 import android.os.storage.DiskInfo;
+import android.os.storage.StorageEventListener;
 import android.os.storage.StorageManager;
 import android.os.storage.VolumeInfo;
 import android.provider.DocumentsContract;
@@ -37,6 +42,9 @@ import android.provider.DocumentsContract.Document;
 import android.provider.DocumentsContract.Path;
 import android.provider.DocumentsContract.Root;
 import android.provider.Settings;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
 import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.DebugUtils;
@@ -44,6 +52,7 @@ import android.util.Log;
 import android.util.Pair;
 
 import com.android.internal.annotations.GuardedBy;
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.content.FileSystemProvider;
 import com.android.internal.util.IndentingPrintWriter;
 
@@ -54,24 +63,42 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
+/**
+ * Presents content of the shared (a.k.a. "external") storage.
+ * <p>
+ * Starting with Android 11 (R), restricts access to the certain sections of the shared storage:
+ * {@code Android/data/}, {@code Android/obb/} and {@code Android/sandbox/}, that will be hidden in
+ * the DocumentsUI by default.
+ * See <a href="https://developer.android.com/about/versions/11/privacy/storage">
+ * Storage updates in Android 11</a>.
+ * <p>
+ * Documents ID format: {@code root:path/to/file}.
+ */
 public class ExternalStorageProvider extends FileSystemProvider {
     private static final String TAG = "ExternalStorage";
 
     private static final boolean DEBUG = false;
 
-    public static final String AUTHORITY = "com.android.externalstorage.documents";
+    public static final String AUTHORITY = DocumentsContract.EXTERNAL_STORAGE_PROVIDER_AUTHORITY;
 
     private static final Uri BASE_URI =
             new Uri.Builder().scheme(ContentResolver.SCHEME_CONTENT).authority(AUTHORITY).build();
 
-    // docId format: root:path/to/file
+    /**
+     * Regex for detecting {@code /Android/data/}, {@code /Android/obb/} and
+     * {@code /Android/sandbox/} along with all their subdirectories and content.
+     */
+    private static final Pattern PATTERN_RESTRICTED_ANDROID_SUBTREES =
+            Pattern.compile("^Android/(?:data|obb|sandbox)(?:/.+)?", CASE_INSENSITIVE);
 
     private static final String[] DEFAULT_ROOT_PROJECTION = new String[] {
             Root.COLUMN_ROOT_ID, Root.COLUMN_FLAGS, Root.COLUMN_ICON, Root.COLUMN_TITLE,
-            Root.COLUMN_DOCUMENT_ID, Root.COLUMN_AVAILABLE_BYTES,
+            Root.COLUMN_DOCUMENT_ID, Root.COLUMN_AVAILABLE_BYTES, Root.COLUMN_QUERY_ARGS
     };
 
     private static final String[] DEFAULT_DOCUMENT_PROJECTION = new String[] {
@@ -88,13 +115,18 @@ public class ExternalStorageProvider extends FileSystemProvider {
         public String docId;
         public File visiblePath;
         public File path;
-        public boolean reportAvailableBytes = true;
+        // TODO (b/157033915): Make getFreeBytes() faster
+        public boolean reportAvailableBytes = false;
     }
 
-    private static final String ROOT_ID_PRIMARY_EMULATED = "primary";
-    private static final String ROOT_ID_HOME = "home";
+    private static final String ROOT_ID_PRIMARY_EMULATED =
+            DocumentsContract.EXTERNAL_STORAGE_PRIMARY_EMULATED_ROOT_ID;
+
+    private static final String GET_DOCUMENT_URI_CALL = "get_document_uri";
+    private static final String GET_MEDIA_URI_CALL = "get_media_uri";
 
     private StorageManager mStorageManager;
+    private UserManager mUserManager;
 
     private final Object mRootsLock = new Object();
 
@@ -105,10 +137,41 @@ public class ExternalStorageProvider extends FileSystemProvider {
     public boolean onCreate() {
         super.onCreate(DEFAULT_DOCUMENT_PROJECTION);
 
-        mStorageManager = (StorageManager) getContext().getSystemService(Context.STORAGE_SERVICE);
+        mStorageManager = getContext().getSystemService(StorageManager.class);
+        mUserManager = getContext().getSystemService(UserManager.class);
 
         updateVolumes();
+
+        mStorageManager.registerListener(new StorageEventListener() {
+                @Override
+                public void onVolumeStateChanged(VolumeInfo vol, int oldState, int newState) {
+                    updateVolumes();
+                }
+            });
+
         return true;
+    }
+
+    private void enforceShellRestrictions() {
+        if (UserHandle.getCallingAppId() == android.os.Process.SHELL_UID
+                && mUserManager.hasUserRestriction(UserManager.DISALLOW_USB_FILE_TRANSFER)) {
+            throw new SecurityException(
+                    "Shell user cannot access files for user " + UserHandle.myUserId());
+        }
+    }
+
+    @Override
+    protected int enforceReadPermissionInner(Uri uri,
+            @NonNull AttributionSource attributionSource) throws SecurityException {
+        enforceShellRestrictions();
+        return super.enforceReadPermissionInner(uri, attributionSource);
+    }
+
+    @Override
+    protected int enforceWritePermissionInner(Uri uri,
+            @NonNull AttributionSource attributionSource) throws SecurityException {
+        enforceShellRestrictions();
+        return super.enforceWritePermissionInner(uri, attributionSource);
     }
 
     public void updateVolumes() {
@@ -117,25 +180,25 @@ public class ExternalStorageProvider extends FileSystemProvider {
         }
     }
 
+    @GuardedBy("mRootsLock")
     private void updateVolumesLocked() {
         mRoots.clear();
 
-        VolumeInfo primaryVolume = null;
         final int userId = UserHandle.myUserId();
         final List<VolumeInfo> volumes = mStorageManager.getVolumes();
         for (VolumeInfo volume : volumes) {
-            if (!volume.isMountedReadable()) continue;
+            if (!volume.isMountedReadable() || volume.getMountUserId() != userId) continue;
 
             final String rootId;
             final String title;
             final UUID storageUuid;
             if (volume.getType() == VolumeInfo.TYPE_EMULATED) {
-                // We currently only support a single emulated volume mounted at
+                // We currently only support a single emulated volume per user mounted at
                 // a time, and it's always considered the primary
                 if (DEBUG) Log.d(TAG, "Found primary volume: " + volume);
                 rootId = ROOT_ID_PRIMARY_EMULATED;
 
-                if (VolumeInfo.ID_EMULATED_INTERNAL.equals(volume.getId())) {
+                if (volume.isPrimaryEmulatedForUser(userId)) {
                     // This is basically the user's primary device storage.
                     // Use device name for the volume since this is likely same thing
                     // the user sees when they mount their phone on another device.
@@ -157,7 +220,7 @@ public class ExternalStorageProvider extends FileSystemProvider {
                     storageUuid = StorageManager.convert(privateVol.fsUuid);
                 }
             } else if (volume.getType() == VolumeInfo.TYPE_PUBLIC
-                    && volume.getMountUserId() == userId) {
+                    || volume.getType() == VolumeInfo.TYPE_STUB) {
                 rootId = volume.getFsUuid();
                 title = mStorageManager.getBestVolumeDescription(volume);
                 storageUuid = null;
@@ -193,13 +256,12 @@ public class ExternalStorageProvider extends FileSystemProvider {
                 root.flags |= Root.FLAG_REMOVABLE_USB;
             }
 
-            if (!VolumeInfo.ID_EMULATED_INTERNAL.equals(volume.getId())) {
+            if (volume.getType() != VolumeInfo.TYPE_EMULATED
+                    && volume.getType() != VolumeInfo.TYPE_STUB) {
                 root.flags |= Root.FLAG_SUPPORTS_EJECT;
             }
 
             if (volume.isPrimary()) {
-                // save off the primary volume for subsequent "Home" dir initialization.
-                primaryVolume = volume;
                 root.flags |= Root.FLAG_ADVANCED;
             }
             // Dunno when this would NOT be the case, but never hurts to be correct.
@@ -210,43 +272,12 @@ public class ExternalStorageProvider extends FileSystemProvider {
             if (volume.getType() == VolumeInfo.TYPE_PUBLIC) {
                 root.flags |= Root.FLAG_HAS_SETTINGS;
             }
-            if (volume.isVisibleForRead(userId)) {
+            if (volume.isVisibleForUser(userId)) {
                 root.visiblePath = volume.getPathForUser(userId);
             } else {
                 root.visiblePath = null;
             }
             root.path = volume.getInternalPathForUser(userId);
-            try {
-                root.docId = getDocIdForFile(root.path);
-            } catch (FileNotFoundException e) {
-                throw new IllegalStateException(e);
-            }
-        }
-
-        // Finally, if primary storage is available we add the "Documents" directory.
-        // If I recall correctly the actual directory is created on demand
-        // by calling either getPathForUser, or getInternalPathForUser.
-        if (primaryVolume != null && primaryVolume.isVisible()) {
-            final RootInfo root = new RootInfo();
-            root.rootId = ROOT_ID_HOME;
-            mRoots.put(root.rootId, root);
-            root.title = getContext().getString(R.string.root_documents);
-
-            // Only report bytes on *volumes*...as a matter of policy.
-            root.reportAvailableBytes = false;
-            root.flags = Root.FLAG_LOCAL_ONLY | Root.FLAG_SUPPORTS_SEARCH
-                    | Root.FLAG_SUPPORTS_IS_CHILD;
-
-            // Dunno when this would NOT be the case, but never hurts to be correct.
-            if (primaryVolume.isMountedWritable()) {
-                root.flags |= Root.FLAG_SUPPORTS_CREATE;
-            }
-
-            // Create the "Documents" directory on disk (don't use the localized title).
-            root.visiblePath = new File(
-                    primaryVolume.getPathForUser(userId), Environment.DIRECTORY_DOCUMENTS);
-            root.path = new File(
-                    primaryVolume.getInternalPathForUser(userId), Environment.DIRECTORY_DOCUMENTS);
             try {
                 root.docId = getDocIdForFile(root.path);
             } catch (FileNotFoundException e) {
@@ -266,12 +297,91 @@ public class ExternalStorageProvider extends FileSystemProvider {
         return projection != null ? projection : DEFAULT_ROOT_PROJECTION;
     }
 
+    /**
+     * Mark {@code Android/data/}, {@code Android/obb/} and {@code Android/sandbox/} on the
+     * integrated shared ("external") storage along with all their content and subdirectories as
+     * hidden.
+     */
     @Override
-    protected String getDocIdForFile(File file) throws FileNotFoundException {
+    protected boolean shouldHideDocument(@NonNull String documentId) {
+        // Don't need to hide anything on USB drives.
+        if (isOnRemovableUsbStorage(documentId)) {
+            return false;
+        }
+
+        final String path = getPathFromDocId(documentId);
+        return PATTERN_RESTRICTED_ANDROID_SUBTREES.matcher(path).matches();
+    }
+
+    /**
+     * Check that the directory is the root of storage or blocked file from tree.
+     * <p>
+     * Note, that this is different from hidden documents: blocked documents <b>WILL</b> appear
+     * the UI, but the user <b>WILL NOT</b> be able to select them.
+     *
+     * @param documentId the docId of the directory to be checked
+     * @return true, should be blocked from tree. Otherwise, false.
+     *
+     * @see Document#FLAG_DIR_BLOCKS_OPEN_DOCUMENT_TREE
+     */
+    @Override
+    protected boolean shouldBlockDirectoryFromTree(@NonNull String documentId)
+            throws FileNotFoundException {
+        final File dir = getFileForDocId(documentId, false);
+        // The file is null or it is not a directory
+        if (dir == null || !dir.isDirectory()) {
+            return false;
+        }
+
+        // Allow all directories on USB, including the root.
+        if (isOnRemovableUsbStorage(documentId)) {
+            return false;
+        }
+
+        // Get canonical(!) path. Note that this path will have neither leading nor training "/".
+        // This the root's path will be just an empty string.
+        final String path = getPathFromDocId(documentId);
+
+        // Block the root of the storage
+        if (path.isEmpty()) {
+            return true;
+        }
+
+        // Block /Download/ and /Android/ folders from the tree.
+        if (equalIgnoringCase(path, Environment.DIRECTORY_DOWNLOADS) ||
+                equalIgnoringCase(path, Environment.DIRECTORY_ANDROID)) {
+            return true;
+        }
+
+        // This shouldn't really make a difference, but just in case - let's block hidden
+        // directories as well.
+        if (shouldHideDocument(documentId)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private boolean isOnRemovableUsbStorage(@NonNull String documentId) {
+        final RootInfo rootInfo;
+        try {
+            rootInfo = getRootFromDocId(documentId);
+        } catch (FileNotFoundException e) {
+            Log.e(TAG, "Failed to determine rootInfo for docId\"" + documentId + '"');
+            return false;
+        }
+
+        return (rootInfo.flags & Root.FLAG_REMOVABLE_USB) != 0;
+    }
+
+    @NonNull
+    @Override
+    protected String getDocIdForFile(@NonNull File file) throws FileNotFoundException {
         return getDocIdForFileMaybeCreate(file, false);
     }
 
-    private String getDocIdForFileMaybeCreate(File file, boolean createNewDir)
+    @NonNull
+    private String getDocIdForFileMaybeCreate(@NonNull File file, boolean createNewDir)
             throws FileNotFoundException {
         String path = file.getAbsolutePath();
 
@@ -335,14 +445,40 @@ public class ExternalStorageProvider extends FileSystemProvider {
 
     @Override
     protected File getFileForDocId(String docId, boolean visible) throws FileNotFoundException {
-        RootInfo root = getRootFromDocId(docId);
-        return buildFile(root, docId, visible);
+        return getFileForDocId(docId, visible, true);
     }
 
-    private Pair<RootInfo, File> resolveDocId(String docId, boolean visible)
+    private File getFileForDocId(String docId, boolean visible, boolean mustExist)
             throws FileNotFoundException {
         RootInfo root = getRootFromDocId(docId);
-        return Pair.create(root, buildFile(root, docId, visible));
+        return buildFile(root, docId, mustExist);
+    }
+
+    private Pair<RootInfo, File> resolveDocId(String docId) throws FileNotFoundException {
+        RootInfo root = getRootFromDocId(docId);
+        return Pair.create(root, buildFile(root, docId, /* mustExist */ true));
+    }
+
+    @VisibleForTesting
+    static String getPathFromDocId(String docId) {
+        final int splitIndex = docId.indexOf(':', 1);
+        final String docIdPath = docId.substring(splitIndex + 1);
+
+        // Canonicalize path and strip the leading "/"
+        final String path;
+        try {
+            path = new File(docIdPath).getCanonicalPath().substring(1);
+        } catch (IOException e) {
+            Log.w(TAG, "Could not canonicalize \"" + docIdPath + '"');
+            return "";
+        }
+
+        // Remove the trailing "/" as well.
+        if (!path.isEmpty() && path.charAt(path.length() - 1) == '/') {
+            return path.substring(0, path.length() - 1);
+        } else {
+            return path;
+        }
     }
 
     private RootInfo getRootFromDocId(String docId) throws FileNotFoundException {
@@ -360,20 +496,25 @@ public class ExternalStorageProvider extends FileSystemProvider {
         return root;
     }
 
-    private File buildFile(RootInfo root, String docId, boolean visible)
+    private File buildFile(RootInfo root, String docId, boolean mustExist)
             throws FileNotFoundException {
         final int splitIndex = docId.indexOf(':', 1);
         final String path = docId.substring(splitIndex + 1);
 
-        File target = visible ? root.visiblePath : root.path;
+        File target = root.visiblePath != null ? root.visiblePath : root.path;
         if (target == null) {
             return null;
         }
         if (!target.exists()) {
             target.mkdirs();
         }
-        target = new File(target, path);
-        if (!target.exists()) {
+        try {
+            target = new File(target, path).getCanonicalFile();
+        } catch (IOException e) {
+            throw new FileNotFoundException("Failed to canonicalize path " + path);
+        }
+
+        if (mustExist && !target.exists()) {
             throw new FileNotFoundException("Missing file for " + docId + " at " + target);
         }
         return target;
@@ -385,6 +526,26 @@ public class ExternalStorageProvider extends FileSystemProvider {
     }
 
     @Override
+    protected void onDocIdChanged(String docId) {
+        try {
+            // Touch the visible path to ensure that any sdcardfs caches have
+            // been updated to reflect underlying changes on disk.
+            final File visiblePath = getFileForDocId(docId, true, false);
+            if (visiblePath != null) {
+                Os.access(visiblePath.getAbsolutePath(), OsConstants.F_OK);
+            }
+        } catch (FileNotFoundException | ErrnoException ignored) {
+        }
+    }
+
+    @Override
+    protected void onDocIdDeleted(String docId) {
+        Uri uri = DocumentsContract.buildDocumentUri(AUTHORITY, docId);
+        getContext().revokeUriPermission(uri, ~0);
+    }
+
+
+    @Override
     public Cursor queryRoots(String[] projection) throws FileNotFoundException {
         final MatrixCursor result = new MatrixCursor(resolveRootProjection(projection));
         synchronized (mRootsLock) {
@@ -394,6 +555,7 @@ public class ExternalStorageProvider extends FileSystemProvider {
                 row.add(Root.COLUMN_FLAGS, root.flags);
                 row.add(Root.COLUMN_TITLE, root.title);
                 row.add(Root.COLUMN_DOCUMENT_ID, root.docId);
+                row.add(Root.COLUMN_QUERY_ARGS, SUPPORTED_QUERY_ARGS);
 
                 long availableBytes = -1;
                 if (root.reportAvailableBytes) {
@@ -418,13 +580,15 @@ public class ExternalStorageProvider extends FileSystemProvider {
     @Override
     public Path findDocumentPath(@Nullable String parentDocId, String childDocId)
             throws FileNotFoundException {
-        final Pair<RootInfo, File> resolvedDocId = resolveDocId(childDocId, false);
+        final Pair<RootInfo, File> resolvedDocId = resolveDocId(childDocId);
         final RootInfo root = resolvedDocId.first;
         File child = resolvedDocId.second;
 
+        final File rootFile = root.visiblePath != null ? root.visiblePath
+                : root.path;
         final File parent = TextUtils.isEmpty(parentDocId)
-                        ? root.path
-                        : getFileForDocId(parentDocId);
+                ? rootFile
+                : getFileForDocId(parentDocId);
 
         return new Path(parentDocId == null ? root.rootId : null, findDocumentPath(parent, child));
     }
@@ -492,14 +656,17 @@ public class ExternalStorageProvider extends FileSystemProvider {
     }
 
     @Override
-    public Cursor querySearchDocuments(String rootId, String query, String[] projection)
+    public Cursor querySearchDocuments(String rootId, String[] projection, Bundle queryArgs)
             throws FileNotFoundException {
         final File parent;
+
         synchronized (mRootsLock) {
-            parent = mRoots.get(rootId).path;
+            RootInfo root = mRoots.get(rootId);
+            parent = root.visiblePath != null ? root.visiblePath
+                : root.path;
         }
 
-        return querySearchDocuments(parent, query, projection, Collections.emptySet());
+        return querySearchDocuments(parent, projection, Collections.emptySet(), queryArgs);
     }
 
     @Override
@@ -517,6 +684,13 @@ public class ExternalStorageProvider extends FileSystemProvider {
         }
     }
 
+    /**
+     * Print the state into the given stream.
+     * Gets invoked when you run:
+     * <pre>
+     * adb shell dumpsys activity provider com.android.externalstorage/.ExternalStorageProvider
+     * </pre>
+     */
     @Override
     public void dump(FileDescriptor fd, PrintWriter writer, String[] args) {
         final IndentingPrintWriter pw = new IndentingPrintWriter(writer, "  ", 160);
@@ -559,11 +733,16 @@ public class ExternalStorageProvider extends FileSystemProvider {
                     }
                     break;
                 }
-                case "getDocumentId": {
-                    final String path = arg;
-                    final List<UriPermission> accessUriPermissions =
-                            extras.getParcelableArrayList(AUTHORITY + ".extra.uriPermissions");
+                case GET_DOCUMENT_URI_CALL: {
+                    // All callers must go through MediaProvider
+                    getContext().enforceCallingPermission(
+                            android.Manifest.permission.WRITE_MEDIA_STORAGE, TAG);
 
+                    final Uri fileUri = extras.getParcelable(DocumentsContract.EXTRA_URI);
+                    final List<UriPermission> accessUriPermissions = extras
+                            .getParcelableArrayList(DocumentsContract.EXTRA_URI_PERMISSIONS);
+
+                    final String path = fileUri.getPath();
                     try {
                         final Bundle out = new Bundle();
                         final Uri uri = getDocumentUri(path, accessUriPermissions);
@@ -572,12 +751,31 @@ public class ExternalStorageProvider extends FileSystemProvider {
                     } catch (FileNotFoundException e) {
                         throw new IllegalStateException("File in " + path + " is not found.", e);
                     }
+                }
+                case GET_MEDIA_URI_CALL: {
+                    // All callers must go through MediaProvider
+                    getContext().enforceCallingPermission(
+                            android.Manifest.permission.WRITE_MEDIA_STORAGE, TAG);
 
+                    final Uri documentUri = extras.getParcelable(DocumentsContract.EXTRA_URI);
+                    final String docId = DocumentsContract.getDocumentId(documentUri);
+                    try {
+                        final Bundle out = new Bundle();
+                        final Uri uri = Uri.fromFile(getFileForDocId(docId, true));
+                        out.putParcelable(DocumentsContract.EXTRA_URI, uri);
+                        return out;
+                    } catch (FileNotFoundException e) {
+                        throw new IllegalStateException(e);
+                    }
                 }
                 default:
                     Log.w(TAG, "unknown method passed to call(): " + method);
             }
         }
         return bundle;
+    }
+
+    private static boolean equalIgnoringCase(@NonNull String a, @NonNull String b) {
+        return TextUtils.equals(a.toLowerCase(Locale.ROOT), b.toLowerCase(Locale.ROOT));
     }
 }

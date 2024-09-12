@@ -17,13 +17,34 @@
 #include "Resource.h"
 
 #include <map>
+#include <sstream>
 #include <string>
 
-using android::StringPiece;
+#include "android-base/stringprintf.h"
+
+using ::android::StringPiece;
+using ::android::base::StringPrintf;
 
 namespace aapt {
 
-StringPiece ToString(ResourceType type) {
+std::string ResourceId::to_string() const {
+  return StringPrintf("0x%08x", id);
+}
+
+std::string ResourceName::to_string() const {
+  return ResourceNameRef(*this).to_string();
+}
+
+std::string ResourceNameRef::to_string() const {
+  std::ostringstream str_stream;
+  if (!package.empty()) {
+    str_stream << package << ":";
+  }
+  str_stream << type << "/" << entry;
+  return str_stream.str();
+}
+
+StringPiece to_string(ResourceType type) {
   switch (type) {
     case ResourceType::kAnim:
       return "anim";
@@ -57,10 +78,14 @@ StringPiece ToString(ResourceType type) {
       return "interpolator";
     case ResourceType::kLayout:
       return "layout";
+    case ResourceType::kMacro:
+      return "macro";
     case ResourceType::kMenu:
       return "menu";
     case ResourceType::kMipmap:
       return "mipmap";
+    case ResourceType::kNavigation:
+      return "navigation";
     case ResourceType::kPlurals:
       return "plurals";
     case ResourceType::kRaw:
@@ -96,8 +121,10 @@ static const std::map<StringPiece, ResourceType> sResourceTypeMap{
     {"integer", ResourceType::kInteger},
     {"interpolator", ResourceType::kInterpolator},
     {"layout", ResourceType::kLayout},
+    {"macro", ResourceType::kMacro},
     {"menu", ResourceType::kMenu},
     {"mipmap", ResourceType::kMipmap},
+    {"navigation", ResourceType::kNavigation},
     {"plurals", ResourceType::kPlurals},
     {"raw", ResourceType::kRaw},
     {"string", ResourceType::kString},
@@ -107,7 +134,25 @@ static const std::map<StringPiece, ResourceType> sResourceTypeMap{
     {"xml", ResourceType::kXml},
 };
 
-const ResourceType* ParseResourceType(const StringPiece& str) {
+ResourceNamedTypeRef ResourceNamedTypeWithDefaultName(ResourceType t) {
+  return {to_string(t), t};
+}
+
+std::optional<ResourceNamedTypeRef> ParseResourceNamedType(android::StringPiece s) {
+  auto dot = std::find(s.begin(), s.end(), '.');
+  const ResourceType* parsedType;
+  if (dot != s.end() && dot != std::prev(s.end())) {
+    parsedType = ParseResourceType(android::StringPiece(s.begin(), dot - s.begin()));
+  } else {
+    parsedType = ParseResourceType(s);
+  }
+  if (parsedType == nullptr) {
+    return std::nullopt;
+  }
+  return ResourceNamedTypeRef(s, *parsedType);
+}
+
+const ResourceType* ParseResourceType(StringPiece str) {
   auto iter = sResourceTypeMap.find(str);
   if (iter == std::end(sResourceTypeMap)) {
     return nullptr;

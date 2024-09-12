@@ -16,81 +16,42 @@
 
 package com.android.keyguard;
 
-import android.app.ActivityManager;
-import android.app.AlarmManager;
+import static java.util.Collections.emptySet;
+
 import android.content.Context;
-import android.content.res.Configuration;
-import android.content.res.Resources;
-import android.os.UserHandle;
-import android.text.TextUtils;
-import android.text.format.DateFormat;
+import android.graphics.Canvas;
+import android.os.Build;
+import android.os.Trace;
 import android.util.AttributeSet;
-import android.util.Log;
-import android.util.Slog;
-import android.util.TypedValue;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewPropertyAnimator;
 import android.widget.GridLayout;
-import android.widget.TextClock;
-import android.widget.TextView;
 
-import com.android.internal.util.ArrayUtils;
-import com.android.internal.widget.LockPatternUtils;
-import com.android.systemui.ChargingView;
-import com.android.systemui.statusbar.policy.DateView;
+import com.android.systemui.res.R;
+import com.android.systemui.shade.TouchLogger;
+import com.android.systemui.statusbar.CrossFadeHelper;
 
-import java.util.Locale;
+import java.io.PrintWriter;
+import java.util.Set;
 
+/**
+ * View consisting of:
+ * - keyguard clock
+ * - media player (split shade mode only)
+ */
 public class KeyguardStatusView extends GridLayout {
     private static final boolean DEBUG = KeyguardConstants.DEBUG;
     private static final String TAG = "KeyguardStatusView";
 
-    private final LockPatternUtils mLockPatternUtils;
-    private final AlarmManager mAlarmManager;
+    private ViewGroup mStatusViewContainer;
+    private KeyguardClockSwitch mClockView;
+    private KeyguardSliceView mKeyguardSlice;
+    private View mMediaHostContainer;
 
-    private TextView mAlarmStatusView;
-    private DateView mDateView;
-    private TextClock mClockView;
-    private TextView mOwnerInfo;
-    private ViewGroup mClockContainer;
-    private ChargingView mBatteryDoze;
-
-    private View[] mVisibleInDoze;
-    private boolean mPulsing;
-    private boolean mDark;
-
-    private KeyguardUpdateMonitorCallback mInfoCallback = new KeyguardUpdateMonitorCallback() {
-
-        @Override
-        public void onTimeChanged() {
-            refresh();
-        }
-
-        @Override
-        public void onKeyguardVisibilityChanged(boolean showing) {
-            if (showing) {
-                if (DEBUG) Slog.v(TAG, "refresh statusview showing:" + showing);
-                refresh();
-                updateOwnerInfo();
-            }
-        }
-
-        @Override
-        public void onStartedWakingUp() {
-            setEnableMarquee(true);
-        }
-
-        @Override
-        public void onFinishedGoingToSleep(int why) {
-            setEnableMarquee(false);
-        }
-
-        @Override
-        public void onUserSwitchComplete(int userId) {
-            refresh();
-            updateOwnerInfo();
-        }
-    };
+    private int mDrawAlpha = 255;
+    private float mDarkAmount = 0;
 
     public KeyguardStatusView(Context context) {
         this(context, null, 0);
@@ -102,208 +63,102 @@ public class KeyguardStatusView extends GridLayout {
 
     public KeyguardStatusView(Context context, AttributeSet attrs, int defStyle) {
         super(context, attrs, defStyle);
-        mAlarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
-        mLockPatternUtils = new LockPatternUtils(getContext());
-    }
-
-    private void setEnableMarquee(boolean enabled) {
-        if (DEBUG) Log.v(TAG, (enabled ? "Enable" : "Disable") + " transport text marquee");
-        if (mAlarmStatusView != null) mAlarmStatusView.setSelected(enabled);
-        if (mOwnerInfo != null) mOwnerInfo.setSelected(enabled);
     }
 
     @Override
     protected void onFinishInflate() {
         super.onFinishInflate();
-        mClockContainer = findViewById(R.id.keyguard_clock_container);
-        mAlarmStatusView = findViewById(R.id.alarm_status);
-        mDateView = findViewById(R.id.date_view);
-        mClockView = findViewById(R.id.clock_view);
-        mClockView.setShowCurrentUserTime(true);
-        mClockView.setAccessibilityDelegate(new KeyguardClockAccessibilityDelegate(mContext));
-        mOwnerInfo = findViewById(R.id.owner_info);
-        mBatteryDoze = findViewById(R.id.battery_doze);
-        mVisibleInDoze = new View[]{mBatteryDoze, mClockView};
+        mStatusViewContainer = findViewById(R.id.status_view_container);
 
-        boolean shouldMarquee = KeyguardUpdateMonitor.getInstance(mContext).isDeviceInteractive();
-        setEnableMarquee(shouldMarquee);
-        refresh();
-        updateOwnerInfo();
-
-        // Disable elegant text height because our fancy colon makes the ymin value huge for no
-        // reason.
-        mClockView.setElegantTextHeight(false);
-    }
-
-    @Override
-    protected void onConfigurationChanged(Configuration newConfig) {
-        super.onConfigurationChanged(newConfig);
-        mClockView.setTextSize(TypedValue.COMPLEX_UNIT_PX,
-                getResources().getDimensionPixelSize(R.dimen.widget_big_font_size));
-        // Some layouts like burmese have a different margin for the clock
-        MarginLayoutParams layoutParams = (MarginLayoutParams) mClockView.getLayoutParams();
-        layoutParams.bottomMargin = getResources().getDimensionPixelSize(
-                R.dimen.bottom_text_spacing_digital);
-        mClockView.setLayoutParams(layoutParams);
-        mDateView.setTextSize(TypedValue.COMPLEX_UNIT_PX,
-                getResources().getDimensionPixelSize(R.dimen.widget_label_font_size));
-        if (mOwnerInfo != null) {
-            mOwnerInfo.setTextSize(TypedValue.COMPLEX_UNIT_PX,
-                    getResources().getDimensionPixelSize(R.dimen.widget_label_font_size));
+        mClockView = findViewById(R.id.keyguard_clock_container);
+        if (KeyguardClockAccessibilityDelegate.isNeeded(mContext)) {
+            mClockView.setAccessibilityDelegate(new KeyguardClockAccessibilityDelegate(mContext));
         }
+
+        mKeyguardSlice = findViewById(R.id.keyguard_slice_view);
+
+        mMediaHostContainer = findViewById(R.id.status_view_media_container);
+
+        updateDark();
     }
 
-    public void refreshTime() {
-        mDateView.setDatePattern(Patterns.dateViewSkel);
-
-        mClockView.setFormat12Hour(Patterns.clockView12);
-        mClockView.setFormat24Hour(Patterns.clockView24);
-    }
-
-    private void refresh() {
-        AlarmManager.AlarmClockInfo nextAlarm =
-                mAlarmManager.getNextAlarmClock(UserHandle.USER_CURRENT);
-        Patterns.update(mContext, nextAlarm != null);
-
-        refreshTime();
-        refreshAlarmStatus(nextAlarm);
-    }
-
-    void refreshAlarmStatus(AlarmManager.AlarmClockInfo nextAlarm) {
-        if (nextAlarm != null) {
-            String alarm = formatNextAlarm(mContext, nextAlarm);
-            mAlarmStatusView.setText(alarm);
-            mAlarmStatusView.setContentDescription(
-                    getResources().getString(R.string.keyguard_accessibility_next_alarm, alarm));
-            mAlarmStatusView.setVisibility(View.VISIBLE);
-        } else {
-            mAlarmStatusView.setVisibility(View.GONE);
-        }
-    }
-
-    public int getClockBottom() {
-        return mClockView.getBottom() +
-                ((MarginLayoutParams) mClockView.getLayoutParams()).bottomMargin;
-    }
-
-    public static String formatNextAlarm(Context context, AlarmManager.AlarmClockInfo info) {
-        if (info == null) {
-            return "";
-        }
-        String skeleton = DateFormat.is24HourFormat(context, ActivityManager.getCurrentUser())
-                ? "EHm"
-                : "Ehma";
-        String pattern = DateFormat.getBestDateTimePattern(Locale.getDefault(), skeleton);
-        return DateFormat.format(pattern, info.getTriggerTime()).toString();
-    }
-
-    private void updateOwnerInfo() {
-        if (mOwnerInfo == null) return;
-        String ownerInfo = getOwnerInfo();
-        if (!TextUtils.isEmpty(ownerInfo)) {
-            mOwnerInfo.setVisibility(View.VISIBLE);
-            mOwnerInfo.setText(ownerInfo);
-        } else {
-            mOwnerInfo.setVisibility(View.GONE);
-        }
-    }
-
-    @Override
-    protected void onAttachedToWindow() {
-        super.onAttachedToWindow();
-        KeyguardUpdateMonitor.getInstance(mContext).registerCallback(mInfoCallback);
-    }
-
-    @Override
-    protected void onDetachedFromWindow() {
-        super.onDetachedFromWindow();
-        KeyguardUpdateMonitor.getInstance(mContext).removeCallback(mInfoCallback);
-    }
-
-    private String getOwnerInfo() {
-        String info = null;
-        if (mLockPatternUtils.isDeviceOwnerInfoEnabled()) {
-            // Use the device owner information set by device policy client via
-            // device policy manager.
-            info = mLockPatternUtils.getDeviceOwnerInfo();
-        } else {
-            // Use the current user owner information if enabled.
-            final boolean ownerInfoEnabled = mLockPatternUtils.isOwnerInfoEnabled(
-                    KeyguardUpdateMonitor.getCurrentUser());
-            if (ownerInfoEnabled) {
-                info = mLockPatternUtils.getOwnerInfo(KeyguardUpdateMonitor.getCurrentUser());
-            }
-        }
-        return info;
-    }
-
-    @Override
-    public boolean hasOverlappingRendering() {
-        return false;
-    }
-
-    // DateFormat.getBestDateTimePattern is extremely expensive, and refresh is called often.
-    // This is an optimization to ensure we only recompute the patterns when the inputs change.
-    private static final class Patterns {
-        static String dateViewSkel;
-        static String clockView12;
-        static String clockView24;
-        static String cacheKey;
-
-        static void update(Context context, boolean hasAlarm) {
-            final Locale locale = Locale.getDefault();
-            final Resources res = context.getResources();
-            dateViewSkel = res.getString(hasAlarm
-                    ? R.string.abbrev_wday_month_day_no_year_alarm
-                    : R.string.abbrev_wday_month_day_no_year);
-            final String clockView12Skel = res.getString(R.string.clock_12hr_format);
-            final String clockView24Skel = res.getString(R.string.clock_24hr_format);
-            final String key = locale.toString() + dateViewSkel + clockView12Skel + clockView24Skel;
-            if (key.equals(cacheKey)) return;
-
-            clockView12 = DateFormat.getBestDateTimePattern(locale, clockView12Skel);
-            // CLDR insists on adding an AM/PM indicator even though it wasn't in the skeleton
-            // format.  The following code removes the AM/PM indicator if we didn't want it.
-            if (!clockView12Skel.contains("a")) {
-                clockView12 = clockView12.replaceAll("a", "").trim();
-            }
-
-            clockView24 = DateFormat.getBestDateTimePattern(locale, clockView24Skel);
-
-            // Use fancy colon.
-            clockView24 = clockView24.replace(':', '\uee01');
-            clockView12 = clockView12.replace(':', '\uee01');
-
-            cacheKey = key;
-        }
-    }
-
-    public void setDark(boolean dark) {
-        if (mDark == dark) {
+    void setDarkAmount(float darkAmount) {
+        if (mDarkAmount == darkAmount) {
             return;
         }
-        mDark = dark;
+        mDarkAmount = darkAmount;
+        CrossFadeHelper.fadeOut(mMediaHostContainer, darkAmount);
+        updateDark();
+    }
 
-        final int N = mClockContainer.getChildCount();
-        for (int i = 0; i < N; i++) {
-            View child = mClockContainer.getChildAt(i);
-            if (ArrayUtils.contains(mVisibleInDoze, child)) {
-                continue;
+    void updateDark() {
+        mKeyguardSlice.setDarkAmount(mDarkAmount);
+    }
+
+    /** Sets a translationY value on every child view except for the media view. */
+    public void setChildrenTranslationY(float translationY, boolean excludeMedia) {
+        setChildrenTranslationYExcluding(translationY,
+                excludeMedia ? Set.of(mMediaHostContainer) : emptySet());
+    }
+
+    /** Sets a translationY value on every view except for the views in the provided set. */
+    private void setChildrenTranslationYExcluding(float translationY, Set<View> excludedViews) {
+        for (int i = 0; i < mStatusViewContainer.getChildCount(); i++) {
+            final View child = mStatusViewContainer.getChildAt(i);
+
+            if (!excludedViews.contains(child)) {
+                child.setTranslationY(translationY);
             }
-            child.setAlpha(dark ? 0 : 1);
         }
-        updateDozeVisibleViews();
-        mBatteryDoze.setDark(dark);
     }
 
-    public void setPulsing(boolean pulsing) {
-        mPulsing = pulsing;
-        updateDozeVisibleViews();
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        return TouchLogger.logDispatchTouch(TAG, ev, super.dispatchTouchEvent(ev));
     }
 
-    private void updateDozeVisibleViews() {
-        for (View child : mVisibleInDoze) {
-            child.setAlpha(mDark && mPulsing ? 0.8f : 1);
+    public void dump(PrintWriter pw, String[] args) {
+        pw.println("KeyguardStatusView:");
+        pw.println("  mDarkAmount: " + mDarkAmount);
+        pw.println("  visibility: " + getVisibility());
+        if (mClockView != null) {
+            mClockView.dump(pw, args);
         }
+        if (mKeyguardSlice != null) {
+            mKeyguardSlice.dump(pw, args);
+        }
+    }
+
+    @Override
+    public ViewPropertyAnimator animate() {
+        if (Build.IS_DEBUGGABLE) {
+            throw new IllegalArgumentException(
+                    "KeyguardStatusView does not support ViewPropertyAnimator. "
+                            + "Use PropertyAnimator instead.");
+        }
+        return super.animate();
+    }
+
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        Trace.beginSection("KeyguardStatusView#onMeasure");
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        Trace.endSection();
+    }
+
+    @Override
+    protected boolean onSetAlpha(int alpha) {
+        mDrawAlpha = alpha;
+        return true;
+    }
+
+    @Override
+    protected void dispatchDraw(Canvas canvas) {
+        KeyguardClockFrame.saveCanvasAlpha(
+                this, canvas, mDrawAlpha,
+                c -> {
+                    super.dispatchDraw(c);
+                    return kotlin.Unit.INSTANCE;
+                });
     }
 }

@@ -16,27 +16,31 @@
 #ifndef MATHUTILS_H
 #define MATHUTILS_H
 
-#include <algorithm>
 #include <math.h>
+#include <algorithm>
 
 namespace android {
 namespace uirenderer {
 
-#define NON_ZERO_EPSILON (0.001f)
-#define ALPHA_EPSILON (0.001f)
-
 class MathUtils {
 public:
+    static constexpr float NON_ZERO_EPSILON = 0.001f;
+    static constexpr float ALPHA_EPSILON = 0.001f;
+
     /**
      * Check for floats that are close enough to zero.
      */
     inline static bool isZero(float value) {
-        return (value >= -NON_ZERO_EPSILON) && (value <= NON_ZERO_EPSILON);
+        // Using fabsf is more performant as ARM computes
+        // fabsf in a single instruction.
+        return fabsf(value) <= NON_ZERO_EPSILON;
     }
 
-    inline static bool isPositive(float value) {
-        return value >= NON_ZERO_EPSILON;
+    inline static bool isOne(float value) {
+        return areEqual(value, 1.0f);
     }
+
+    inline static bool isPositive(float value) { return value >= NON_ZERO_EPSILON; }
 
     /**
      * Clamps alpha value, and snaps when very near 0 or 1
@@ -69,28 +73,24 @@ public:
      * Returns the number of points (beyond two, the start and end) needed to form a polygonal
      * approximation of an arc, with a given threshold value.
      */
-    inline static int divisionsNeededToApproximateArc(float radius,
-            float angleInRads, float threshold) {
+    inline static int divisionsNeededToApproximateArc(float radius, float angleInRads,
+                                                      float threshold) {
         const float errConst = (-threshold / radius + 1);
         const float targetCosVal = 2 * errConst * errConst - 1;
 
         // needed divisions are rounded up from approximation
-        return (int)(ceilf(angleInRads / acos(targetCosVal)/2)) * 2;
+        return (int)(ceilf(angleInRads / acos(targetCosVal) / 2)) * 2;
     }
 
-    inline static bool areEqual(float valueA, float valueB) {
-        return isZero(valueA - valueB);
-    }
+    inline static bool areEqual(float valueA, float valueB) { return isZero(valueA - valueB); }
 
-    template<typename T>
+    template <typename T>
     static inline T clamp(T a, T minValue, T maxValue) {
         return std::min(std::max(a, minValue), maxValue);
     }
 
-    inline static float lerp(float v1, float v2, float t) {
-        return v1 + ((v2 - v1) * t);
-    }
-}; // class MathUtils
+    inline static float lerp(float v1, float v2, float t) { return v1 + ((v2 - v1) * t); }
+};  // class MathUtils
 
 } /* namespace uirenderer */
 } /* namespace android */

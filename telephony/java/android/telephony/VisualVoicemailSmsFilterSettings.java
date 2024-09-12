@@ -15,12 +15,10 @@
  */
 package android.telephony;
 
-import android.content.Context;
 import android.os.Parcel;
 import android.os.Parcelable;
-
-import android.telecom.PhoneAccountHandle;
 import android.telephony.VisualVoicemailService.VisualVoicemailTask;
+
 import java.util.Collections;
 import java.util.List;
 
@@ -75,6 +73,7 @@ public final class VisualVoicemailSmsFilterSettings implements Parcelable {
         private String mClientPrefix = DEFAULT_CLIENT_PREFIX;
         private List<String> mOriginatingNumbers = DEFAULT_ORIGINATING_NUMBERS;
         private int mDestinationPort = DEFAULT_DESTINATION_PORT;
+        private String mPackageName;
 
         public VisualVoicemailSmsFilterSettings build() {
             return new VisualVoicemailSmsFilterSettings(this);
@@ -93,8 +92,8 @@ public final class VisualVoicemailSmsFilterSettings implements Parcelable {
         }
 
         /**
-         * Sets the originating number whitelist for the visual voicemail SMS filter. If the list is
-         * not null only the SMS messages from a number in the list can be considered as a visual
+         * Sets the originating number allow list for the visual voicemail SMS filter. If the list
+         * is not null only the SMS messages from a number in the list can be considered as a visual
          * voicemail SMS. Otherwise, messages from any address will be considered.
          */
         public Builder setOriginatingNumbers(List<String> originatingNumbers) {
@@ -116,6 +115,15 @@ public final class VisualVoicemailSmsFilterSettings implements Parcelable {
             return this;
         }
 
+        /**
+         * The package that registered this filter.
+         *
+         * @hide
+         */
+        public Builder setPackageName(String packageName) {
+            mPackageName = packageName;
+            return this;
+        }
     }
 
     /**
@@ -125,7 +133,7 @@ public final class VisualVoicemailSmsFilterSettings implements Parcelable {
     public final String clientPrefix;
 
     /**
-     * The originating number whitelist for the visual voicemail SMS filter of a phone account. If
+     * The originating number allow list for the visual voicemail SMS filter of a phone account. If
      * the list is not null only the SMS messages from a number in the list can be considered as a
      * visual voicemail SMS. Otherwise, messages from any address will be considered.
      */
@@ -138,15 +146,23 @@ public final class VisualVoicemailSmsFilterSettings implements Parcelable {
     public final int destinationPort;
 
     /**
+     * The package that registered this filter.
+     *
+     * @hide
+     */
+    public final String packageName;
+
+    /**
      * Use {@link Builder} to construct
      */
     private VisualVoicemailSmsFilterSettings(Builder builder) {
         clientPrefix = builder.mClientPrefix;
         originatingNumbers = builder.mOriginatingNumbers;
         destinationPort = builder.mDestinationPort;
+        packageName = builder.mPackageName;
     }
 
-    public static final Creator<VisualVoicemailSmsFilterSettings> CREATOR =
+    public static final @android.annotation.NonNull Creator<VisualVoicemailSmsFilterSettings> CREATOR =
             new Creator<VisualVoicemailSmsFilterSettings>() {
                 @Override
                 public VisualVoicemailSmsFilterSettings createFromParcel(Parcel in) {
@@ -154,7 +170,7 @@ public final class VisualVoicemailSmsFilterSettings implements Parcelable {
                     builder.setClientPrefix(in.readString());
                     builder.setOriginatingNumbers(in.createStringArrayList());
                     builder.setDestinationPort(in.readInt());
-
+                    builder.setPackageName(in.readString());
                     return builder.build();
                 }
 
@@ -174,10 +190,11 @@ public final class VisualVoicemailSmsFilterSettings implements Parcelable {
         dest.writeString(clientPrefix);
         dest.writeStringList(originatingNumbers);
         dest.writeInt(destinationPort);
+        dest.writeString(packageName);
     }
 
     @Override
-    public String toString(){
+    public String toString() {
         return "[VisualVoicemailSmsFilterSettings "
                 + "clientPrefix=" + clientPrefix
                 + ", originatingNumbers=" + originatingNumbers

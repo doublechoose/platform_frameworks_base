@@ -61,7 +61,6 @@ import android.print.PrinterId;
 import android.print.PrinterInfo;
 import android.printservice.PrintService;
 import android.printservice.PrintServiceInfo;
-import android.provider.DocumentsContract;
 import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
@@ -70,7 +69,6 @@ import android.util.ArraySet;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.KeyEvent;
-import android.view.MotionEvent;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.view.View.OnFocusChangeListener;
@@ -101,6 +99,7 @@ import com.android.printspooler.util.ApprovedPrintServices;
 import com.android.printspooler.util.MediaSizeUtils;
 import com.android.printspooler.util.MediaSizeUtils.MediaSizeComparator;
 import com.android.printspooler.util.PageRangeUtils;
+import com.android.printspooler.widget.ClickInterceptSpinner;
 import com.android.printspooler.widget.PrintContentView;
 import com.android.printspooler.widget.PrintContentView.OptionsStateChangeListener;
 import com.android.printspooler.widget.PrintContentView.OptionsStateController;
@@ -136,6 +135,9 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
     private static final String PRINT_WORK_COUNT = "print_work";
 
     private static final String FRAGMENT_TAG = "FRAGMENT_TAG";
+
+    private static final String MORE_OPTIONS_ACTIVITY_IN_PROGRESS_KEY =
+            PrintActivity.class.getName() + ".MORE_OPTIONS_ACTIVITY_IN_PROGRESS";
 
     private static final String HAS_PRINTED_PREF = "has_printed";
 
@@ -200,7 +202,7 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
     private TextView mPageRangeTitle;
     private EditText mPageRangeEditText;
 
-    private Spinner mDestinationSpinner;
+    private ClickInterceptSpinner mDestinationSpinner;
     private DestinationAdapter mDestinationSpinnerAdapter;
     private boolean mShowDestinationPrompt;
 
@@ -225,6 +227,12 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
     private TextView mSummaryPaperSize;
 
     private Button mMoreOptionsButton;
+
+    /**
+     * The {@link #mMoreOptionsButton} was pressed and we started the
+     * @link #mAdvancedPrintOptionsActivity} and it has not yet {@link #onActivityResult returned}.
+     */
+    private boolean mIsMoreOptionsActivityInProgress;
 
     private ImageView mPrintButton;
 
@@ -268,6 +276,11 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
 
         Bundle extras = getIntent().getExtras();
 
+        if (savedInstanceState != null) {
+            mIsMoreOptionsActivityInProgress =
+                    savedInstanceState.getBoolean(MORE_OPTIONS_ACTIVITY_IN_PROGRESS_KEY);
+        }
+
         mPrintJob = extras.getParcelable(PrintManager.EXTRA_PRINT_JOB);
         if (mPrintJob == null) {
             throw new IllegalArgumentException(PrintManager.EXTRA_PRINT_JOB
@@ -283,7 +296,7 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
                     + " cannot be null");
         }
 
-        mCallingPackageName = extras.getString(DocumentsContract.EXTRA_PACKAGE_NAME);
+        mCallingPackageName = extras.getString(Intent.EXTRA_PACKAGE_NAME);
 
         if (savedInstanceState == null) {
             MetricsLogger.action(this, MetricsEvent.PRINT_PREVIEW, mCallingPackageName);
@@ -292,19 +305,22 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
         // This will take just a few milliseconds, so just wait to
         // bind to the local service before showing the UI.
         mSpoolerProvider = new PrintSpoolerProvider(this,
-                new Runnable() {
-            @Override
-            public void run() {
-                if (isFinishing() || isDestroyed()) {
-                    // onPause might have not been able to cancel the job, see PrintActivity#onPause
-                    // To be sure, cancel the job again. Double canceling does no harm.
-                    mSpoolerProvider.getSpooler().setPrintJobState(mPrintJob.getId(),
-                            PrintJobInfo.STATE_CANCELED, null);
-                } else {
-                    onConnectedToPrintSpooler(adapter);
-                }
-            }
-        });
+                () -> {
+                    if (isFinishing() || isDestroyed()) {
+                        if (savedInstanceState != null) {
+                            // onPause might have not been able to cancel the job, see
+                            // PrintActivity#onPause
+                            // To be sure, cancel the job again. Double canceling does no harm.
+                            mSpoolerProvider.getSpooler().setPrintJobState(mPrintJob.getId(),
+                                    PrintJobInfo.STATE_CANCELED, null);
+                        }
+                    } else {
+                        if (savedInstanceState == null) {
+                            mSpoolerProvider.getSpooler().createPrintJob(mPrintJob);
+                        }
+                        onConnectedToPrintSpooler(adapter);
+                    }
+                });
 
         getLoaderManager().initLoader(LOADER_ID_ENABLED_PRINT_SERVICES, null, this);
     }
@@ -421,6 +437,14 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
         }
 
         super.onPause();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+
+        outState.putBoolean(MORE_OPTIONS_ACTIVITY_IN_PROGRESS_KEY,
+                mIsMoreOptionsActivityInProgress);
     }
 
     @Override
@@ -642,7 +666,9 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
 
-        mMediaSizeComparator.onConfigurationChanged(newConfig);
+        if (mMediaSizeComparator != null) {
+            mMediaSizeComparator.onConfigurationChanged(newConfig);
+        }
 
         if (mPrintPreviewController != null) {
             mPrintPreviewController.onOrientationChanged();
@@ -688,7 +714,7 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         intent.setType("application/pdf");
         intent.putExtra(Intent.EXTRA_TITLE, info.getName());
-        intent.putExtra(DocumentsContract.EXTRA_PACKAGE_NAME, mCallingPackageName);
+        intent.putExtra(Intent.EXTRA_PACKAGE_NAME, mCallingPackageName);
 
         try {
             startActivityForResult(intent, ACTIVITY_REQUEST_CREATE_FILE);
@@ -759,6 +785,9 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
                 } else {
                     onPrinterUnavailable(printerInfo);
                 }
+                if (mPrinterRegistry != null) {
+                    mPrinterRegistry.setTrackedPrinter(mCurrentPrinter.getId());
+                }
 
                 mDestinationSpinnerAdapter.ensurePrinterInVisibleAdapterPosition(printerInfo);
 
@@ -784,6 +813,8 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
         List<ResolveInfo> resolvedActivities = getPackageManager()
                 .queryIntentActivities(intent, 0);
         if (resolvedActivities.isEmpty()) {
+            Log.w(LOG_TAG, "Advanced options activity " + mAdvancedPrintOptionsActivity + " could "
+                    + "not be found");
             return;
         }
 
@@ -797,16 +828,24 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
             intent.putExtra(PrintService.EXTRA_PRINT_DOCUMENT_INFO,
                     mPrintedDocument.getDocumentInfo().info);
 
+            mIsMoreOptionsActivityInProgress = true;
+
             // This is external activity and may not be there.
             try {
                 startActivityForResult(intent, ACTIVITY_REQUEST_POPULATE_ADVANCED_PRINT_OPTIONS);
             } catch (ActivityNotFoundException anfe) {
+                mIsMoreOptionsActivityInProgress = false;
                 Log.e(LOG_TAG, "Error starting activity for intent: " + intent, anfe);
             }
+
+            mMoreOptionsButton.setEnabled(!mIsMoreOptionsActivityInProgress);
         }
     }
 
     private void onAdvancedPrintOptionsActivityResult(int resultCode, Intent data) {
+        mIsMoreOptionsActivityInProgress = false;
+        mMoreOptionsButton.setEnabled(true);
+
         if (resultCode != RESULT_OK || data == null) {
             return;
         }
@@ -1383,19 +1422,14 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
             mSummaryCopies.setEnabled(false);
             mSummaryPaperSize.setEnabled(false);
 
-            mDestinationSpinner.setOnTouchListener(new View.OnTouchListener() {
-                @Override
-                public boolean onTouch(View v, MotionEvent event) {
-                    mShowDestinationPrompt = false;
-                    mSummaryCopies.setEnabled(true);
-                    mSummaryPaperSize.setEnabled(true);
-                    updateOptionsUi();
+            mDestinationSpinner.setPerformClickListener((v) -> {
+                mShowDestinationPrompt = false;
+                mSummaryCopies.setEnabled(true);
+                mSummaryPaperSize.setEnabled(true);
+                updateOptionsUi();
 
-                    mDestinationSpinner.setOnTouchListener(null);
-                    mDestinationSpinnerAdapter.notifyDataSetChanged();
-
-                    return false;
-                }
+                mDestinationSpinner.setPerformClickListener(null);
+                mDestinationSpinnerAdapter.notifyDataSetChanged();
             });
         }
     }
@@ -1906,7 +1940,8 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
         // Advanced print options
         if (mAdvancedPrintOptionsActivity != null) {
             mMoreOptionsButton.setVisibility(View.VISIBLE);
-            mMoreOptionsButton.setEnabled(true);
+
+            mMoreOptionsButton.setEnabled(!mIsMoreOptionsActivityInProgress);
         } else {
             mMoreOptionsButton.setVisibility(View.GONE);
             mMoreOptionsButton.setEnabled(false);
@@ -3089,6 +3124,8 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
 
         private final Consumer<String> mCallback;
 
+        private boolean mIsTransformationStarted;
+
         public DocumentTransformer(Context context, PrintJobInfo printJob,
                 MutexFileProvider fileProvider, PrintAttributes attributes,
                 Consumer<String> callback) {
@@ -3116,29 +3153,35 @@ public class PrintActivity extends Activity implements RemotePrintDocument.Updat
 
         @Override
         public void onServiceConnected(ComponentName name, IBinder service) {
-            final IPdfEditor editor = IPdfEditor.Stub.asInterface(service);
-            new AsyncTask<Void, Void, String>() {
-                @Override
-                protected String doInBackground(Void... params) {
-                    // It's OK to access the data members as they are
-                    // final and this code is the last one to touch
-                    // them as shredding is the very last step, so the
-                    // UI is not interactive at this point.
-                    try {
-                        doTransform(editor);
-                        updatePrintJob();
-                        return null;
-                    } catch (IOException | RemoteException | IllegalStateException e) {
-                        return e.toString();
+            // We might get several onServiceConnected if the service crashes and restarts.
+            // mIsTransformationStarted makes sure that we only try once.
+            if (!mIsTransformationStarted) {
+                final IPdfEditor editor = IPdfEditor.Stub.asInterface(service);
+                new AsyncTask<Void, Void, String>() {
+                    @Override
+                    protected String doInBackground(Void... params) {
+                        // It's OK to access the data members as they are
+                        // final and this code is the last one to touch
+                        // them as shredding is the very last step, so the
+                        // UI is not interactive at this point.
+                        try {
+                            doTransform(editor);
+                            updatePrintJob();
+                            return null;
+                        } catch (IOException | RemoteException | IllegalStateException e) {
+                            return e.toString();
+                        }
                     }
-                }
 
-                @Override
-                protected void onPostExecute(String error) {
-                    mContext.unbindService(DocumentTransformer.this);
-                    mCallback.accept(error);
-                }
-            }.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+                    @Override
+                    protected void onPostExecute(String error) {
+                        mContext.unbindService(DocumentTransformer.this);
+                        mCallback.accept(error);
+                    }
+                }.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+
+                mIsTransformationStarted = true;
+            }
         }
 
         @Override

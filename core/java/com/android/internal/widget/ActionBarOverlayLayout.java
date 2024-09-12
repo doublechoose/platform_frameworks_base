@@ -18,11 +18,13 @@ package com.android.internal.widget;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.content.res.TypedArray;
 import android.graphics.Canvas;
+import android.graphics.Insets;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.os.Build;
@@ -40,6 +42,7 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.widget.OverScroller;
 import android.widget.Toolbar;
+
 import com.android.internal.view.menu.MenuPresenter;
 
 /**
@@ -49,6 +52,7 @@ import com.android.internal.view.menu.MenuPresenter;
  */
 public class ActionBarOverlayLayout extends ViewGroup implements DecorContentParent {
     private static final String TAG = "ActionBarOverlayLayout";
+    private static final Rect EMPTY_RECT = new Rect();
 
     private int mActionBarHeight;
     //private WindowDecorActionBar mActionBar;
@@ -75,10 +79,13 @@ public class ActionBarOverlayLayout extends ViewGroup implements DecorContentPar
     private final Rect mBaseContentInsets = new Rect();
     private final Rect mLastBaseContentInsets = new Rect();
     private final Rect mContentInsets = new Rect();
-    private final Rect mBaseInnerInsets = new Rect();
-    private final Rect mLastBaseInnerInsets = new Rect();
-    private final Rect mInnerInsets = new Rect();
-    private final Rect mLastInnerInsets = new Rect();
+    private final Rect mSystemInsets = new Rect();
+    private WindowInsets mBaseInnerInsets = WindowInsets.CONSUMED;
+    private WindowInsets mLastBaseInnerInsets = WindowInsets.CONSUMED;
+    private WindowInsets mInnerInsets = WindowInsets.CONSUMED;
+    private WindowInsets mLastInnerInsets = WindowInsets.CONSUMED;
+    private boolean mDecorFitsSystemWindows = true;
+    private boolean mActionBarExtendsIntoSystemInsets = false;
 
     private ActionBarVisibilityCallback mActionBarVisibilityCallback;
 
@@ -168,6 +175,7 @@ public class ActionBarOverlayLayout extends ViewGroup implements DecorContentPar
         init(context);
     }
 
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public ActionBarOverlayLayout(Context context, AttributeSet attrs) {
         super(context, attrs);
         init(context);
@@ -265,7 +273,8 @@ public class ActionBarOverlayLayout extends ViewGroup implements DecorContentPar
             // We want the bar to be visible if it is not being hidden,
             // or the app has not turned on a stable UI mode (meaning they
             // are performing explicit layout around the action bar).
-            mActionBarVisibilityCallback.enableContentAnimations(!stable);
+            mActionBarVisibilityCallback.enableContentAnimations(
+                    !stable && !mActionBarExtendsIntoSystemInsets);
             if (barVisible || !stable) mActionBarVisibilityCallback.showForSystem();
             else mActionBarVisibilityCallback.hideForSystem();
         }
@@ -285,10 +294,39 @@ public class ActionBarOverlayLayout extends ViewGroup implements DecorContentPar
         }
     }
 
-    private boolean applyInsets(View view, Rect insets, boolean left, boolean top,
-            boolean bottom, boolean right) {
+    private boolean applyInsets(View view, Rect insets, boolean toPadding,
+            boolean left, boolean top, boolean right, boolean bottom) {
+        boolean changed;
+        if (toPadding) {
+            changed = setMargin(view, EMPTY_RECT, left, top, right, bottom);
+            changed |= setPadding(view, insets, left, top, right, bottom);
+        } else {
+            changed = setPadding(view, EMPTY_RECT, left, top, right, bottom);
+            changed |= setMargin(view, insets, left, top, right, bottom);
+        }
+        return changed;
+    }
+
+    private boolean setPadding(View view, Rect insets,
+            boolean left, boolean top, boolean right, boolean bottom) {
+        if ((left && view.getPaddingLeft() != insets.left)
+                || (top && view.getPaddingTop() != insets.top)
+                || (right && view.getPaddingRight() != insets.right)
+                || (bottom && view.getPaddingBottom() != insets.bottom)) {
+            view.setPadding(
+                    left ? insets.left : view.getPaddingLeft(),
+                    top ? insets.top : view.getPaddingTop(),
+                    right ? insets.right : view.getPaddingRight(),
+                    bottom ? insets.bottom : view.getPaddingBottom());
+            return true;
+        }
+        return false;
+    }
+
+    private boolean setMargin(View view,  Rect insets,
+            boolean left, boolean top, boolean right, boolean bottom) {
+        final LayoutParams lp = (LayoutParams) view.getLayoutParams();
         boolean changed = false;
-        LayoutParams lp = (LayoutParams)view.getLayoutParams();
         if (left && lp.leftMargin != insets.left) {
             changed = true;
             lp.leftMargin = insets.left;
@@ -314,19 +352,37 @@ public class ActionBarOverlayLayout extends ViewGroup implements DecorContentPar
 
         final int vis = getWindowSystemUiVisibility();
         final boolean stable = (vis & SYSTEM_UI_FLAG_LAYOUT_STABLE) != 0;
-        final Rect systemInsets = insets.getSystemWindowInsets();
+        final boolean layoutIntoSystemInsets = (vis & SYSTEM_UI_LAYOUT_FLAGS) != 0;
+        mDecorFitsSystemWindows = hasContentOnApplyWindowInsetsListener();
 
-        // The top and bottom action bars are always within the content area.
-        boolean changed = applyInsets(mActionBarTop, systemInsets, true, true, false, true);
-        if (mActionBarBottom != null) {
-            changed |= applyInsets(mActionBarBottom, systemInsets, true, false, true, true);
+        // Only extend action bar into system insets area if the app doesn't fit system insets.
+        mActionBarExtendsIntoSystemInsets =
+                !mDecorFitsSystemWindows || (stable && layoutIntoSystemInsets);
+
+        if (mActionBarVisibilityCallback != null) {
+            mActionBarVisibilityCallback.enableContentAnimations(
+                    !stable && !mActionBarExtendsIntoSystemInsets);
         }
 
-        mBaseInnerInsets.set(systemInsets);
-        computeFitSystemWindows(mBaseInnerInsets, mBaseContentInsets);
+        final Insets sysInsets = insets.getSystemWindowInsets();
+        mSystemInsets.set(sysInsets.left, sysInsets.top, sysInsets.right, sysInsets.bottom);
+
+        // The top and bottom action bars are always within the content area.
+        boolean changed = applyInsets(mActionBarTop, mSystemInsets,
+                mActionBarExtendsIntoSystemInsets, true, true, true, false);
+        if (mActionBarBottom != null) {
+            changed |= applyInsets(mActionBarBottom, mSystemInsets,
+                    mActionBarExtendsIntoSystemInsets, true, false, true, true);
+        }
+
+        // Cannot use the result of computeSystemWindowInsets, because that consumes the
+        // systemWindowInsets. Instead, we do the insetting by the local insets ourselves.
+        computeSystemWindowInsets(insets, mBaseContentInsets);
+        mBaseInnerInsets = insets.inset(mBaseContentInsets);
+
         if (!mLastBaseInnerInsets.equals(mBaseInnerInsets)) {
             changed = true;
-            mLastBaseContentInsets.set(mBaseContentInsets);
+            mLastBaseInnerInsets = mBaseInnerInsets;
         }
         if (!mLastBaseContentInsets.equals(mBaseContentInsets)) {
             changed = true;
@@ -401,6 +457,9 @@ public class ActionBarOverlayLayout extends ViewGroup implements DecorContentPar
             // This is the standard space needed for the action bar.  For stable measurement,
             // we can't depend on the size currently reported by it -- this must remain constant.
             topInset = mActionBarHeight;
+            if (mActionBarExtendsIntoSystemInsets) {
+                topInset += mSystemInsets.top;
+            }
             if (mHasNonEmbeddedTabs) {
                 final View tabs = mActionBarTop.getTabContainer();
                 if (tabs != null) {
@@ -419,6 +478,9 @@ public class ActionBarOverlayLayout extends ViewGroup implements DecorContentPar
             if (mActionBarBottom != null) {
                 if (stable) {
                     bottomInset = mActionBarHeight;
+                    if (mActionBarExtendsIntoSystemInsets) {
+                        bottomInset += mSystemInsets.bottom;
+                    }
                 } else {
                     bottomInset = mActionBarBottom.getMeasuredHeight();
                 }
@@ -430,22 +492,43 @@ public class ActionBarOverlayLayout extends ViewGroup implements DecorContentPar
         // will still be covered by the action bar if they have requested it to
         // overlay.
         mContentInsets.set(mBaseContentInsets);
-        mInnerInsets.set(mBaseInnerInsets);
-        if (!mOverlayMode && !stable) {
-            mContentInsets.top += topInset;
-            mContentInsets.bottom += bottomInset;
+        mInnerInsets = mBaseInnerInsets;
+        if (!mOverlayMode && !stable && mDecorFitsSystemWindows) {
+            if (mActionBarExtendsIntoSystemInsets) {
+                mContentInsets.top = Math.max(mContentInsets.top, topInset);
+                mContentInsets.bottom = Math.max(mContentInsets.bottom, bottomInset);
+            } else {
+                mContentInsets.top += topInset;
+                mContentInsets.bottom += bottomInset;
+            }
+            // Content view has been shrunk, shrink all insets to match.
+            mInnerInsets = mInnerInsets.inset(0 /* left */, topInset, 0 /* right */, bottomInset);
         } else {
-            mInnerInsets.top += topInset;
-            mInnerInsets.bottom += bottomInset;
+            // Add ActionBar to system window inset, but leave other insets untouched.
+            if (mActionBarExtendsIntoSystemInsets) {
+                mInnerInsets = mInnerInsets.replaceSystemWindowInsets(
+                        mInnerInsets.getSystemWindowInsetLeft(),
+                        Math.max(mInnerInsets.getSystemWindowInsetTop(), topInset),
+                        mInnerInsets.getSystemWindowInsetRight(),
+                        Math.max(mInnerInsets.getSystemWindowInsetBottom(), bottomInset)
+                );
+            } else {
+                mInnerInsets = mInnerInsets.replaceSystemWindowInsets(
+                        mInnerInsets.getSystemWindowInsetLeft(),
+                        mInnerInsets.getSystemWindowInsetTop() + topInset,
+                        mInnerInsets.getSystemWindowInsetRight(),
+                        mInnerInsets.getSystemWindowInsetBottom() + bottomInset
+                );
+            }
         }
-        applyInsets(mContent, mContentInsets, true, true, true, true);
+        setMargin(mContent, mContentInsets, true, true, true, true);
 
         if (!mLastInnerInsets.equals(mInnerInsets)) {
             // If the inner insets have changed, we need to dispatch this down to
-            // the app's fitSystemWindows().  We do this before measuring the content
+            // the app's onApplyWindowInsets().  We do this before measuring the content
             // view to keep the same semantics as the normal fitSystemWindows() call.
-            mLastInnerInsets.set(mInnerInsets);
-            mContent.dispatchApplyWindowInsets(new WindowInsets(mInnerInsets));
+            mLastInnerInsets = mInnerInsets;
+            mContent.dispatchApplyWindowInsets(mInnerInsets);
         }
 
         measureChildWithMargins(mContent, widthMeasureSpec, 0, heightMeasureSpec, 0);
@@ -662,6 +745,7 @@ public class ActionBarOverlayLayout extends ViewGroup implements DecorContentPar
         return finalY > mActionBarTop.getHeight();
     }
 
+    @UnsupportedAppUsage
     @Override
     public void setWindowCallback(Window.Callback cb) {
         pullChildren();
@@ -812,6 +896,13 @@ public class ActionBarOverlayLayout extends ViewGroup implements DecorContentPar
     public void dismissPopups() {
         pullChildren();
         mDecorToolbar.dismissPopupMenus();
+    }
+
+    @Override
+    public void notifyContentChanged() {
+        mLastBaseContentInsets.setEmpty();
+        mLastBaseInnerInsets = WindowInsets.CONSUMED;
+        mLastInnerInsets = WindowInsets.CONSUMED;
     }
 
     public static class LayoutParams extends MarginLayoutParams {

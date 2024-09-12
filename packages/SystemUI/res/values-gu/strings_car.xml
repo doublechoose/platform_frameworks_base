@@ -19,6 +19,10 @@
 
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="car_lockscreen_disclaimer_title" msgid="7997539137376896441">"સુરક્ષિત રીતે વાહન ચલાવો"</string>
-    <string name="car_lockscreen_disclaimer_text" msgid="3061224684092952864">"ડ્રાઇવિંગ સ્થિતિઓથી સંપૂર્ણપણે વાકેફ રહો અને હંમેશા લાગુ કાયદાઓનું પાલન કરો. દિશા નિર્દેશો અચોક્કસ, અપૂર્ણ, જોખમમકારક, બિન અનુકૂળ, પ્રતિબંધિત અથવા વહીવટી વિસ્તારોને ઓળંગવાનું સમાવતા હોઇ શકે છે. વ્યવસાય માહિતી પણ અચોક્કસ અથવા અપૂર્ણ હોઇ શકે છે. ડેટા રિઅલ-ટાઇમ નથી અને સ્થાન ચોકસાઈની ગેરંટી આપી શકતાં નથી. ડ્રાઇવિંગ કરતી વખતે Android Auto માટે તમારું મોબાઇલ સાધન હેન્ડલ કરવું અથવા ઍપ્લિકેશનનો ઉપયોગ કરવાનું કોઇ પ્રયોજન નથી."</string>
+    <string name="car_guest" msgid="3738772168718508650">"અતિથિ"</string>
+    <string name="start_guest_session" msgid="7055742120180595689">"અતિથિ"</string>
+    <string name="car_add_user" msgid="5245196248349230898">"વપરાશકર્તા ઉમેરો"</string>
+    <string name="car_new_user" msgid="8142927244990323906">"નવા વપરાશકર્તા"</string>
+    <string name="user_add_user_message_setup" msgid="1791011504259527329">"જ્યારે તમે કોઈ નવા વપરાશકર્તાને ઉમેરો છો, ત્યારે તે વ્યક્તિએ તેમની સ્પેસ સેટ કરવાની જરૂર રહે છે."</string>
+    <string name="user_add_user_message_update" msgid="3383320289232716179">"કોઈપણ વપરાશકર્તા બધા અન્ય વપરાશકર્તાઓ માટે ઍપને અપડેટ કરી શકે છે."</string>
 </resources>

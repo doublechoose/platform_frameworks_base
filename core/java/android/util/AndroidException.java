@@ -19,6 +19,7 @@ package android.util;
 /**
  * Base class for all checked exceptions thrown by the Android frameworks.
  */
+@android.ravenwood.annotation.RavenwoodKeepWholeClass
 public class AndroidException extends Exception {
     public AndroidException() {
     }
@@ -34,5 +35,11 @@ public class AndroidException extends Exception {
     public AndroidException(Exception cause) {
         super(cause);
     }
-};
+
+    /** @hide */
+    protected AndroidException(String message, Throwable cause, boolean enableSuppression,
+            boolean writableStackTrace) {
+        super(message, cause, enableSuppression, writableStackTrace);
+    }
+}
 

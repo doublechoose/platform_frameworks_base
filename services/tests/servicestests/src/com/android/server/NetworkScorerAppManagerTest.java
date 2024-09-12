@@ -31,9 +31,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import android.Manifest.permission;
+import android.app.AppOpsManager;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -44,7 +44,8 @@ import android.net.NetworkScoreManager;
 import android.net.NetworkScorerAppData;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.runner.AndroidJUnit4;
 
 import com.android.internal.R;
 
@@ -54,22 +55,24 @@ import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
-import org.mockito.compat.ArgumentMatcher;
 
 import java.util.ArrayList;
 import java.util.List;
 
 @RunWith(AndroidJUnit4.class)
 public class NetworkScorerAppManagerTest {
+    private static final int PACKAGE_UID = 924;
     private static String MOCK_SERVICE_LABEL = "Mock Service";
     private static String MOCK_OVERRIDEN_SERVICE_LABEL = "Mock Service Label Override";
     private static String MOCK_NETWORK_AVAILABLE_NOTIFICATION_CHANNEL_ID =
             "Mock Network Available Notification Channel Id";
+    private static final ComponentName RECO_COMPONENT = new ComponentName("package1", "class1");
 
     @Mock private Context mMockContext;
     @Mock private PackageManager mMockPm;
     @Mock private Resources mResources;
     @Mock private NetworkScorerAppManager.SettingsFacade mSettingsFacade;
+    @Mock private AppOpsManager mAppOpsManager;
     private NetworkScorerAppManager mNetworkScorerAppManager;
     private List<ResolveInfo> mAvailableServices;
 
@@ -78,53 +81,73 @@ public class NetworkScorerAppManagerTest {
         MockitoAnnotations.initMocks(this);
         mAvailableServices = new ArrayList<>();
         when(mMockContext.getPackageManager()).thenReturn(mMockPm);
-        when(mMockPm.queryIntentServices(Mockito.argThat(new ArgumentMatcher<Intent>() {
-            @Override
-            public boolean matchesObject(Object object) {
-                Intent intent = (Intent) object;
-                return NetworkScoreManager.ACTION_RECOMMEND_NETWORKS.equals(intent.getAction());
-            }
-        }), eq(PackageManager.GET_META_DATA))).thenReturn(mAvailableServices);
+        when(mMockPm.queryIntentServices(Mockito.argThat(
+                intent -> NetworkScoreManager.ACTION_RECOMMEND_NETWORKS.equals(intent.getAction())),
+                eq(PackageManager.GET_META_DATA))).thenReturn(mAvailableServices);
         when(mMockContext.getResources()).thenReturn(mResources);
+        when(mMockContext.getSystemService(Context.APP_OPS_SERVICE)).thenReturn(mAppOpsManager);
+
+        mockLocationModeOn();
+        mockLocationPermissionGranted(PACKAGE_UID, RECO_COMPONENT.getPackageName());
 
         mNetworkScorerAppManager = new NetworkScorerAppManager(mMockContext, mSettingsFacade);
     }
 
     @Test
     public void testGetActiveScorer_providerAvailable() throws Exception {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
-        setNetworkRecoPackageSetting(recoComponent.getPackageName());
-        mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */);
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */);
 
         final NetworkScorerAppData activeScorer = mNetworkScorerAppManager.getActiveScorer();
         assertNotNull(activeScorer);
-        assertEquals(recoComponent, activeScorer.getRecommendationServiceComponent());
-        assertEquals(924, activeScorer.packageUid);
+        assertEquals(RECO_COMPONENT, activeScorer.getRecommendationServiceComponent());
+        assertEquals(PACKAGE_UID, activeScorer.packageUid);
         assertEquals(MOCK_SERVICE_LABEL, activeScorer.getRecommendationServiceLabel());
     }
 
     @Test
     public void testGetActiveScorer_providerAvailable_serviceLabelOverride() throws Exception {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
-        setNetworkRecoPackageSetting(recoComponent.getPackageName());
-        mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */,
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */,
                 null /* enableUseOpenWifiPackageActivityPackage*/, true /* serviceLabelOverride */);
 
         final NetworkScorerAppData activeScorer = mNetworkScorerAppManager.getActiveScorer();
         assertNotNull(activeScorer);
-        assertEquals(recoComponent, activeScorer.getRecommendationServiceComponent());
-        assertEquals(924, activeScorer.packageUid);
+        assertEquals(RECO_COMPONENT, activeScorer.getRecommendationServiceComponent());
+        assertEquals(PACKAGE_UID, activeScorer.packageUid);
         assertEquals(MOCK_OVERRIDEN_SERVICE_LABEL, activeScorer.getRecommendationServiceLabel());
     }
 
     @Test
-    public void testGetActiveScorer_permissionMissing() throws Exception {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
-        setNetworkRecoPackageSetting(recoComponent.getPackageName());
-        mockScoreNetworksDenied(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */);
+    public void testGetActiveScorer_scoreNetworksPermissionMissing() throws Exception {
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksDenied(RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */);
+
+        final NetworkScorerAppData activeScorer = mNetworkScorerAppManager.getActiveScorer();
+        assertNull(activeScorer);
+    }
+
+    @Test
+    public void testGetActiveScorer_locationPermissionMissing() throws Exception {
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockLocationPermissionDenied(PACKAGE_UID, RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */);
+
+        final NetworkScorerAppData activeScorer = mNetworkScorerAppManager.getActiveScorer();
+        assertNull(activeScorer);
+    }
+
+    @Test
+    public void testGetActiveScorer_locationModeOff() throws Exception {
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockLocationPermissionGranted(PACKAGE_UID, RECO_COMPONENT.getPackageName());
+        mockLocationModeOff();
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */);
 
         final NetworkScorerAppData activeScorer = mNetworkScorerAppManager.getActiveScorer();
         assertNull(activeScorer);
@@ -133,67 +156,63 @@ public class NetworkScorerAppManagerTest {
     @Test
     public void testGetActiveScorer_providerAvailable_enableUseOpenWifiActivityNotSet()
             throws Exception {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
-        setNetworkRecoPackageSetting(recoComponent.getPackageName());
-        mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */,
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */,
                 null /* enableUseOpenWifiPackageActivityPackage*/);
 
         final NetworkScorerAppData activeScorer = mNetworkScorerAppManager.getActiveScorer();
         assertNotNull(activeScorer);
-        assertEquals(recoComponent, activeScorer.getRecommendationServiceComponent());
-        assertEquals(924, activeScorer.packageUid);
+        assertEquals(RECO_COMPONENT, activeScorer.getRecommendationServiceComponent());
+        assertEquals(PACKAGE_UID, activeScorer.packageUid);
         assertNull(activeScorer.getEnableUseOpenWifiActivity());
     }
 
     @Test
     public void testGetActiveScorer_providerAvailable_enableUseOpenWifiActivityNotResolved()
             throws Exception {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
-        setNetworkRecoPackageSetting(recoComponent.getPackageName());
-        mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */,
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */,
                 "package2" /* enableUseOpenWifiPackageActivityPackage*/);
 
         final NetworkScorerAppData activeScorer = mNetworkScorerAppManager.getActiveScorer();
         assertNotNull(activeScorer);
-        assertEquals(recoComponent, activeScorer.getRecommendationServiceComponent());
-        assertEquals(924, activeScorer.packageUid);
+        assertEquals(RECO_COMPONENT, activeScorer.getRecommendationServiceComponent());
+        assertEquals(PACKAGE_UID, activeScorer.packageUid);
         assertNull(activeScorer.getEnableUseOpenWifiActivity());
     }
 
     @Test
     public void testGetActiveScorer_providerAvailable_enableUseOpenWifiActivityResolved()
             throws Exception {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
         final ComponentName enableUseOpenWifiComponent = new ComponentName("package2", "class2");
-        setNetworkRecoPackageSetting(recoComponent.getPackageName());
-        mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */,
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */,
                 enableUseOpenWifiComponent.getPackageName());
         mockEnableUseOpenWifiActivity(enableUseOpenWifiComponent);
 
         final NetworkScorerAppData activeScorer = mNetworkScorerAppManager.getActiveScorer();
         assertNotNull(activeScorer);
-        assertEquals(recoComponent, activeScorer.getRecommendationServiceComponent());
-        assertEquals(924, activeScorer.packageUid);
+        assertEquals(RECO_COMPONENT, activeScorer.getRecommendationServiceComponent());
+        assertEquals(PACKAGE_UID, activeScorer.packageUid);
         assertEquals(enableUseOpenWifiComponent, activeScorer.getEnableUseOpenWifiActivity());
         assertNull(activeScorer.getNetworkAvailableNotificationChannelId());
     }
 
     @Test
     public void testGetActiveScorer_providerAvailable_networkAvailableNotificationChannelIdSet() {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
-        setNetworkRecoPackageSetting(recoComponent.getPackageName());
-        mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */,
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */,
                 null /* enableUseOpenWifiActivityPackage */, false /* serviceLabelOverride */,
                 true /* setNotificationChannelId */);
 
         final NetworkScorerAppData activeScorer = mNetworkScorerAppManager.getActiveScorer();
         assertNotNull(activeScorer);
-        assertEquals(recoComponent, activeScorer.getRecommendationServiceComponent());
-        assertEquals(924, activeScorer.packageUid);
+        assertEquals(RECO_COMPONENT, activeScorer.getRecommendationServiceComponent());
+        assertEquals(PACKAGE_UID, activeScorer.packageUid);
         assertEquals(MOCK_NETWORK_AVAILABLE_NOTIFICATION_CHANNEL_ID,
                 activeScorer.getNetworkAvailableNotificationChannelId());
     }
@@ -209,9 +228,8 @@ public class NetworkScorerAppManagerTest {
 
     @Test
     public void testGetActiveScorer_packageSettingIsInvalid() throws Exception {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
-        setDefaultNetworkRecommendationPackage(recoComponent.getPackageName());
-        mockScoreNetworksGranted(recoComponent.getPackageName());
+        setDefaultNetworkRecommendationPackage(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
         // NETWORK_RECOMMENDATIONS_PACKAGE is set to a package that isn't a recommender.
 
         final NetworkScorerAppData activeScorer = mNetworkScorerAppManager.getActiveScorer();
@@ -249,12 +267,12 @@ public class NetworkScorerAppManagerTest {
 
     @Test
     public void testSetActiveScorer_validPackage() throws Exception {
-        String packageName = "package";
         String newPackage = "newPackage";
-        setNetworkRecoPackageSetting(packageName);
+        int newAppUid = 621;
         final ComponentName recoComponent = new ComponentName(newPackage, "class1");
         mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */, null);
+        mockRecommendationServiceAvailable(recoComponent, newAppUid, null);
+        mockLocationPermissionGranted(newAppUid, recoComponent.getPackageName());
 
         assertTrue(mNetworkScorerAppManager.setActiveScorer(newPackage));
         verify(mSettingsFacade).putString(mMockContext,
@@ -289,11 +307,9 @@ public class NetworkScorerAppManagerTest {
 
     @Test
     public void testUpdateState_currentPackageValid() throws Exception {
-        String packageName = "package";
-        setNetworkRecoPackageSetting(packageName);
-        final ComponentName recoComponent = new ComponentName(packageName, "class1");
-        mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */, null);
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID , null);
 
         mNetworkScorerAppManager.updateState();
 
@@ -306,11 +322,13 @@ public class NetworkScorerAppManagerTest {
 
     @Test
     public void testUpdateState_currentPackageNotValid_validDefault() throws Exception {
-        String defaultPackage = "defaultPackage";
-        setDefaultNetworkRecommendationPackage(defaultPackage);
+        final String defaultPackage = "defaultPackage";
+        final int defaultAppUid = 621;
         final ComponentName recoComponent = new ComponentName(defaultPackage, "class1");
+        setDefaultNetworkRecommendationPackage(defaultPackage);
         mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */, null);
+        mockRecommendationServiceAvailable(recoComponent, defaultAppUid, null);
+        mockLocationPermissionGranted(defaultAppUid, defaultPackage);
 
         mNetworkScorerAppManager.updateState();
 
@@ -329,8 +347,6 @@ public class NetworkScorerAppManagerTest {
 
         mNetworkScorerAppManager.updateState();
 
-        verify(mSettingsFacade).putString(mMockContext,
-                Settings.Global.NETWORK_RECOMMENDATIONS_PACKAGE, defaultPackage);
         verify(mSettingsFacade).putInt(mMockContext,
                 Settings.Global.NETWORK_RECOMMENDATIONS_ENABLED,
                 NetworkScoreManager.RECOMMENDATIONS_ENABLED_OFF);
@@ -345,8 +361,9 @@ public class NetworkScorerAppManagerTest {
 
         verify(mSettingsFacade, never()).putString(any(),
                 eq(Settings.Global.NETWORK_RECOMMENDATIONS_PACKAGE), anyString());
-        verify(mSettingsFacade, never()).putInt(any(),
-                eq(Settings.Global.NETWORK_RECOMMENDATIONS_ENABLED), anyInt());
+        verify(mSettingsFacade).putInt(mMockContext,
+                Settings.Global.NETWORK_RECOMMENDATIONS_ENABLED,
+                NetworkScoreManager.RECOMMENDATIONS_ENABLED_OFF);
     }
 
     @Test
@@ -358,8 +375,9 @@ public class NetworkScorerAppManagerTest {
 
         verify(mSettingsFacade, never()).putString(any(),
                 eq(Settings.Global.NETWORK_RECOMMENDATIONS_PACKAGE), anyString());
-        verify(mSettingsFacade, never()).putInt(any(),
-                eq(Settings.Global.NETWORK_RECOMMENDATIONS_ENABLED), anyInt());
+        verify(mSettingsFacade).putInt(mMockContext,
+                Settings.Global.NETWORK_RECOMMENDATIONS_ENABLED,
+                NetworkScoreManager.RECOMMENDATIONS_ENABLED_OFF);
     }
 
     @Test
@@ -370,8 +388,9 @@ public class NetworkScorerAppManagerTest {
 
         mNetworkScorerAppManager.updateState();
 
-        verify(mSettingsFacade, never()).putString(any(),
-                eq(Settings.Global.NETWORK_RECOMMENDATIONS_PACKAGE), any());
+        verify(mSettingsFacade).putInt(mMockContext,
+                Settings.Global.NETWORK_RECOMMENDATIONS_ENABLED,
+                NetworkScoreManager.RECOMMENDATIONS_ENABLED_OFF);
     }
 
     @Test
@@ -415,11 +434,10 @@ public class NetworkScorerAppManagerTest {
     @Test
     public void testMigrateNetworkScorerAppSettingIfNeeded_useOpenWifiSettingIsNotEmpty()
             throws Exception {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
         final ComponentName enableUseOpenWifiComponent = new ComponentName("package2", "class2");
-        setNetworkRecoPackageSetting(recoComponent.getPackageName());
-        mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */,
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */,
                 enableUseOpenWifiComponent.getPackageName());
         mockEnableUseOpenWifiActivity(enableUseOpenWifiComponent);
         when(mSettingsFacade.getString(mMockContext,
@@ -441,13 +459,12 @@ public class NetworkScorerAppManagerTest {
     @Test
     public void testMigrateNetworkScorerAppSettingIfNeeded_useOpenWifiActivityNotAvail()
             throws Exception {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
         final ComponentName enableUseOpenWifiComponent = new ComponentName("package2", "class2");
-        setNetworkRecoPackageSetting(recoComponent.getPackageName());
-        mockScoreNetworksGranted(recoComponent.getPackageName());
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
         // The active component doesn't have an open wifi activity so the migration shouldn't
         // set USE_OPEN_WIFI_PACKAGE.
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */,
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */,
                 null /*useOpenWifiActivityPackage*/);
         when(mSettingsFacade.getString(mMockContext,
                 Settings.Global.NETWORK_SCORER_APP))
@@ -466,11 +483,10 @@ public class NetworkScorerAppManagerTest {
     @Test
     public void testMigrateNetworkScorerAppSettingIfNeeded_packageMismatch_activity()
             throws Exception {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
         final ComponentName enableUseOpenWifiComponent = new ComponentName("package2", "class2");
-        setNetworkRecoPackageSetting(recoComponent.getPackageName());
-        mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */,
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */,
                 enableUseOpenWifiComponent.getPackageName());
         mockEnableUseOpenWifiActivity(enableUseOpenWifiComponent);
         // The older network scorer app setting doesn't match the new use open wifi activity package
@@ -492,18 +508,17 @@ public class NetworkScorerAppManagerTest {
     @Test
     public void testMigrateNetworkScorerAppSettingIfNeeded_packageMismatch_service()
             throws Exception {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
         final ComponentName enableUseOpenWifiComponent = new ComponentName("package2", "class2");
-        setNetworkRecoPackageSetting(recoComponent.getPackageName());
-        mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */,
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */,
                 enableUseOpenWifiComponent.getPackageName());
         mockEnableUseOpenWifiActivity(enableUseOpenWifiComponent);
         // The older network scorer app setting doesn't match the active package so the migration
         // shouldn't set USE_OPEN_WIFI_PACKAGE.
         when(mSettingsFacade.getString(mMockContext,
                 Settings.Global.NETWORK_SCORER_APP))
-                .thenReturn(recoComponent.getPackageName() + ".diff");
+                .thenReturn(RECO_COMPONENT.getPackageName() + ".diff");
         when(mSettingsFacade.getString(mMockContext,
                 Settings.Global.USE_OPEN_WIFI_PACKAGE)).thenReturn(null);
 
@@ -518,11 +533,10 @@ public class NetworkScorerAppManagerTest {
     @Test
     public void testMigrateNetworkScorerAppSettingIfNeeded_packageMatch_activity()
             throws Exception {
-        final ComponentName recoComponent = new ComponentName("package1", "class1");
         final ComponentName enableUseOpenWifiComponent = new ComponentName("package2", "class2");
-        setNetworkRecoPackageSetting(recoComponent.getPackageName());
-        mockScoreNetworksGranted(recoComponent.getPackageName());
-        mockRecommendationServiceAvailable(recoComponent, 924 /* packageUid */,
+        setNetworkRecoPackageSetting(RECO_COMPONENT.getPackageName());
+        mockScoreNetworksGranted(RECO_COMPONENT.getPackageName());
+        mockRecommendationServiceAvailable(RECO_COMPONENT, PACKAGE_UID /* packageUid */,
                 enableUseOpenWifiComponent.getPackageName());
         mockEnableUseOpenWifiActivity(enableUseOpenWifiComponent);
         // Old setting matches the new activity package, migration should happen.
@@ -564,6 +578,33 @@ public class NetworkScorerAppManagerTest {
     private void mockScoreNetworksDenied(String packageName) {
         when(mMockPm.checkPermission(permission.SCORE_NETWORKS, packageName))
                 .thenReturn(PackageManager.PERMISSION_DENIED);
+    }
+
+    private void mockLocationModeOn() {
+        mockLocationModeValue(Settings.Secure.LOCATION_MODE_HIGH_ACCURACY);
+    }
+
+    private void mockLocationModeOff() {
+        mockLocationModeValue(Settings.Secure.LOCATION_MODE_OFF);
+    }
+
+    private void mockLocationModeValue(int returnVal) {
+        when(mSettingsFacade.getSecureInt(eq(mMockContext),
+                eq(Settings.Secure.LOCATION_MODE), anyInt())).thenReturn(returnVal);
+    }
+
+    private void mockLocationPermissionGranted(int uid, String packageName) {
+        when(mMockPm.checkPermission(permission.ACCESS_COARSE_LOCATION, packageName))
+                .thenReturn(PackageManager.PERMISSION_GRANTED);
+        when(mAppOpsManager.noteOp(AppOpsManager.OP_COARSE_LOCATION, uid, packageName))
+                .thenReturn(AppOpsManager.MODE_ALLOWED);
+    }
+
+    private void mockLocationPermissionDenied(int uid, String packageName) {
+        when(mMockPm.checkPermission(permission.ACCESS_COARSE_LOCATION, packageName))
+                .thenReturn(PackageManager.PERMISSION_DENIED);
+        when(mAppOpsManager.noteOp(AppOpsManager.OP_COARSE_LOCATION, uid, packageName))
+                .thenReturn(AppOpsManager.MODE_IGNORED);
     }
 
     private void mockRecommendationServiceAvailable(final ComponentName compName, int packageUid) {
@@ -618,15 +659,10 @@ public class NetworkScorerAppManagerTest {
 
         final int flags = PackageManager.GET_META_DATA;
         when(mMockPm.resolveService(
-                Mockito.argThat(new ArgumentMatcher<Intent>() {
-                    @Override
-                    public boolean matchesObject(Object object) {
-                        Intent intent = (Intent) object;
-                        return NetworkScoreManager.ACTION_RECOMMEND_NETWORKS
-                                .equals(intent.getAction())
-                                && compName.getPackageName().equals(intent.getPackage());
-                    }
-                }), Mockito.eq(flags))).thenReturn(serviceInfo);
+                Mockito.argThat(intent -> NetworkScoreManager.ACTION_RECOMMEND_NETWORKS
+                        .equals(intent.getAction())
+                        && compName.getPackageName().equals(intent.getPackage())),
+                Mockito.eq(flags))).thenReturn(serviceInfo);
 
         mAvailableServices.add(serviceInfo);
     }
@@ -639,13 +675,9 @@ public class NetworkScorerAppManagerTest {
 
         final int flags = 0;
         when(mMockPm.resolveActivity(
-                Mockito.argThat(new ArgumentMatcher<Intent>() {
-                    @Override
-                    public boolean matchesObject(Object object) {
-                        Intent intent = (Intent) object;
-                        return NetworkScoreManager.ACTION_CUSTOM_ENABLE.equals(intent.getAction())
-                                && useOpenWifiComp.getPackageName().equals(intent.getPackage());
-                    }
-                }), Mockito.eq(flags))).thenReturn(resolveActivityInfo);
+                Mockito.argThat(intent ->
+                        NetworkScoreManager.ACTION_CUSTOM_ENABLE.equals(intent.getAction())
+                                && useOpenWifiComp.getPackageName().equals(intent.getPackage())),
+                Mockito.eq(flags))).thenReturn(resolveActivityInfo);
     }
 }

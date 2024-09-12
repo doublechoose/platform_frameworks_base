@@ -16,11 +16,23 @@
 
 package android.os;
 
+import android.annotation.FlaggedApi;
+import android.annotation.NonNull;
 import android.app.IAlarmManager;
+import android.app.time.UnixEpochTime;
+import android.app.timedetector.ITimeDetectorService;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
+import android.location.ILocationManager;
+import android.location.LocationTime;
+import android.text.format.DateUtils;
 import android.util.Slog;
 
 import dalvik.annotation.optimization.CriticalNative;
+
+import java.time.Clock;
+import java.time.DateTimeException;
+import java.time.ZoneOffset;
 
 /**
  * Core timekeeping facilities.
@@ -96,9 +108,17 @@ import dalvik.annotation.optimization.CriticalNative;
 public final class SystemClock {
     private static final String TAG = "SystemClock";
 
+    private static volatile IAlarmManager sIAlarmManager;
+
+    /**
+     * Since {@code nanoTime()} is arbitrary, anchor our Ravenwood clocks against it.
+     */
+    private static final long sAnchorNanoTime$ravenwood = System.nanoTime();
+
     /**
      * This class is uninstantiable.
      */
+    @UnsupportedAppUsage
     private SystemClock() {
         // This space intentionally left blank.
     }
@@ -112,6 +132,7 @@ public final class SystemClock {
      *
      * @param ms to sleep before returning, in milliseconds of uptime.
      */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static void sleep(long ms)
     {
         long start = uptimeMillis();
@@ -142,9 +163,9 @@ public final class SystemClock {
      * @return if the clock was successfully set to the specified time.
      */
     public static boolean setCurrentTimeMillis(long millis) {
-        IBinder b = ServiceManager.getService(Context.ALARM_SERVICE);
-        IAlarmManager mgr = IAlarmManager.Stub.asInterface(b);
+        final IAlarmManager mgr = getIAlarmManager();
         if (mgr == null) {
+            Slog.e(TAG, "Unable to set RTC: mgr == null");
             return false;
         }
 
@@ -159,13 +180,57 @@ public final class SystemClock {
         return false;
     }
 
+    private static IAlarmManager getIAlarmManager() {
+        if (sIAlarmManager == null) {
+            sIAlarmManager = IAlarmManager.Stub
+                    .asInterface(ServiceManager.getService(Context.ALARM_SERVICE));
+        }
+        return sIAlarmManager;
+    }
+
     /**
      * Returns milliseconds since boot, not counting time spent in deep sleep.
      *
      * @return milliseconds of non-sleep uptime since boot.
      */
     @CriticalNative
+    @android.ravenwood.annotation.RavenwoodReplace
     native public static long uptimeMillis();
+
+    /** @hide */
+    public static long uptimeMillis$ravenwood() {
+        return uptimeNanos() / 1_000_000;
+    }
+
+    /**
+     * Returns nanoseconds since boot, not counting time spent in deep sleep.
+     *
+     * @return nanoseconds of non-sleep uptime since boot.
+     */
+    @FlaggedApi(Flags.FLAG_ADPF_GPU_REPORT_ACTUAL_WORK_DURATION)
+    @CriticalNative
+    @android.ravenwood.annotation.RavenwoodReplace
+    public static native long uptimeNanos();
+
+    /** @hide */
+    public static long uptimeNanos$ravenwood() {
+        return System.nanoTime() - sAnchorNanoTime$ravenwood;
+    }
+
+    /**
+     * Return {@link Clock} that starts at system boot, not counting time spent
+     * in deep sleep.
+     *
+     * @removed
+     */
+    public static @NonNull Clock uptimeClock() {
+        return new SimpleClock(ZoneOffset.UTC) {
+            @Override
+            public long millis() {
+                return SystemClock.uptimeMillis();
+            }
+        };
+    }
 
     /**
      * Returns milliseconds since boot, including time spent in sleep.
@@ -173,7 +238,28 @@ public final class SystemClock {
      * @return elapsed milliseconds since boot.
      */
     @CriticalNative
+    @android.ravenwood.annotation.RavenwoodReplace
     native public static long elapsedRealtime();
+
+    /** @hide */
+    public static long elapsedRealtime$ravenwood() {
+        return elapsedRealtimeNanos() / 1_000_000;
+    }
+
+    /**
+     * Return {@link Clock} that starts at system boot, including time spent in
+     * sleep.
+     *
+     * @removed
+     */
+    public static @NonNull Clock elapsedRealtimeClock() {
+        return new SimpleClock(ZoneOffset.UTC) {
+            @Override
+            public long millis() {
+                return SystemClock.elapsedRealtime();
+            }
+        };
+    }
 
     /**
      * Returns nanoseconds since boot, including time spent in sleep.
@@ -181,7 +267,14 @@ public final class SystemClock {
      * @return elapsed nanoseconds since boot.
      */
     @CriticalNative
+    @android.ravenwood.annotation.RavenwoodReplace
     public static native long elapsedRealtimeNanos();
+
+    /** @hide */
+    public static long elapsedRealtimeNanos$ravenwood() {
+        // Elapsed realtime is uptime plus an hour that we've been "asleep"
+        return uptimeNanos() + (DateUtils.HOUR_IN_MILLIS * 1_000_000);
+    }
 
     /**
      * Returns milliseconds running in the current thread.
@@ -198,6 +291,7 @@ public final class SystemClock {
      *
      * @hide
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     @CriticalNative
     public static native long currentThreadTimeMicro();
 
@@ -208,6 +302,123 @@ public final class SystemClock {
      *
      * @hide
      */
+    @UnsupportedAppUsage
     @CriticalNative
+    @android.ravenwood.annotation.RavenwoodReplace
     public static native long currentTimeMicro();
+
+    /** @hide */
+    public static long currentTimeMicro$ravenwood() {
+        // Ravenwood booted in Jan 2023, and has been in deep sleep for one week
+        return System.nanoTime() / 1000L;
+    }
+
+    /**
+     * Returns milliseconds since January 1, 1970 00:00:00.0 UTC, synchronized
+     * using a remote network source outside the device.
+     * <p>
+     * While the time returned by {@link System#currentTimeMillis()} can be
+     * adjusted by the user, the time returned by this method cannot be adjusted
+     * by the user.
+     * <p>
+     * This performs no blocking network operations and returns values based on
+     * a recent successful synchronization event; it will either return a valid
+     * time or throw.
+     * <p>
+     * Note that synchronization may occur using an insecure network protocol,
+     * so the returned time should not be used for security purposes.
+     * The device may resynchronize with the same or different network source
+     * at any time. Due to network delays, variations between servers, or local
+     * (client side) clock drift, the accuracy of the returned times cannot be
+     * guaranteed. In extreme cases, consecutive calls to {@link
+     * #currentNetworkTimeMillis()} could return times that are out of order.
+     *
+     * @throws DateTimeException when no network time can be provided.
+     * @hide
+     */
+    public static long currentNetworkTimeMillis() {
+        ITimeDetectorService timeDetectorService = ITimeDetectorService.Stub
+                .asInterface(ServiceManager.getService(Context.TIME_DETECTOR_SERVICE));
+        if (timeDetectorService != null) {
+            UnixEpochTime time;
+            try {
+                time = timeDetectorService.latestNetworkTime();
+            } catch (ParcelableException e) {
+                e.maybeRethrow(DateTimeException.class);
+                throw new RuntimeException(e);
+            } catch (RemoteException e) {
+                throw e.rethrowFromSystemServer();
+            }
+
+            if (time == null) {
+                // This is not expected.
+                throw new DateTimeException("Network based time is not available.");
+            }
+            long currentMillis = elapsedRealtime();
+            long deltaMs = currentMillis - time.getElapsedRealtimeMillis();
+            return time.getUnixEpochTimeMillis() + deltaMs;
+        } else {
+            throw new RuntimeException(new DeadSystemException());
+        }
+    }
+
+   /**
+     * Returns a {@link Clock} that starts at January 1, 1970 00:00:00.0 UTC,
+     * synchronized using a remote network source outside the device.
+     * <p>
+     * While the time returned by {@link System#currentTimeMillis()} can be
+     * adjusted by the user, the time returned by this method cannot be adjusted
+     * by the user.
+     * <p>
+     * This performs no blocking network operations and returns values based on
+     * a recent successful synchronization event; it will either return a valid
+     * time or throw.
+     * <p>
+     * Note that synchronization may occur using an insecure network protocol,
+     * so the returned time should not be used for security purposes.
+     * The device may resynchronize with the same or different network source
+     * at any time. Due to network delays, variations between servers, or local
+     * (client side) clock drift, the accuracy of the returned times cannot be
+     * guaranteed. In extreme cases, consecutive calls to {@link
+     * Clock#millis()} on the returned {@link Clock}could return times that are
+     * out of order.
+     *
+     * @throws DateTimeException when no network time can be provided.
+     */
+    public static @NonNull Clock currentNetworkTimeClock() {
+        return new SimpleClock(ZoneOffset.UTC) {
+            @Override
+            public long millis() {
+                return SystemClock.currentNetworkTimeMillis();
+            }
+        };
+    }
+
+    /**
+     * Returns a {@link Clock} that starts at January 1, 1970 00:00:00.0 UTC,
+     * synchronized using the device's location provider.
+     *
+     * @throws DateTimeException when the location provider has not had a location fix since boot.
+     */
+    public static @NonNull Clock currentGnssTimeClock() {
+        return new SimpleClock(ZoneOffset.UTC) {
+            private final ILocationManager mMgr = ILocationManager.Stub
+                    .asInterface(ServiceManager.getService(Context.LOCATION_SERVICE));
+            @Override
+            public long millis() {
+                LocationTime time;
+                try {
+                    time = mMgr.getGnssTimeMillis();
+                } catch (RemoteException e) {
+                    throw e.rethrowFromSystemServer();
+                }
+                if (time == null) {
+                    throw new DateTimeException("Gnss based time is not available.");
+                }
+                long currentNanos = elapsedRealtimeNanos();
+                long deltaMs = (currentNanos - time.getElapsedRealtimeNanos()) / 1000000L;
+                return time.getUnixEpochTimeMillis() + deltaMs;
+            }
+        };
+    }
 }

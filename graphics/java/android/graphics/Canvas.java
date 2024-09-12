@@ -17,11 +17,21 @@
 package android.graphics;
 
 import android.annotation.ColorInt;
+import android.annotation.ColorLong;
+import android.annotation.FlaggedApi;
 import android.annotation.IntDef;
+import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.Size;
+import android.compat.annotation.UnsupportedAppUsage;
+import android.graphics.fonts.Font;
+import android.graphics.text.MeasuredText;
+import android.graphics.text.TextRunShaper;
 import android.os.Build;
+import android.text.TextShaper;
+
+import com.android.graphics.hwui.flags.Flags;
 
 import dalvik.annotation.optimization.CriticalNative;
 import dalvik.annotation.optimization.FastNative;
@@ -30,8 +40,6 @@ import libcore.util.NativeAllocationRegistry;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
-
-import javax.microedition.khronos.opengles.GL;
 
 /**
  * The Canvas class holds the "draw" calls. To draw something, you need
@@ -47,20 +55,18 @@ import javax.microedition.khronos.opengles.GL;
  * Canvas and Drawables</a> developer guide.</p></div>
  */
 public class Canvas extends BaseCanvas {
-    /** @hide */
-    public static boolean sCompatibilityRestore = false;
-    /** @hide */
-    public static boolean sCompatibilitySetBitmap = false;
+    private static int sCompatibilityVersion = 0;
+    private static boolean sCompatibilityRestore = false;
+    private static boolean sCompatibilitySetBitmap = false;
 
     /** @hide */
+    @UnsupportedAppUsage
     public long getNativeCanvasWrapper() {
         return mNativeCanvasWrapper;
     }
 
-    /** @hide */
-    public boolean isRecordingFor(Object o) { return false; }
-
     // may be null
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 117521088)
     private Bitmap mBitmap;
 
     // optional field set by the caller
@@ -68,16 +74,13 @@ public class Canvas extends BaseCanvas {
 
     // Maximum bitmap size as defined in Skia's native code
     // (see SkCanvas.cpp, SkDraw.cpp)
-    private static final int MAXMIMUM_BITMAP_SIZE = 32766;
-
-    // The approximate size of the native allocation associated with
-    // a Canvas object.
-    private static final long NATIVE_ALLOCATION_SIZE = 525;
+    private static final int MAXIMUM_BITMAP_SIZE = 32766;
 
     // Use a Holder to allow static initialization of Canvas in the boot image.
     private static class NoImagePreloadHolder {
-        public static final NativeAllocationRegistry sRegistry = new NativeAllocationRegistry(
-                Canvas.class.getClassLoader(), nGetNativeFinalizer(), NATIVE_ALLOCATION_SIZE);
+        public static final NativeAllocationRegistry sRegistry =
+                NativeAllocationRegistry.createMalloced(
+                Canvas.class.getClassLoader(), nGetNativeFinalizer());
     }
 
     // This field is used to finalize the native Canvas properly
@@ -92,7 +95,7 @@ public class Canvas extends BaseCanvas {
     public Canvas() {
         if (!isHardwareAccelerated()) {
             // 0 means no native bitmap
-            mNativeCanvasWrapper = nInitRaster(null);
+            mNativeCanvasWrapper = nInitRaster(0);
             mFinalizer = NoImagePreloadHolder.sRegistry.registerNativeAllocation(
                     this, mNativeCanvasWrapper);
         } else {
@@ -114,14 +117,18 @@ public class Canvas extends BaseCanvas {
             throw new IllegalStateException("Immutable bitmap passed to Canvas constructor");
         }
         throwIfCannotDraw(bitmap);
-        mNativeCanvasWrapper = nInitRaster(bitmap);
+        bitmap.setGainmap(null);
+        mNativeCanvasWrapper = nInitRaster(bitmap.getNativeInstance());
         mFinalizer = NoImagePreloadHolder.sRegistry.registerNativeAllocation(
                 this, mNativeCanvasWrapper);
         mBitmap = bitmap;
         mDensity = bitmap.mDensity;
     }
 
-    /** @hide */
+    /**
+     *  @hide Needed by android.graphics.pdf.PdfDocument, but should not be called from
+     *  outside the UI rendering module.
+     */
     public Canvas(long nativeCanvas) {
         if (nativeCanvas == 0) {
             throw new IllegalStateException();
@@ -130,18 +137,6 @@ public class Canvas extends BaseCanvas {
         mFinalizer = NoImagePreloadHolder.sRegistry.registerNativeAllocation(
                 this, mNativeCanvasWrapper);
         mDensity = Bitmap.getDefaultDensity();
-    }
-
-    /**
-     * Returns null.
-     *
-     * @deprecated This method is not supported and should not be invoked.
-     *
-     * @hide
-     */
-    @Deprecated
-    protected GL getGL() {
-        return null;
     }
 
     /**
@@ -155,6 +150,18 @@ public class Canvas extends BaseCanvas {
      */
     public boolean isHardwareAccelerated() {
         return false;
+    }
+
+    /**
+     * Indicates whether this Canvas is drawing high contrast text.
+     *
+     * @see android.view.accessibility.AccessibilityManager#isHighTextContrastEnabled()
+     * @return True if high contrast text is enabled, false otherwise.
+     *
+     * @hide
+     */
+    public boolean isHighContrastTextEnabled() {
+        return nIsHighContrastText(mNativeCanvasWrapper);
     }
 
     /**
@@ -180,15 +187,15 @@ public class Canvas extends BaseCanvas {
         }
 
         if (bitmap == null) {
-            nSetBitmap(mNativeCanvasWrapper, null);
+            nSetBitmap(mNativeCanvasWrapper, 0);
             mDensity = Bitmap.DENSITY_NONE;
         } else {
             if (!bitmap.isMutable()) {
                 throw new IllegalStateException();
             }
             throwIfCannotDraw(bitmap);
-
-            nSetBitmap(mNativeCanvasWrapper, bitmap);
+            bitmap.setGainmap(null);
+            nSetBitmap(mNativeCanvasWrapper, bitmap.getNativeInstance());
             mDensity = bitmap.mDensity;
         }
 
@@ -199,20 +206,58 @@ public class Canvas extends BaseCanvas {
         mBitmap = bitmap;
     }
 
-    /** @hide */
-    public void setHighContrastText(boolean highContrastText) {
-        nSetHighContrastText(mNativeCanvasWrapper, highContrastText);
+    /**
+     * <p>Enables Z support which defaults to disabled. This allows for RenderNodes drawn with
+     * {@link #drawRenderNode(RenderNode)} to be re-arranged based off of their
+     * {@link RenderNode#getElevation()} and {@link RenderNode#getTranslationZ()}
+     * values. It also enables rendering of shadows for RenderNodes with an elevation or
+     * translationZ.</p>
+     *
+     * <p>Any draw reordering will not be moved before this call. A typical usage of this might
+     * look something like:
+     *
+     * <pre class="prettyprint">
+     *     void draw(Canvas canvas) {
+     *         // Draw any background content
+     *         canvas.drawColor(backgroundColor);
+     *
+     *         // Begin drawing that may be reordered based off of Z
+     *         canvas.enableZ();
+     *         for (RenderNode child : children) {
+     *             canvas.drawRenderNode(child);
+     *         }
+     *         // End drawing that may be reordered based off of Z
+     *         canvas.disableZ();
+     *
+     *         // Draw any overlays
+     *         canvas.drawText("I'm on top of everything!", 0, 0, paint);
+     *     }
+     * </pre>
+     * </p>
+     *
+     * Note: This is not impacted by any {@link #save()} or {@link #restore()} calls as it is not
+     * considered to be part of the current matrix or clip.
+     *
+     * See {@link #disableZ()}
+     */
+    public void enableZ() {
     }
 
-    /** @hide */
-    public void insertReorderBarrier() {}
-
-    /** @hide */
-    public void insertInorderBarrier() {}
+    /**
+     * Disables Z support, preventing any RenderNodes drawn after this point from being
+     * visually reordered or having shadows rendered.
+     *
+     * Note: This is not impacted by any {@link #save()} or {@link #restore()} calls as it is not
+     * considered to be part of the current matrix or clip.
+     *
+     * See {@link #enableZ()}
+     */
+    public void disableZ() {
+    }
 
     /**
      * Return true if the device that the current layer draws into is opaque
-     * (i.e. does not support per-pixel alpha).
+     * (that is, it does not support per-pixel alpha).
      *
      * @return true if the device that the current layer draws into is opaque
      */
@@ -273,6 +318,7 @@ public class Canvas extends BaseCanvas {
     }
 
     /** @hide */
+    @UnsupportedAppUsage
     public void setScreenDensity(int density) {
         mScreenDensity = density;
     }
@@ -285,7 +331,7 @@ public class Canvas extends BaseCanvas {
      * @see #getMaximumBitmapHeight()
      */
     public int getMaximumBitmapWidth() {
-        return MAXMIMUM_BITMAP_SIZE;
+        return MAXIMUM_BITMAP_SIZE;
     }
 
     /**
@@ -296,7 +342,7 @@ public class Canvas extends BaseCanvas {
      * @see #getMaximumBitmapWidth()
      */
     public int getMaximumBitmapHeight() {
-        return MAXMIMUM_BITMAP_SIZE;
+        return MAXIMUM_BITMAP_SIZE;
     }
 
     // the SAVE_FLAG constants must match their native equivalents
@@ -311,7 +357,7 @@ public class Canvas extends BaseCanvas {
 
     /**
      * Restore the current matrix when restore() is called.
-     *
+     * @removed
      * @deprecated Use the flagless version of {@link #save()}, {@link #saveLayer(RectF, Paint)} or
      *             {@link #saveLayerAlpha(RectF, int)}. For saveLayer() calls the matrix
      *             was always restored for {@link #isHardwareAccelerated() Hardware accelerated}
@@ -323,6 +369,7 @@ public class Canvas extends BaseCanvas {
     /**
      * Restore the current clip when restore() is called.
      *
+     * @removed
      * @deprecated Use the flagless version of {@link #save()}, {@link #saveLayer(RectF, Paint)} or
      *             {@link #saveLayerAlpha(RectF, int)}. For saveLayer() calls the clip
      *             was always restored for {@link #isHardwareAccelerated() Hardware accelerated}
@@ -334,6 +381,7 @@ public class Canvas extends BaseCanvas {
     /**
      * The layer requires a per-pixel alpha channel.
      *
+     * @removed
      * @deprecated This flag is ignored. Use the flagless version of {@link #saveLayer(RectF, Paint)}
      *             {@link #saveLayerAlpha(RectF, int)}.
      */
@@ -342,6 +390,7 @@ public class Canvas extends BaseCanvas {
     /**
      * The layer requires full 8-bit precision for each color channel.
      *
+     * @removed
      * @deprecated This flag is ignored. Use the flagless version of {@link #saveLayer(RectF, Paint)}
      *             {@link #saveLayerAlpha(RectF, int)}.
      */
@@ -354,6 +403,7 @@ public class Canvas extends BaseCanvas {
      * <code>saveLayerAlpha()</code> variants. Not passing this flag generally
      * triggers extremely poor performance with hardware accelerated rendering.
      *
+     * @removed
      * @deprecated This flag results in poor performance and the same effect can be achieved with
      *             a single layer or multiple draw commands with different clips.
      *
@@ -371,6 +421,14 @@ public class Canvas extends BaseCanvas {
      * have flagless versions that are equivalent to passing this flag.
      */
     public static final int ALL_SAVE_FLAG = 0x1F;
+
+    private static void checkValidSaveFlags(int saveFlags) {
+        if (sCompatibilityVersion >= Build.VERSION_CODES.P
+                && saveFlags != ALL_SAVE_FLAG) {
+            throw new IllegalArgumentException(
+                    "Invalid Layer Save Flag - only ALL_SAVE_FLAGS is allowed");
+        }
+    }
 
     /**
      * Saves the current matrix and clip onto a private stack.
@@ -398,6 +456,7 @@ public class Canvas extends BaseCanvas {
      * restore() is made, those calls will be forgotten, and the settings that
      * existed before the save() will be reinstated.
      *
+     * @removed
      * @deprecated Use {@link #save()} instead.
      * @param saveFlags flag bits that specify which parts of the Canvas state
      *                  to save/restore
@@ -412,10 +471,8 @@ public class Canvas extends BaseCanvas {
      * redirects drawing to an offscreen bitmap.
      * <p class="note"><strong>Note:</strong> this method is very expensive,
      * incurring more than double rendering cost for contained content. Avoid
-     * using this method, especially if the bounds provided are large, or if
-     * the {@link #CLIP_TO_LAYER_SAVE_FLAG} is omitted from the
-     * {@code saveFlags} parameter. It is recommended to use a
-     * {@link android.view.View#LAYER_TYPE_HARDWARE hardware layer} on a View
+     * using this method, especially if the bounds provided are large. It is
+     * recommended to use a {@link android.view.View#LAYER_TYPE_HARDWARE hardware layer} on a View
      * to apply an xfermode, color filter, or alpha, as it will perform much
      * better than this method.
      * <p>
@@ -428,6 +485,9 @@ public class Canvas extends BaseCanvas {
      * {@link Paint#getXfermode() Xfermode}, and
      * {@link Paint#getColorFilter() ColorFilter} are applied when the
      * offscreen bitmap is drawn back when restore() is called.
+     *
+     * As of API Level API level {@value Build.VERSION_CODES#P} the only valid
+     * {@code saveFlags} is {@link #ALL_SAVE_FLAG}.  All other flags are ignored.
      *
      * @deprecated Use {@link #saveLayer(RectF, Paint)} instead.
      * @param bounds May be null. The maximum size the offscreen bitmap
@@ -442,7 +502,9 @@ public class Canvas extends BaseCanvas {
         if (bounds == null) {
             bounds = new RectF(getClipBounds());
         }
-        return saveLayer(bounds.left, bounds.top, bounds.right, bounds.bottom, paint, saveFlags);
+        checkValidSaveFlags(saveFlags);
+        return saveLayer(bounds.left, bounds.top, bounds.right, bounds.bottom, paint,
+                ALL_SAVE_FLAG);
     }
 
     /**
@@ -476,15 +538,35 @@ public class Canvas extends BaseCanvas {
     }
 
     /**
+     * @hide
+     */
+    public int saveUnclippedLayer(int left, int top, int right, int bottom) {
+        return nSaveUnclippedLayer(mNativeCanvasWrapper, left, top, right, bottom);
+    }
+
+    /**
+     * @hide
+     * @param saveCount The save level to restore to.
+     * @param paint     This is copied and is applied to the area within the unclipped layer's
+     *                  bounds (i.e. equivalent to a drawPaint()) before restore() is called.
+     */
+    public void restoreUnclippedLayer(int saveCount, Paint paint) {
+        nRestoreUnclippedLayer(mNativeCanvasWrapper, saveCount, paint.getNativeInstance());
+    }
+
+    /**
      * Helper version of saveLayer() that takes 4 values rather than a RectF.
+     *
+     * As of API Level API level {@value Build.VERSION_CODES#P} the only valid
+     * {@code saveFlags} is {@link #ALL_SAVE_FLAG}.  All other flags are ignored.
      *
      * @deprecated Use {@link #saveLayer(float, float, float, float, Paint)} instead.
      */
     public int saveLayer(float left, float top, float right, float bottom, @Nullable Paint paint,
             @Saveflags int saveFlags) {
+        checkValidSaveFlags(saveFlags);
         return nSaveLayer(mNativeCanvasWrapper, left, top, right, bottom,
-                paint != null ? paint.getNativeInstance() : 0,
-                saveFlags);
+                paint != null ? paint.getNativeInstance() : 0);
     }
 
     /**
@@ -500,10 +582,8 @@ public class Canvas extends BaseCanvas {
      * redirects drawing to an offscreen bitmap.
      * <p class="note"><strong>Note:</strong> this method is very expensive,
      * incurring more than double rendering cost for contained content. Avoid
-     * using this method, especially if the bounds provided are large, or if
-     * the {@link #CLIP_TO_LAYER_SAVE_FLAG} is omitted from the
-     * {@code saveFlags} parameter. It is recommended to use a
-     * {@link android.view.View#LAYER_TYPE_HARDWARE hardware layer} on a View
+     * using this method, especially if the bounds provided are large. It is
+     * recommended to use a {@link android.view.View#LAYER_TYPE_HARDWARE hardware layer} on a View
      * to apply an xfermode, color filter, or alpha, as it will perform much
      * better than this method.
      * <p>
@@ -514,6 +594,9 @@ public class Canvas extends BaseCanvas {
      * <p>
      * The {@code alpha} parameter is applied when the offscreen bitmap is
      * drawn back when restore() is called.
+     *
+     * As of API Level API level {@value Build.VERSION_CODES#P} the only valid
+     * {@code saveFlags} is {@link #ALL_SAVE_FLAG}.  All other flags are ignored.
      *
      * @deprecated Use {@link #saveLayerAlpha(RectF, int)} instead.
      * @param bounds    The maximum size the offscreen bitmap needs to be
@@ -528,7 +611,9 @@ public class Canvas extends BaseCanvas {
         if (bounds == null) {
             bounds = new RectF(getClipBounds());
         }
-        return saveLayerAlpha(bounds.left, bounds.top, bounds.right, bounds.bottom, alpha, saveFlags);
+        checkValidSaveFlags(saveFlags);
+        return saveLayerAlpha(bounds.left, bounds.top, bounds.right, bounds.bottom, alpha,
+                ALL_SAVE_FLAG);
     }
 
     /**
@@ -547,13 +632,16 @@ public class Canvas extends BaseCanvas {
     /**
      * Helper for saveLayerAlpha() that takes 4 values instead of a RectF.
      *
+     * As of API Level API level {@value Build.VERSION_CODES#P} the only valid
+     * {@code saveFlags} is {@link #ALL_SAVE_FLAG}.  All other flags are ignored.
+     *
      * @deprecated Use {@link #saveLayerAlpha(float, float, float, float, int)} instead.
      */
     public int saveLayerAlpha(float left, float top, float right, float bottom, int alpha,
             @Saveflags int saveFlags) {
+        checkValidSaveFlags(saveFlags);
         alpha = Math.min(255, Math.max(0, alpha));
-        return nSaveLayerAlpha(mNativeCanvasWrapper, left, top, right, bottom,
-                                     alpha, saveFlags);
+        return nSaveLayerAlpha(mNativeCanvasWrapper, left, top, right, bottom, alpha);
     }
 
     /**
@@ -689,7 +777,20 @@ public class Canvas extends BaseCanvas {
      * @param matrix The matrix to preconcatenate with the current matrix
      */
     public void concat(@Nullable Matrix matrix) {
-        if (matrix != null) nConcat(mNativeCanvasWrapper, matrix.native_instance);
+        if (matrix != null) nConcat(mNativeCanvasWrapper, matrix.ni());
+    }
+
+    /**
+     * Preconcat the current matrix with the specified matrix. If the specified
+     * matrix is null, this method does nothing. If the canvas's matrix is changed in the z-axis
+     * through this function, the deprecated {@link #getMatrix()} method will return a 3x3 with
+     * z-axis info stripped away.
+     *
+     * @param m The 4x4 matrix to preconcatenate with the current matrix
+     */
+    @FlaggedApi(Flags.FLAG_MATRIX_44)
+    public void concat(@Nullable Matrix44 m) {
+        if (m != null) nConcat(mNativeCanvasWrapper, m.mBackingArray);
     }
 
     /**
@@ -707,7 +808,7 @@ public class Canvas extends BaseCanvas {
      */
     public void setMatrix(@Nullable Matrix matrix) {
         nSetMatrix(mNativeCanvasWrapper,
-                         matrix == null ? 0 : matrix.native_instance);
+                         matrix == null ? 0 : matrix.ni());
     }
 
     /**
@@ -722,7 +823,7 @@ public class Canvas extends BaseCanvas {
      */
     @Deprecated
     public void getMatrix(@NonNull Matrix ctm) {
-        nGetMatrix(mNativeCanvasWrapper, ctm.native_instance);
+        nGetMatrix(mNativeCanvasWrapper, ctm.ni());
     }
 
     /**
@@ -743,6 +844,14 @@ public class Canvas extends BaseCanvas {
         return m;
     }
 
+    private static void checkValidClipOp(@NonNull Region.Op op) {
+        if (sCompatibilityVersion >= Build.VERSION_CODES.P
+                && op != Region.Op.INTERSECT && op != Region.Op.DIFFERENCE) {
+            throw new IllegalArgumentException(
+                    "Invalid Region.Op - only INTERSECT and DIFFERENCE are allowed");
+        }
+    }
+
     /**
      * Modify the current clip with the specified rectangle.
      *
@@ -755,9 +864,13 @@ public class Canvas extends BaseCanvas {
      * are intended to only expand the clip as a result of a restore operation. This enables a view
      * parent to clip a canvas to clearly define the maximal drawing area of its children. The
      * recommended alternative calls are {@link #clipRect(RectF)} and {@link #clipOutRect(RectF)};
+     *
+     * As of API Level API level {@value Build.VERSION_CODES#P} only {@link Region.Op#INTERSECT} and
+     * {@link Region.Op#DIFFERENCE} are valid Region.Op parameters.
      */
     @Deprecated
     public boolean clipRect(@NonNull RectF rect, @NonNull Region.Op op) {
+        checkValidClipOp(op);
         return nClipRect(mNativeCanvasWrapper, rect.left, rect.top, rect.right, rect.bottom,
                 op.nativeInt);
     }
@@ -775,11 +888,26 @@ public class Canvas extends BaseCanvas {
      * are intended to only expand the clip as a result of a restore operation. This enables a view
      * parent to clip a canvas to clearly define the maximal drawing area of its children. The
      * recommended alternative calls are {@link #clipRect(Rect)} and {@link #clipOutRect(Rect)};
+     *
+     * As of API Level API level {@value Build.VERSION_CODES#P} only {@link Region.Op#INTERSECT} and
+     * {@link Region.Op#DIFFERENCE} are valid Region.Op parameters.
      */
     @Deprecated
     public boolean clipRect(@NonNull Rect rect, @NonNull Region.Op op) {
+        checkValidClipOp(op);
         return nClipRect(mNativeCanvasWrapper, rect.left, rect.top, rect.right, rect.bottom,
                 op.nativeInt);
+    }
+
+    /**
+     * DON'T USE THIS METHOD.  It exists only to support a particular legacy behavior in
+     * the view system and will be removed as soon as that code is refactored to no longer
+     * depend on this behavior.
+     * @hide
+     */
+    public boolean clipRectUnion(@NonNull Rect rect) {
+        return nClipRect(mNativeCanvasWrapper, rect.left, rect.top, rect.right, rect.bottom,
+                Region.Op.UNION.nativeInt);
     }
 
     /**
@@ -851,10 +979,14 @@ public class Canvas extends BaseCanvas {
      * parent to clip a canvas to clearly define the maximal drawing area of its children. The
      * recommended alternative calls are {@link #clipRect(float,float,float,float)} and
      * {@link #clipOutRect(float,float,float,float)};
+     *
+     * As of API Level API level {@value Build.VERSION_CODES#P} only {@link Region.Op#INTERSECT} and
+     * {@link Region.Op#DIFFERENCE} are valid Region.Op parameters.
      */
     @Deprecated
     public boolean clipRect(float left, float top, float right, float bottom,
             @NonNull Region.Op op) {
+        checkValidClipOp(op);
         return nClipRect(mNativeCanvasWrapper, left, top, right, bottom, op.nativeInt);
     }
 
@@ -937,9 +1069,13 @@ public class Canvas extends BaseCanvas {
      * parent to clip a canvas to clearly define the maximal drawing area of its children. The
      * recommended alternative calls are {@link #clipPath(Path)} and
      * {@link #clipOutPath(Path)};
+     *
+     * As of API Level API level {@value Build.VERSION_CODES#P} only {@link Region.Op#INTERSECT} and
+     * {@link Region.Op#DIFFERENCE} are valid Region.Op parameters.
      */
     @Deprecated
     public boolean clipPath(@NonNull Path path, @NonNull Region.Op op) {
+        checkValidClipOp(op);
         return nClipPath(mNativeCanvasWrapper, path.readOnlyNI(), op.nativeInt);
     }
 
@@ -1002,6 +1138,30 @@ public class Canvas extends BaseCanvas {
         return false;
     }
 
+    /**
+     * Intersect the current clip with the specified shader.
+     * The shader will be treated as an alpha mask, taking the intersection of the two.
+     *
+     * @param shader The shader to intersect with the current clip
+     */
+    @FlaggedApi(Flags.FLAG_CLIP_SHADER)
+    public void clipShader(@NonNull Shader shader) {
+        nClipShader(mNativeCanvasWrapper, shader.getNativeInstance(),
+                Region.Op.INTERSECT.nativeInt);
+    }
+
+    /**
+     * Set the clip to the difference of the current clip and the shader.
+     * The shader will be treated as an alpha mask, taking the difference of the two.
+     *
+     * @param shader The shader to intersect with the current clip
+     */
+    @FlaggedApi(Flags.FLAG_CLIP_SHADER)
+    public void clipOutShader(@NonNull Shader shader) {
+        nClipShader(mNativeCanvasWrapper, shader.getNativeInstance(),
+                Region.Op.DIFFERENCE.nativeInt);
+    }
+
     public @Nullable DrawFilter getDrawFilter() {
         return mDrawFilter;
     }
@@ -1023,27 +1183,19 @@ public class Canvas extends BaseCanvas {
      * @see #quickReject(float, float, float, float, EdgeType)
      * @see #quickReject(Path, EdgeType)
      * @see #quickReject(RectF, EdgeType)
+     * @deprecated quickReject no longer uses this.
      */
     public enum EdgeType {
 
         /**
          * Black-and-White: Treat edges by just rounding to nearest pixel boundary
          */
-        BW(0),  //!< treat edges by just rounding to nearest pixel boundary
+        BW,
 
         /**
          * Antialiased: Treat edges by rounding-out, since they may be antialiased
          */
-        AA(1);
-
-        EdgeType(int nativeInt) {
-            this.nativeInt = nativeInt;
-        }
-
-        /**
-         * @hide
-         */
-        public final int nativeInt;
+        AA;
     }
 
     /**
@@ -1058,8 +1210,25 @@ public class Canvas extends BaseCanvas {
      *              non-antialiased ({@link Canvas.EdgeType#BW}).
      * @return      true if the rect (transformed by the canvas' matrix)
      *              does not intersect with the canvas' clip
+     * @deprecated The EdgeType is ignored. Use {@link #quickReject(RectF)} instead.
      */
+    @Deprecated
     public boolean quickReject(@NonNull RectF rect, @NonNull EdgeType type) {
+        return nQuickReject(mNativeCanvasWrapper,
+                rect.left, rect.top, rect.right, rect.bottom);
+    }
+
+    /**
+     * Return true if the specified rectangle, after being transformed by the
+     * current matrix, would lie completely outside of the current clip. Call
+     * this to check if an area you intend to draw into is clipped out (and
+     * therefore you can skip making the draw calls).
+     *
+     * @param rect  the rect to compare with the current clip
+     * @return      true if the rect (transformed by the canvas' matrix)
+     *              does not intersect with the canvas' clip
+     */
+    public boolean quickReject(@NonNull RectF rect) {
         return nQuickReject(mNativeCanvasWrapper,
                 rect.left, rect.top, rect.right, rect.bottom);
     }
@@ -1078,8 +1247,26 @@ public class Canvas extends BaseCanvas {
      *                    non-antialiased ({@link Canvas.EdgeType#BW}).
      * @return            true if the path (transformed by the canvas' matrix)
      *                    does not intersect with the canvas' clip
+     * @deprecated The EdgeType is ignored. Use {@link #quickReject(Path)} instead.
      */
+    @Deprecated
     public boolean quickReject(@NonNull Path path, @NonNull EdgeType type) {
+        return nQuickReject(mNativeCanvasWrapper, path.readOnlyNI());
+    }
+
+    /**
+     * Return true if the specified path, after being transformed by the
+     * current matrix, would lie completely outside of the current clip. Call
+     * this to check if an area you intend to draw into is clipped out (and
+     * therefore you can skip making the draw calls). Note: for speed it may
+     * return false even if the path itself might not intersect the clip
+     * (i.e. the bounds of the path intersects, but the path does not).
+     *
+     * @param path        The path to compare with the current clip
+     * @return            true if the path (transformed by the canvas' matrix)
+     *                    does not intersect with the canvas' clip
+     */
+    public boolean quickReject(@NonNull Path path) {
         return nQuickReject(mNativeCanvasWrapper, path.readOnlyNI());
     }
 
@@ -1102,9 +1289,33 @@ public class Canvas extends BaseCanvas {
      *                    non-antialiased ({@link Canvas.EdgeType#BW}).
      * @return            true if the rect (transformed by the canvas' matrix)
      *                    does not intersect with the canvas' clip
+     * @deprecated The EdgeType is ignored. Use {@link #quickReject(float, float, float, float)}
+     *             instead.
      */
+    @Deprecated
     public boolean quickReject(float left, float top, float right, float bottom,
             @NonNull EdgeType type) {
+        return nQuickReject(mNativeCanvasWrapper, left, top, right, bottom);
+    }
+
+    /**
+     * Return true if the specified rectangle, after being transformed by the
+     * current matrix, would lie completely outside of the current clip. Call
+     * this to check if an area you intend to draw into is clipped out (and
+     * therefore you can skip making the draw calls).
+     *
+     * @param left        The left side of the rectangle to compare with the
+     *                    current clip
+     * @param top         The top of the rectangle to compare with the current
+     *                    clip
+     * @param right       The right side of the rectangle to compare with the
+     *                    current clip
+     * @param bottom      The bottom of the rectangle to compare with the
+     *                    current clip
+     * @return            true if the rect (transformed by the canvas' matrix)
+     *                    does not intersect with the canvas' clip
+     */
+    public boolean quickReject(float left, float top, float right, float bottom) {
         return nQuickReject(mNativeCanvasWrapper, left, top, right, bottom);
     }
 
@@ -1114,11 +1325,10 @@ public class Canvas extends BaseCanvas {
      * in a way similar to quickReject, in that it tells you that drawing
      * outside of these bounds will be clipped out.
      *
-     * @param bounds Return the clip bounds here. If it is null, ignore it but
-     *               still return true if the current clip is non-empty.
+     * @param bounds Return the clip bounds here.
      * @return true if the current clip is non-empty.
      */
-    public boolean getClipBounds(@Nullable Rect bounds) {
+    public boolean getClipBounds(@NonNull Rect bounds) {
         return nGetClipBounds(mNativeCanvasWrapper, bounds);
     }
 
@@ -1187,10 +1397,7 @@ public class Canvas extends BaseCanvas {
             this.nativeInt = nativeInt;
         }
 
-        /**
-         * @hide
-         */
-        public final int nativeInt;
+        /*package*/ final int nativeInt;
     }
 
     /**
@@ -1198,6 +1405,7 @@ public class Canvas extends BaseCanvas {
      *
      * @hide
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void release() {
         mNativeCanvasWrapper = 0;
         if (mFinalizer != null) {
@@ -1211,6 +1419,7 @@ public class Canvas extends BaseCanvas {
      *
      * @hide
      */
+    @UnsupportedAppUsage
     public static void freeCaches() {
         nFreeCaches();
     }
@@ -1220,19 +1429,30 @@ public class Canvas extends BaseCanvas {
      *
      * @hide
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static void freeTextLayoutCaches() {
         nFreeTextLayoutCaches();
     }
 
+    /*package*/ static void setCompatibilityVersion(int apiLevel) {
+        sCompatibilityVersion = apiLevel;
+        sCompatibilityRestore = apiLevel < Build.VERSION_CODES.M;
+        sCompatibilitySetBitmap = apiLevel < Build.VERSION_CODES.O;
+        nSetCompatibilityVersion(apiLevel);
+    }
+
     private static native void nFreeCaches();
     private static native void nFreeTextLayoutCaches();
-    private static native long nInitRaster(Bitmap bitmap);
     private static native long nGetNativeFinalizer();
+    private static native void nSetCompatibilityVersion(int apiLevel);
 
     // ---------------- @FastNative -------------------
 
     @FastNative
-    private static native void nSetBitmap(long canvasHandle, Bitmap bitmap);
+    private static native long nInitRaster(long bitmapHandle);
+
+    @FastNative
+    private static native void nSetBitmap(long canvasHandle, long bitmapHandle);
 
     @FastNative
     private static native boolean nGetClipBounds(long nativeCanvas, Rect bounds);
@@ -1242,7 +1462,7 @@ public class Canvas extends BaseCanvas {
     @CriticalNative
     private static native boolean nIsOpaque(long canvasHandle);
     @CriticalNative
-    private static native void nSetHighContrastText(long renderer, boolean highContrastText);
+    private static native boolean nIsHighContrastText(long canvasHandle);
     @CriticalNative
     private static native int nGetWidth(long canvasHandle);
     @CriticalNative
@@ -1252,10 +1472,15 @@ public class Canvas extends BaseCanvas {
     private static native int nSave(long canvasHandle, int saveFlags);
     @CriticalNative
     private static native int nSaveLayer(long nativeCanvas, float l, float t, float r, float b,
-            long nativePaint, int layerFlags);
+            long nativePaint);
     @CriticalNative
     private static native int nSaveLayerAlpha(long nativeCanvas, float l, float t, float r, float b,
-            int alpha, int layerFlags);
+            int alpha);
+    @CriticalNative
+    private static native int nSaveUnclippedLayer(long nativeCanvas, int l, int t, int r, int b);
+    @CriticalNative
+    private static native void nRestoreUnclippedLayer(long nativeCanvas, int saveCount,
+            long nativePaint);
     @CriticalNative
     private static native boolean nRestore(long canvasHandle);
     @CriticalNative
@@ -1273,6 +1498,8 @@ public class Canvas extends BaseCanvas {
     private static native void nSkew(long canvasHandle, float sx, float sy);
     @CriticalNative
     private static native void nConcat(long nativeCanvas, long nativeMatrix);
+    @FastNative
+    private static native void nConcat(long nativeCanvas, float[] mat);
     @CriticalNative
     private static native void nSetMatrix(long nativeCanvas, long nativeMatrix);
     @CriticalNative
@@ -1280,6 +1507,8 @@ public class Canvas extends BaseCanvas {
             float left, float top, float right, float bottom, int regionOp);
     @CriticalNative
     private static native boolean nClipPath(long nativeCanvas, long nativePath, int regionOp);
+    @CriticalNative
+    private static native void nClipShader(long nativeCanvas, long nativeShader, int regionOp);
     @CriticalNative
     private static native void nSetDrawFilter(long nativeCanvas, long nativeFilter);
     @CriticalNative
@@ -1493,6 +1722,13 @@ public class Canvas extends BaseCanvas {
      * across the top of the bitmap from left to right. A more general version of this method is
      * drawVertices().
      *
+     * Prior to API level {@value Build.VERSION_CODES#P} vertOffset and colorOffset were ignored,
+     * effectively treating them as zeros. In API level {@value Build.VERSION_CODES#P} and above
+     * these parameters will be respected.
+     *
+     * <p>Note: antialiasing is not supported, therefore {@link Paint#ANTI_ALIAS_FLAG} is
+     * ignored.</p>
+     *
      * @param bitmap The bitmap to draw using the mesh
      * @param meshWidth The number of columns in the mesh. Nothing is drawn if this is 0
      * @param meshHeight The number of rows in the mesh. Nothing is drawn if this is 0
@@ -1504,7 +1740,7 @@ public class Canvas extends BaseCanvas {
      *            null, there must be at least (meshWidth+1) * (meshHeight+1) + colorOffset values
      *            in the array.
      * @param colorOffset Number of color elements to skip before drawing
-     * @param paint May be null. The paint used to draw the bitmap
+     * @param paint May be null. The paint used to draw the bitmap. Antialiasing is not supported.
      */
     public void drawBitmapMesh(@NonNull Bitmap bitmap, int meshWidth, int meshHeight,
             @NonNull float[] verts, int vertOffset, @Nullable int[] colors, int colorOffset,
@@ -1517,9 +1753,9 @@ public class Canvas extends BaseCanvas {
      * Draw the specified circle using the specified paint. If radius is <= 0, then nothing will be
      * drawn. The circle will be filled or framed based on the Style in the paint.
      *
-     * @param cx The x-coordinate of the center of the cirle to be drawn
-     * @param cy The y-coordinate of the center of the cirle to be drawn
-     * @param radius The radius of the cirle to be drawn
+     * @param cx The x-coordinate of the center of the circle to be drawn
+     * @param cy The y-coordinate of the center of the circle to be drawn
+     * @param radius The radius of the circle to be drawn
      * @param paint The paint used to draw the circle
      */
     public void drawCircle(float cx, float cy, float radius, @NonNull Paint paint) {
@@ -1537,13 +1773,51 @@ public class Canvas extends BaseCanvas {
     }
 
     /**
+     * Fill the entire canvas' bitmap (restricted to the current clip) with the specified color,
+     * using srcover porterduff mode.
+     *
+     * @param color the {@code ColorLong} to draw onto the canvas. See the {@link Color}
+     *              class for details about {@code ColorLong}s.
+     * @throws IllegalArgumentException if the color space encoded in the {@code ColorLong}
+     *                                  is invalid or unknown.
+     */
+    public void drawColor(@ColorLong long color) {
+        super.drawColor(color, BlendMode.SRC_OVER);
+    }
+
+    /**
      * Fill the entire canvas' bitmap (restricted to the current clip) with the specified color and
      * porter-duff xfermode.
      *
-     * @param color the color to draw with
+     * @param color the color to draw onto the canvas
      * @param mode the porter-duff mode to apply to the color
      */
     public void drawColor(@ColorInt int color, @NonNull PorterDuff.Mode mode) {
+        super.drawColor(color, mode);
+    }
+
+    /**
+     * Fill the entire canvas' bitmap (restricted to the current clip) with the specified color and
+     * blendmode.
+     *
+     * @param color the color to draw onto the canvas
+     * @param mode the blendmode to apply to the color
+     */
+    public void drawColor(@ColorInt int color, @NonNull BlendMode mode) {
+        super.drawColor(color, mode);
+    }
+
+    /**
+     * Fill the entire canvas' bitmap (restricted to the current clip) with the specified color and
+     * blendmode.
+     *
+     * @param color the {@code ColorLong} to draw onto the canvas. See the {@link Color}
+     *              class for details about {@code ColorLong}s.
+     * @param mode the blendmode to apply to the color
+     * @throws IllegalArgumentException if the color space encoded in the {@code ColorLong}
+     *                                  is invalid or unknown.
+     */
+    public void drawColor(@ColorLong long color, @NonNull BlendMode mode) {
         super.drawColor(color, mode);
     }
 
@@ -1618,24 +1892,28 @@ public class Canvas extends BaseCanvas {
     }
 
     /**
-     * Draws the specified bitmap as an N-patch (most often, a 9-patches.)
+     * Draws the specified bitmap as an N-patch (most often, a 9-patch.)
+     *
+     * <p>Note: antialiasing is not supported, therefore {@link Paint#ANTI_ALIAS_FLAG} is
+     * ignored.</p>
      *
      * @param patch The ninepatch object to render
      * @param dst The destination rectangle.
-     * @param paint The paint to draw the bitmap with. may be null
-     * @hide
+     * @param paint The paint to draw the bitmap with. May be null. Antialiasing is not supported.
      */
     public void drawPatch(@NonNull NinePatch patch, @NonNull Rect dst, @Nullable Paint paint) {
         super.drawPatch(patch, dst, paint);
     }
 
     /**
-     * Draws the specified bitmap as an N-patch (most often, a 9-patches.)
+     * Draws the specified bitmap as an N-patch (most often, a 9-patch.)
+     *
+     * <p>Note: antialiasing is not supported, therefore {@link Paint#ANTI_ALIAS_FLAG} is
+     * ignored.</p>
      *
      * @param patch The ninepatch object to render
      * @param dst The destination rectangle.
-     * @param paint The paint to draw the bitmap with. may be null
-     * @hide
+     * @param paint The paint to draw the bitmap with. May be null. Antialiasing is not supported.
      */
     public void drawPatch(@NonNull NinePatch patch, @NonNull RectF dst, @Nullable Paint paint) {
         super.drawPatch(patch, dst, paint);
@@ -1650,6 +1928,17 @@ public class Canvas extends BaseCanvas {
      */
     public void drawPath(@NonNull Path path, @NonNull Paint paint) {
         super.drawPath(path, paint);
+    }
+
+    /**
+     * Draws the given region using the given paint.
+     *
+     * @param region The region to be drawn
+     * @param paint The paint used to draw the region
+     */
+    @FlaggedApi(Flags.FLAG_DRAW_REGION)
+    public void drawRegion(@NonNull Region region, @NonNull Paint paint) {
+        super.drawRegion(region, paint);
     }
 
     /**
@@ -1794,6 +2083,88 @@ public class Canvas extends BaseCanvas {
     }
 
     /**
+     * Draws a double rounded rectangle using the specified paint. The resultant round rect
+     * will be filled in the area defined between the outer and inner rectangular bounds if
+     * the {@link Paint} configured with {@link Paint.Style#FILL}.
+     * Otherwise if {@link Paint.Style#STROKE} is used, then 2 rounded rect strokes will
+     * be drawn at the outer and inner rounded rectangles
+     *
+     * @param outer The outer rectangular bounds of the roundRect to be drawn
+     * @param outerRx The x-radius of the oval used to round the corners on the outer rectangle
+     * @param outerRy The y-radius of the oval used to round the corners on the outer rectangle
+     * @param inner The inner rectangular bounds of the roundRect to be drawn
+     * @param innerRx The x-radius of the oval used to round the corners on the inner rectangle
+     * @param innerRy The y-radius of the oval used to round the corners on the outer rectangle
+     * @param paint The paint used to draw the double roundRect
+     */
+    @Override
+    public void drawDoubleRoundRect(@NonNull RectF outer, float outerRx, float outerRy,
+            @NonNull RectF inner, float innerRx, float innerRy, @NonNull Paint paint) {
+        super.drawDoubleRoundRect(outer, outerRx, outerRy, inner, innerRx, innerRy, paint);
+    }
+
+    /**
+     * Draws a double rounded rectangle using the specified paint. The resultant round rect
+     * will be filled in the area defined between the outer and inner rectangular bounds if
+     * the {@link Paint} configured with {@link Paint.Style#FILL}.
+     * Otherwise if {@link Paint.Style#STROKE} is used, then 2 rounded rect strokes will
+     * be drawn at the outer and inner rounded rectangles
+     *
+     * @param outer The outer rectangular bounds of the roundRect to be drawn
+     * @param outerRadii Array of 8 float representing the x, y corner radii for top left,
+     *                   top right, bottom right, bottom left corners respectively on the outer
+     *                   rounded rectangle
+     *
+     * @param inner The inner rectangular bounds of the roundRect to be drawn
+     * @param innerRadii Array of 8 float representing the x, y corner radii for top left,
+     *                   top right, bottom right, bottom left corners respectively on the
+     *                   outer rounded rectangle
+     * @param paint The paint used to draw the double roundRect
+     */
+    @Override
+    public void drawDoubleRoundRect(@NonNull RectF outer, @NonNull float[] outerRadii,
+            @NonNull RectF inner, @NonNull float[] innerRadii, @NonNull Paint paint) {
+        super.drawDoubleRoundRect(outer, outerRadii, inner, innerRadii, paint);
+    }
+
+    /**
+     * Draw array of glyphs with specified font.
+     *
+     * @param glyphIds Array of glyph IDs. The length of array must be greater than or equal to
+     *                 {@code glyphIdOffset + glyphCount}.
+     * @param glyphIdOffset Number of elements to skip before drawing in <code>glyphIds</code>
+     *                     array.
+     * @param positions A flattened X and Y position array. The first glyph X position must be
+     *                  stored at {@code positionOffset}. The first glyph Y position must be stored
+     *                  at {@code positionOffset + 1}, then the second glyph X position must be
+     *                  stored at {@code positionOffset + 2}.
+     *                 The length of array must be greater than or equal to
+     *                 {@code positionOffset + glyphCount * 2}.
+     * @param positionOffset Number of elements to skip before drawing in {@code positions}.
+     *                       The first glyph X position must be stored at {@code positionOffset}.
+     *                       The first glyph Y position must be stored at
+     *                       {@code positionOffset + 1}, then the second glyph X position must be
+     *                       stored at {@code positionOffset + 2}.
+     * @param glyphCount Number of glyphs to be drawn.
+     * @param font Font used for drawing.
+     * @param paint Paint used for drawing. The typeface set to this paint is ignored.
+     *
+     * @see TextRunShaper
+     * @see TextShaper
+     */
+    public void drawGlyphs(
+            @NonNull int[] glyphIds,
+            @IntRange(from = 0) int glyphIdOffset,
+            @NonNull float[] positions,
+            @IntRange(from = 0) int positionOffset,
+            @IntRange(from = 0) int glyphCount,
+            @NonNull Font font,
+            @NonNull Paint paint) {
+        super.drawGlyphs(glyphIds, glyphIdOffset, positions, positionOffset, glyphCount, font,
+                paint);
+    }
+
+    /**
      * Draw the text, with origin at (x,y), using the specified paint. The origin is interpreted
      * based on the Align setting in the paint.
      *
@@ -1854,9 +2225,11 @@ public class Canvas extends BaseCanvas {
 
     /**
      * Draw the text, with origin at (x,y), using the specified paint, along the specified path. The
-     * paint's Align setting determins where along the path to start the text.
+     * paint's Align setting determines where along the path to start the text.
      *
      * @param text The text to be drawn
+     * @param index The starting index within the text to be drawn
+     * @param count Starting from index, the number of characters to draw
      * @param path The path the text should follow for its baseline
      * @param hOffset The distance along the path to add to the text's starting position
      * @param vOffset The distance above(-) or below(+) the path to position the text
@@ -1869,7 +2242,7 @@ public class Canvas extends BaseCanvas {
 
     /**
      * Draw the text, with origin at (x,y), using the specified paint, along the specified path. The
-     * paint's Align setting determins where along the path to start the text.
+     * paint's Align setting determines where along the path to start the text.
      *
      * @param text The text to be drawn
      * @param path The path the text should follow for its baseline
@@ -1919,7 +2292,8 @@ public class Canvas extends BaseCanvas {
      * the text next to it.
      * <p>
      * All text outside the range {@code contextStart..contextEnd} is ignored. The text between
-     * {@code start} and {@code end} will be laid out and drawn.
+     * {@code start} and {@code end} will be laid out and drawn. The context range is useful for
+     * contextual shaping, e.g. Kerning, Arabic contextural form.
      * <p>
      * The direction of the run is explicitly specified by {@code isRtl}. Thus, this method is
      * suitable only for runs of a single direction. Alignment of the text is as determined by the
@@ -1948,6 +2322,31 @@ public class Canvas extends BaseCanvas {
     }
 
     /**
+     * Draw a run of text, all in a single direction, with optional context for complex text
+     * shaping.
+     * <p>
+     * See {@link #drawTextRun(CharSequence, int, int, int, int, float, float, boolean, Paint)} for
+     * more details. This method uses a {@link MeasuredText} rather than CharSequence to represent
+     * the string.
+     *
+     * @param text the text to render
+     * @param start the start of the text to render. Data before this position can be used for
+     *            shaping context.
+     * @param end the end of the text to render. Data at or after this position can be used for
+     *            shaping context.
+     * @param contextStart the index of the start of the shaping context
+     * @param contextEnd the index of the end of the shaping context
+     * @param x the x position at which to draw the text
+     * @param y the y position at which to draw the text
+     * @param isRtl whether the run is in RTL direction
+     * @param paint the paint
+     */
+    public void drawTextRun(@NonNull MeasuredText text, int start, int end, int contextStart,
+            int contextEnd, float x, float y, boolean isRtl, @NonNull Paint paint) {
+        super.drawTextRun(text, start, end, contextStart, contextEnd, x, y, isRtl, paint);
+    }
+
+    /**
      * Draw the array of vertices, interpreted as triangles (based on mode). The verts array is
      * required, and specifies the x,y pairs for each vertex. If texs is non-null, then it is used
      * to specify the coordinate in shader coordinates to use at each vertex (the paint must have a
@@ -1957,6 +2356,9 @@ public class Canvas extends BaseCanvas {
      * result of multiplying the colors from the shader and the color-gradient together. The indices
      * array is optional, but if it is present, then it is used to specify the index of each
      * triangle, rather than just walking through the arrays in order.
+     *
+     * <p>Note: antialiasing is not supported, therefore {@link Paint#ANTI_ALIAS_FLAG} is
+     * ignored.</p>
      *
      * @param mode How to interpret the array of vertices
      * @param vertexCount The number of values in the vertices array (and corresponding texs and
@@ -1972,8 +2374,9 @@ public class Canvas extends BaseCanvas {
      * @param colorOffset Number of values in colors to skip before drawing.
      * @param indices If not null, array of indices to reference into the vertex (texs, colors)
      *            array.
-     * @param indexCount number of entries in the indices array (if not null).
-     * @param paint Specifies the shader to use if the texs array is non-null.
+     * @param indexCount Number of entries in the indices array (if not null).
+     * @param paint Specifies the shader to use if the texs array is non-null. Antialiasing is not
+     *            supported.
      */
     public void drawVertices(@NonNull VertexMode mode, int vertexCount, @NonNull float[] verts,
             int vertOffset, @Nullable float[] texs, int texOffset, @Nullable int[] colors,
@@ -1981,5 +2384,18 @@ public class Canvas extends BaseCanvas {
             @NonNull Paint paint) {
         super.drawVertices(mode, vertexCount, verts, vertOffset, texs, texOffset,
                 colors, colorOffset, indices, indexOffset, indexCount, paint);
+    }
+
+    /**
+     * Draws the given RenderNode. This is only supported in hardware rendering, which can be
+     * verified by asserting that {@link #isHardwareAccelerated()} is true. If
+     * {@link #isHardwareAccelerated()} is false then this throws an exception.
+     *
+     * See {@link RenderNode} for more information on what a RenderNode is and how to use it.
+     *
+     * @param renderNode The RenderNode to draw, must be non-null.
+     */
+    public void drawRenderNode(@NonNull RenderNode renderNode) {
+        throw new IllegalArgumentException("Software rendering doesn't support drawRenderNode");
     }
 }

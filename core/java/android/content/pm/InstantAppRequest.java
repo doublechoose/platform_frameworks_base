@@ -16,6 +16,9 @@
 
 package android.content.pm;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.annotation.UserIdInt;
 import android.content.Intent;
 import android.os.Bundle;
 
@@ -24,6 +27,7 @@ import android.os.Bundle;
  * @hide
  */
 public final class InstantAppRequest {
+
     /** Response from the first phase of instant application resolution */
     public final AuxiliaryResolveInfo responseObj;
     /** The original intent that triggered instant application resolution */
@@ -32,20 +36,44 @@ public final class InstantAppRequest {
     public final String resolvedType;
     /** The name of the package requesting the instant application */
     public final String callingPackage;
+    /** The feature in the package requesting the instant application */
+    public final String callingFeatureId;
+    /** Whether or not the requesting package was an instant app */
+    public final boolean isRequesterInstantApp;
     /** ID of the user requesting the instant application */
-    public final int userId;
+    public final @UserIdInt int userId;
     /**
      * Optional extra bundle provided by the source application to the installer for additional
-     * verification. */
+     * verification.
+     */
     public final Bundle verificationBundle;
+    /** Whether resolution occurs because an application is starting */
+    public final boolean resolveForStart;
+    /**
+     * The hash prefix of an instant app's domain or null if no host is defined.
+     * Secure version that should be carried through for external use.
+     */
+    @Nullable
+    public final int[] hostDigestPrefixSecure;
+    /** A unique identifier */
+    @NonNull
+    public final String token;
 
     public InstantAppRequest(AuxiliaryResolveInfo responseObj, Intent origIntent,
-            String resolvedType, String callingPackage, int userId, Bundle verificationBundle) {
+            String resolvedType, String callingPackage, @Nullable String callingFeatureId,
+            boolean isRequesterInstantApp, @UserIdInt int userId, Bundle verificationBundle,
+            boolean resolveForStart, @Nullable int[] hostDigestPrefixSecure,
+            @NonNull String token) {
         this.responseObj = responseObj;
         this.origIntent = origIntent;
         this.resolvedType = resolvedType;
         this.callingPackage = callingPackage;
+        this.callingFeatureId = callingFeatureId;
+        this.isRequesterInstantApp = isRequesterInstantApp;
         this.userId = userId;
         this.verificationBundle = verificationBundle;
+        this.resolveForStart = resolveForStart;
+        this.hostDigestPrefixSecure = hostDigestPrefixSecure;
+        this.token = token;
     }
 }

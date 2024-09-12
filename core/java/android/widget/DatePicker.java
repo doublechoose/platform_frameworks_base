@@ -20,6 +20,7 @@ import android.annotation.IntDef;
 import android.annotation.Nullable;
 import android.annotation.TestApi;
 import android.annotation.Widget;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.content.res.TypedArray;
@@ -36,6 +37,7 @@ import android.view.ViewStructure;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.autofill.AutofillManager;
 import android.view.autofill.AutofillValue;
+import android.view.inspector.InspectableProperty;
 
 import com.android.internal.R;
 
@@ -107,10 +109,14 @@ public class DatePicker extends FrameLayout {
     public static final int MODE_CALENDAR = 2;
 
     /** @hide */
-    @IntDef({MODE_SPINNER, MODE_CALENDAR})
+    @IntDef(prefix = { "MODE_" }, value = {
+            MODE_SPINNER,
+            MODE_CALENDAR
+    })
     @Retention(RetentionPolicy.SOURCE)
     public @interface DatePickerMode {}
 
+    @UnsupportedAppUsage
     private final DatePickerDelegate mDelegate;
 
     @DatePickerMode
@@ -155,6 +161,8 @@ public class DatePicker extends FrameLayout {
 
         final TypedArray a = context.obtainStyledAttributes(attrs, R.styleable.DatePicker,
                 defStyleAttr, defStyleRes);
+        saveAttributeDataForStyleable(context, R.styleable.DatePicker,
+                attrs, a, defStyleAttr, defStyleRes);
         final boolean isDialogMode = a.getBoolean(R.styleable.DatePicker_dialogMode, false);
         final int requestedMode = a.getInt(R.styleable.DatePicker_datePickerMode, MODE_SPINNER);
         final int firstDayOfWeek = a.getInt(R.styleable.DatePicker_firstDayOfWeek, 0);
@@ -207,6 +215,10 @@ public class DatePicker extends FrameLayout {
      * @attr ref android.R.styleable#DatePicker_datePickerMode
      * @hide Visible for testing only.
      */
+    @InspectableProperty(name = "datePickerMode", enumMapping = {
+            @InspectableProperty.EnumEntry(value = MODE_SPINNER, name = "spinner"),
+            @InspectableProperty.EnumEntry(value = MODE_CALENDAR, name = "calendar")
+    })
     @DatePickerMode
     @TestApi
     public int getMode() {
@@ -252,6 +264,7 @@ public class DatePicker extends FrameLayout {
     /**
      * @return The selected year.
      */
+    @InspectableProperty(hasAttributeId = false)
     public int getYear() {
         return mDelegate.getYear();
     }
@@ -259,6 +272,7 @@ public class DatePicker extends FrameLayout {
     /**
      * @return The selected month.
      */
+    @InspectableProperty(hasAttributeId = false)
     public int getMonth() {
         return mDelegate.getMonth();
     }
@@ -266,6 +280,7 @@ public class DatePicker extends FrameLayout {
     /**
      * @return The selected day of month.
      */
+    @InspectableProperty(hasAttributeId = false)
     public int getDayOfMonth() {
         return mDelegate.getDayOfMonth();
     }
@@ -280,6 +295,7 @@ public class DatePicker extends FrameLayout {
      *
      * @return The minimal supported date.
      */
+    @InspectableProperty
     public long getMinDate() {
         return mDelegate.getMinDate().getTimeInMillis();
     }
@@ -305,6 +321,7 @@ public class DatePicker extends FrameLayout {
      *
      * @return The maximal supported date.
      */
+    @InspectableProperty
     public long getMaxDate() {
         return mDelegate.getMaxDate().getTimeInMillis();
     }
@@ -326,6 +343,7 @@ public class DatePicker extends FrameLayout {
      * @param callback the callback, may be null
      * @hide
      */
+    @UnsupportedAppUsage
     public void setValidationCallback(@Nullable ValidationCallback callback) {
         mDelegate.setValidationCallback(callback);
     }
@@ -405,6 +423,7 @@ public class DatePicker extends FrameLayout {
      *
      * @attr ref android.R.styleable#DatePicker_firstDayOfWeek
      */
+    @InspectableProperty
     public int getFirstDayOfWeek() {
         return mDelegate.getFirstDayOfWeek();
     }
@@ -420,6 +439,7 @@ public class DatePicker extends FrameLayout {
      * @see #getCalendarView()
      * @deprecated Not supported by Material-style {@code calendar} mode
      */
+    @InspectableProperty
     @Deprecated
     public boolean getCalendarViewShown() {
         return mDelegate.getCalendarViewShown();
@@ -463,13 +483,14 @@ public class DatePicker extends FrameLayout {
     /**
      * Returns whether the spinners are shown.
      * <p>
-     * <strong>Note:</strong> his method returns {@code false} when the
+     * <strong>Note:</strong> this method returns {@code false} when the
      * {@link android.R.styleable#DatePicker_datePickerMode} attribute is set
      * to {@code calendar}.
      *
      * @return {@code true} if the spinners are shown
      * @deprecated Not supported by Material-style {@code calendar} mode
      */
+    @InspectableProperty
     @Deprecated
     public boolean getSpinnersShown() {
         return mDelegate.getSpinnersShown();
@@ -524,12 +545,13 @@ public class DatePicker extends FrameLayout {
         void setAutoFillChangeListener(OnDateChangedListener onDateChangedListener);
 
         void updateDate(int year, int month, int dayOfMonth);
-        void updateDate(long date);
 
         int getYear();
         int getMonth();
         int getDayOfMonth();
-        long getDate();
+
+        void autofill(AutofillValue value);
+        AutofillValue getAutofillValue();
 
         void setFirstDayOfWeek(int firstDayOfWeek);
         int getFirstDayOfWeek();
@@ -572,6 +594,7 @@ public class DatePicker extends FrameLayout {
         // The context
         protected Context mContext;
 
+        // NOTE: when subclasses change this variable, they must call resetAutofilledValue().
         protected Calendar mCurrentDate;
 
         // The current locale
@@ -581,6 +604,11 @@ public class DatePicker extends FrameLayout {
         protected OnDateChangedListener mOnDateChangedListener;
         protected OnDateChangedListener mAutoFillChangeListener;
         protected ValidationCallback mValidationCallback;
+
+        // The value that was passed to autofill() - it must be stored because it getAutofillValue()
+        // must return the exact same value that was autofilled, otherwise the widget will not be
+        // properly highlighted after autofill().
+        private long mAutofilledValue;
 
         public AbstractDatePickerDelegate(DatePicker delegator, Context context) {
             mDelegator = delegator;
@@ -612,16 +640,38 @@ public class DatePicker extends FrameLayout {
         }
 
         @Override
-        public void updateDate(long date) {
-            Calendar cal = Calendar.getInstance(mCurrentLocale);
-            cal.setTimeInMillis(date);
+        public final void autofill(AutofillValue value) {
+            if (value == null || !value.isDate()) {
+                Log.w(LOG_TAG, value + " could not be autofilled into " + this);
+                return;
+            }
+
+            final long time = value.getDateValue();
+
+            final Calendar cal = Calendar.getInstance(mCurrentLocale);
+            cal.setTimeInMillis(time);
             updateDate(cal.get(Calendar.YEAR), cal.get(Calendar.MONTH),
                     cal.get(Calendar.DAY_OF_MONTH));
+
+            // Must set mAutofilledValue *after* calling subclass method to make sure the value
+            // returned by getAutofillValue() matches it.
+            mAutofilledValue = time;
         }
 
         @Override
-        public long getDate() {
-            return mCurrentDate.getTimeInMillis();
+        public final AutofillValue getAutofillValue() {
+            final long time = mAutofilledValue != 0
+                    ? mAutofilledValue
+                    : mCurrentDate.getTimeInMillis();
+            return AutofillValue.forDate(time);
+        }
+
+        /**
+         * This method must be called every time the value of the year, month, and/or day is
+         * changed by a subclass method.
+         */
+        protected void resetAutofilledValue() {
+            mAutofilledValue = 0;
         }
 
         protected void onValidationChanged(boolean valid) {
@@ -741,7 +791,7 @@ public class DatePicker extends FrameLayout {
 
             @SuppressWarnings("all")
             // suppress unused and hiding
-            public static final Parcelable.Creator<SavedState> CREATOR = new Creator<SavedState>() {
+            public static final @android.annotation.NonNull Parcelable.Creator<SavedState> CREATOR = new Creator<SavedState>() {
 
                 public SavedState createFromParcel(Parcel in) {
                     return new SavedState(in);
@@ -777,12 +827,7 @@ public class DatePicker extends FrameLayout {
     public void autofill(AutofillValue value) {
         if (!isEnabled()) return;
 
-        if (!value.isDate()) {
-            Log.w(LOG_TAG, value + " could not be autofilled into " + this);
-            return;
-        }
-
-        mDelegate.updateDate(value.getDateValue());
+        mDelegate.autofill(value);
     }
 
     @Override
@@ -792,6 +837,6 @@ public class DatePicker extends FrameLayout {
 
     @Override
     public AutofillValue getAutofillValue() {
-        return isEnabled() ? AutofillValue.forDate(mDelegate.getDate()) : null;
+        return isEnabled() ? mDelegate.getAutofillValue() : null;
     }
 }

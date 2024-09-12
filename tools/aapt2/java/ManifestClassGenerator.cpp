@@ -18,61 +18,52 @@
 
 #include <algorithm>
 
-#include "Source.h"
-#include "java/AnnotationProcessor.h"
+#include "androidfw/Source.h"
 #include "java/ClassDefinition.h"
-#include "util/Maybe.h"
+#include "java/JavaClassGenerator.h"
+#include "text/Unicode.h"
 #include "xml/XmlDom.h"
 
-using android::StringPiece;
+using ::aapt::text::IsJavaIdentifier;
 
 namespace aapt {
 
-static Maybe<StringPiece> ExtractJavaIdentifier(IDiagnostics* diag,
-                                                const Source& source,
-                                                const StringPiece& value) {
-  const StringPiece sep = ".";
-  auto iter = std::find_end(value.begin(), value.end(), sep.begin(), sep.end());
+static std::optional<std::string> ExtractJavaIdentifier(android::IDiagnostics* diag,
+                                                        const android::Source& source,
+                                                        const std::string& value) {
+  std::string result = value;
+  size_t pos = value.rfind('.');
+  if (pos != std::string::npos) {
+    result = result.substr(pos + 1);
+  }
 
-  StringPiece result;
-  if (iter != value.end()) {
-    result.assign(iter + sep.size(), value.end() - (iter + sep.size()));
-  } else {
-    result = value;
+  // Normalize only the java identifier, leave the original value unchanged.
+  if (result.find('-') != std::string::npos) {
+    result = JavaClassGenerator::TransformToFieldName(result);
   }
 
   if (result.empty()) {
-    diag->Error(DiagMessage(source) << "empty symbol");
+    diag->Error(android::DiagMessage(source) << "empty symbol");
     return {};
   }
 
-  iter = util::FindNonAlphaNumericAndNotInSet(result, "_");
-  if (iter != result.end()) {
-    diag->Error(DiagMessage(source) << "invalid character '"
-                                    << StringPiece(iter, 1) << "' in '"
-                                    << result << "'");
+  if (!IsJavaIdentifier(result)) {
+    diag->Error(android::DiagMessage(source) << "invalid Java identifier '" << result << "'");
     return {};
   }
-
-  if (*result.begin() >= '0' && *result.begin() <= '9') {
-    diag->Error(DiagMessage(source) << "symbol can not start with a digit");
-    return {};
-  }
-
   return result;
 }
 
-static bool WriteSymbol(const Source& source, IDiagnostics* diag,
+static bool WriteSymbol(const android::Source& source, android::IDiagnostics* diag,
                         xml::Element* el, ClassDefinition* class_def) {
   xml::Attribute* attr = el->FindAttribute(xml::kSchemaAndroid, "name");
   if (!attr) {
-    diag->Error(DiagMessage(source) << "<" << el->name
-                                    << "> must define 'android:name'");
+    diag->Error(android::DiagMessage(source) << "<" << el->name << "> must define 'android:name'");
     return false;
   }
 
-  Maybe<StringPiece> result = ExtractJavaIdentifier(
-      diag, source.WithLine(el->line_number), attr->value);
+  std::optional<std::string> result =
+      ExtractJavaIdentifier(diag, source.WithLine(el->line_number), attr->value);
   if (!result) {
     return false;
   }
@@ -81,21 +72,23 @@ static bool WriteSymbol(const Source& source, IDiagnostics* diag,
       util::make_unique<StringMember>(result.value(), attr->value);
   string_member->GetCommentBuilder()->AppendComment(el->comment);
 
-  class_def->AddMember(std::move(string_member));
+  if (class_def->AddMember(std::move(string_member)) == ClassDefinition::Result::kOverridden) {
+    diag->Warn(android::DiagMessage(source.WithLine(el->line_number))
+               << "duplicate definitions of '" << result.value() << "', overriding previous");
+  }
   return true;
 }
 
-std::unique_ptr<ClassDefinition> GenerateManifestClass(IDiagnostics* diag,
+std::unique_ptr<ClassDefinition> GenerateManifestClass(android::IDiagnostics* diag,
                                                        xml::XmlResource* res) {
   xml::Element* el = xml::FindRootElement(res->root.get());
   if (!el) {
-    diag->Error(DiagMessage(res->file.source) << "no root tag defined");
+    diag->Error(android::DiagMessage(res->file.source) << "no root tag defined");
     return {};
   }
 
   if (el->name != "manifest" && !el->namespace_uri.empty()) {
-    diag->Error(DiagMessage(res->file.source)
-                << "no <manifest> root tag defined");
+    diag->Error(android::DiagMessage(res->file.source) << "no <manifest> root tag defined");
     return {};
   }
 
@@ -109,11 +102,9 @@ std::unique_ptr<ClassDefinition> GenerateManifestClass(IDiagnostics* diag,
   for (xml::Element* child_el : children) {
     if (child_el->namespace_uri.empty()) {
       if (child_el->name == "permission") {
-        error |= !WriteSymbol(res->file.source, diag, child_el,
-                              permission_class.get());
+        error |= !WriteSymbol(res->file.source, diag, child_el, permission_class.get());
       } else if (child_el->name == "permission-group") {
-        error |= !WriteSymbol(res->file.source, diag, child_el,
-                              permission_group_class.get());
+        error |= !WriteSymbol(res->file.source, diag, child_el, permission_group_class.get());
       }
     }
   }

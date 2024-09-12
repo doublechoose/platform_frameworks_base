@@ -213,13 +213,13 @@ public class TaskStackBuilder {
      * Start the task stack constructed by this builder.
      * @hide
      */
-    public void startActivities(Bundle options, UserHandle userHandle) {
+    public int startActivities(Bundle options, UserHandle userHandle) {
         if (mIntents.isEmpty()) {
             throw new IllegalStateException(
                     "No intents added to TaskStackBuilder; cannot startActivities");
         }
 
-        mSourceContext.startActivitiesAsUser(getIntents(), options, userHandle);
+        return mSourceContext.startActivitiesAsUser(getIntents(), options, userHandle);
     }
 
     /**
@@ -230,7 +230,7 @@ public class TaskStackBuilder {
      * Context.startActivity(Intent, Bundle)} for more details.
      */
     public void startActivities(Bundle options) {
-        startActivities(options, new UserHandle(UserHandle.myUserId()));
+        startActivities(options, mSourceContext.getUser());
     }
 
     /**
@@ -264,6 +264,7 @@ public class TaskStackBuilder {
      *
      * @return The obtained PendingIntent
      */
+    @SuppressWarnings("AndroidFrameworkPendingIntentMutability")
     public PendingIntent getPendingIntent(int requestCode, @PendingIntent.Flags int flags,
             Bundle options) {
         if (mIntents.isEmpty()) {
@@ -278,6 +279,7 @@ public class TaskStackBuilder {
     /**
      * @hide
      */
+    @SuppressWarnings("AndroidFrameworkPendingIntentMutability")
     public PendingIntent getPendingIntent(int requestCode, int flags, Bundle options,
             UserHandle user) {
         if (mIntents.isEmpty()) {

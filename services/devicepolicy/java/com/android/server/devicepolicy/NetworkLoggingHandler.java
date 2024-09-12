@@ -16,6 +16,8 @@
 
 package com.android.server.devicepolicy;
 
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
+
 import android.app.AlarmManager;
 import android.app.AlarmManager.OnAlarmListener;
 import android.app.admin.DeviceAdminReceiver;
@@ -25,10 +27,11 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.SystemClock;
-import android.util.Log;
 import android.util.LongSparseArray;
+import android.util.Slog;
 
 import com.android.internal.annotations.GuardedBy;
+import com.android.internal.annotations.VisibleForTesting;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -47,7 +50,7 @@ final class NetworkLoggingHandler extends Handler {
     private static final int MAX_EVENTS_PER_BATCH = 1200;
 
     /**
-     * Maximum number of batches to store in memory. If more batches are generated and the DO
+     * Maximum number of batches to store in memory. If more batches are generated and the admin
      * doesn't fetch them, we will discard the oldest one.
      */
     private static final int MAX_BATCHES = 5;
@@ -60,20 +63,35 @@ final class NetworkLoggingHandler extends Handler {
     /** Delay after which older batches get discarded after a retrieval. */
     private static final long RETRIEVED_BATCH_DISCARD_DELAY_MS = 5 * 60 * 1000; // 5m
 
+    /** Throttle batch finalization to 10 seconds.*/
+    private static final long FORCE_FETCH_THROTTLE_NS = TimeUnit.SECONDS.toNanos(10);
+    /** Timestamp of the last call to finalise a batch. Used for throttling forced finalization.*/
+    @GuardedBy("this")
+    private long mLastFinalizationNanos = -1;
+
+    /** Do not call into mDpm with locks held */
     private final DevicePolicyManagerService mDpm;
     private final AlarmManager mAlarmManager;
+
+    private long mId;
+    private int mTargetUserId;
 
     private final OnAlarmListener mBatchTimeoutAlarmListener = new OnAlarmListener() {
         @Override
         public void onAlarm() {
-            Log.d(TAG, "Received a batch finalization timeout alarm, finalizing "
+            Slog.d(TAG, "Received a batch finalization timeout alarm, finalizing "
                     + mNetworkEvents.size() + " pending events.");
+            Bundle notificationExtras = null;
             synchronized (NetworkLoggingHandler.this) {
-                finalizeBatchAndNotifyDeviceOwnerLocked();
+                notificationExtras = finalizeBatchAndBuildAdminMessageLocked();
+            }
+            if (notificationExtras != null) {
+                notifyDeviceOwnerOrProfileOwner(notificationExtras);
             }
         }
     };
 
+    @VisibleForTesting
     static final int LOG_NETWORK_EVENT_MSG = 1;
 
     /** Network events accumulated so far to be finalized into a batch at some point. */
@@ -81,8 +99,8 @@ final class NetworkLoggingHandler extends Handler {
     private ArrayList<NetworkEvent> mNetworkEvents = new ArrayList<>();
 
     /**
-     * Up to {@code MAX_BATCHES} finalized batches of logs ready to be retrieved by the DO. Already
-     * retrieved batches are discarded after {@code RETRIEVED_BATCH_DISCARD_DELAY_MS}.
+     * Up to {@code MAX_BATCHES} finalized batches of logs ready to be retrieved by the admin.
+     * Already retrieved batches are discarded after {@code RETRIEVED_BATCH_DISCARD_DELAY_MS}.
      */
     @GuardedBy("this")
     private final LongSparseArray<ArrayList<NetworkEvent>> mBatches =
@@ -98,29 +116,41 @@ final class NetworkLoggingHandler extends Handler {
     @GuardedBy("this")
     private long mLastRetrievedBatchToken;
 
-    NetworkLoggingHandler(Looper looper, DevicePolicyManagerService dpm) {
+    NetworkLoggingHandler(Looper looper, DevicePolicyManagerService dpm, int targetUserId) {
+        this(looper, dpm, 0 /* event id */, targetUserId);
+    }
+
+    @VisibleForTesting
+    NetworkLoggingHandler(Looper looper, DevicePolicyManagerService dpm, long id,
+            int targetUserId) {
         super(looper);
-        mDpm = dpm;
-        mAlarmManager = mDpm.mInjector.getAlarmManager();
+        this.mDpm = dpm;
+        this.mAlarmManager = mDpm.mInjector.getAlarmManager();
+        this.mId = id;
+        this.mTargetUserId = targetUserId;
     }
 
     @Override
     public void handleMessage(Message msg) {
         switch (msg.what) {
             case LOG_NETWORK_EVENT_MSG: {
-                final NetworkEvent networkEvent = msg.getData().getParcelable(NETWORK_EVENT_KEY);
+                final NetworkEvent networkEvent = msg.getData().getParcelable(NETWORK_EVENT_KEY, android.app.admin.NetworkEvent.class);
                 if (networkEvent != null) {
+                    Bundle notificationExtras = null;
                     synchronized (NetworkLoggingHandler.this) {
                         mNetworkEvents.add(networkEvent);
                         if (mNetworkEvents.size() >= MAX_EVENTS_PER_BATCH) {
-                            finalizeBatchAndNotifyDeviceOwnerLocked();
+                            notificationExtras = finalizeBatchAndBuildAdminMessageLocked();
                         }
+                    }
+                    if (notificationExtras != null) {
+                        notifyDeviceOwnerOrProfileOwner(notificationExtras);
                     }
                 }
                 break;
             }
             default: {
-                Log.d(TAG, "NetworkLoggingHandler received an unknown of message.");
+                Slog.d(TAG, "NetworkLoggingHandler received an unknown of message.");
                 break;
             }
         }
@@ -133,41 +163,81 @@ final class NetworkLoggingHandler extends Handler {
         mAlarmManager.setWindow(AlarmManager.ELAPSED_REALTIME_WAKEUP, when,
                 BATCH_FINALIZATION_TIMEOUT_ALARM_INTERVAL_MS, NETWORK_LOGGING_TIMEOUT_ALARM_TAG,
                 mBatchTimeoutAlarmListener, this);
-        Log.d(TAG, "Scheduled a new batch finalization alarm " + BATCH_FINALIZATION_TIMEOUT_MS
+        Slog.d(TAG, "Scheduled a new batch finalization alarm " + BATCH_FINALIZATION_TIMEOUT_MS
                 + "ms from now.");
     }
 
+    /**
+     * Forces batch finalisation. Throttled to 10 seconds per batch finalisation.
+     * @return the number of milliseconds to wait until batch finalisation can be forced.
+     */
+    long forceBatchFinalization() {
+        Bundle notificationExtras;
+        synchronized (this) {
+            final long toWaitNanos =
+                mLastFinalizationNanos + FORCE_FETCH_THROTTLE_NS - System.nanoTime();
+            if (toWaitNanos > 0) {
+                return NANOSECONDS.toMillis(toWaitNanos) + 1; // Round up.
+            }
+            notificationExtras = finalizeBatchAndBuildAdminMessageLocked();
+        }
+        if (notificationExtras != null) {
+            notifyDeviceOwnerOrProfileOwner(notificationExtras);
+        }
+        return 0;
+    }
+
     synchronized void pause() {
-        Log.d(TAG, "Paused network logging");
+        Slog.d(TAG, "Paused network logging");
         mPaused = true;
     }
 
-    synchronized void resume() {
-        if (!mPaused) {
-            Log.d(TAG, "Attempted to resume network logging, but logging is not paused.");
-            return;
+    void resume() {
+        Bundle notificationExtras = null;
+        synchronized (this) {
+            if (!mPaused) {
+                Slog.d(TAG, "Attempted to resume network logging, but logging is not paused.");
+                return;
+            }
+
+            Slog.d(TAG, "Resumed network logging. Current batch=" + mCurrentBatchToken
+                    + ", LastRetrievedBatch=" + mLastRetrievedBatchToken);
+            mPaused = false;
+
+            // If there is a batch ready that the device owner or profile owner hasn't been
+            // notified about, do it now.
+            if (mBatches.size() > 0 && mLastRetrievedBatchToken != mCurrentBatchToken) {
+                scheduleBatchFinalization();
+                notificationExtras = buildAdminMessageLocked();
+            }
         }
-
-        Log.d(TAG, "Resumed network logging. Current batch=" + mCurrentBatchToken
-                + ", LastRetrievedBatch=" + mLastRetrievedBatchToken);
-        mPaused = false;
-
-        // If there is a batch ready that the device owner hasn't been notified about, do it now.
-        if (mBatches.size() > 0 && mLastRetrievedBatchToken != mCurrentBatchToken) {
-            scheduleBatchFinalization();
-            notifyDeviceOwnerLocked();
+        if (notificationExtras != null) {
+            notifyDeviceOwnerOrProfileOwner(notificationExtras);
         }
     }
 
     synchronized void discardLogs() {
         mBatches.clear();
         mNetworkEvents = new ArrayList<>();
-        Log.d(TAG, "Discarded all network logs");
+        Slog.d(TAG, "Discarded all network logs");
     }
 
     @GuardedBy("this")
-    private void finalizeBatchAndNotifyDeviceOwnerLocked() {
+    /** @return extras if a message should be sent to the device owner or profile owner */
+    private Bundle finalizeBatchAndBuildAdminMessageLocked() {
+        mLastFinalizationNanos = System.nanoTime();
+        Bundle notificationExtras = null;
         if (mNetworkEvents.size() > 0) {
+            // Assign ids to the events.
+            for (NetworkEvent event : mNetworkEvents) {
+                event.setId(mId);
+                if (mId == Long.MAX_VALUE) {
+                    Slog.i(TAG, "Reached maximum id value; wrapping around ." + mCurrentBatchToken);
+                    mId = 0;
+                } else {
+                    mId++;
+                }
+            }
             // Finalize the batch and start a new one from scratch.
             if (mBatches.size() >= MAX_BATCHES) {
                 // Remove the oldest batch if we hit the limit.
@@ -177,28 +247,42 @@ final class NetworkLoggingHandler extends Handler {
             mBatches.append(mCurrentBatchToken, mNetworkEvents);
             mNetworkEvents = new ArrayList<>();
             if (!mPaused) {
-                notifyDeviceOwnerLocked();
+                notificationExtras = buildAdminMessageLocked();
             }
         } else {
-            // Don't notify the DO, since there are no events; DPC can still retrieve
+            // Don't notify the admin, since there are no events; DPC can still retrieve
             // the last full batch if not paused.
-            Log.d(TAG, "Was about to finalize the batch, but there were no events to send to"
+            Slog.d(TAG, "Was about to finalize the batch, but there were no events to send to"
                     + " the DPC, the batchToken of last available batch: " + mCurrentBatchToken);
         }
         // Regardless of whether the batch was non-empty schedule a new finalization after timeout.
         scheduleBatchFinalization();
+        return notificationExtras;
     }
 
-    /** Sends a notification to the DO. Should only be called when there is a batch available. */
     @GuardedBy("this")
-    private void notifyDeviceOwnerLocked() {
+    /** Build extras notification to the admin. Should only be called when there
+        is a batch available. */
+    private Bundle buildAdminMessageLocked() {
         final Bundle extras = new Bundle();
         final int lastBatchSize = mBatches.valueAt(mBatches.size() - 1).size();
         extras.putLong(DeviceAdminReceiver.EXTRA_NETWORK_LOGS_TOKEN, mCurrentBatchToken);
         extras.putInt(DeviceAdminReceiver.EXTRA_NETWORK_LOGS_COUNT, lastBatchSize);
-        Log.d(TAG, "Sending network logging batch broadcast to device owner, batchToken: "
-                + mCurrentBatchToken);
-        mDpm.sendDeviceOwnerCommand(DeviceAdminReceiver.ACTION_NETWORK_LOGS_AVAILABLE, extras);
+        return extras;
+    }
+
+    /** Sends a notification to the device owner or profile owner. Should not hold locks as
+        DevicePolicyManagerService may call into NetworkLoggingHandler. */
+    private void notifyDeviceOwnerOrProfileOwner(Bundle extras) {
+        if (Thread.holdsLock(this)) {
+            Slog.wtfStack(TAG, "Shouldn't be called with NetworkLoggingHandler lock held");
+            return;
+        }
+        Slog.d(TAG, "Sending network logging batch broadcast to device owner or profile owner, "
+                + "batchToken: "
+                + extras.getLong(DeviceAdminReceiver.EXTRA_NETWORK_LOGS_TOKEN, -1));
+        mDpm.sendDeviceOwnerOrProfileOwnerCommand(DeviceAdminReceiver.ACTION_NETWORK_LOGS_AVAILABLE,
+                extras, mTargetUserId);
     }
 
     synchronized List<NetworkEvent> retrieveFullLogBatch(final long batchToken) {

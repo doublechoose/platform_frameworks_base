@@ -14,162 +14,157 @@
  * limitations under the License.
  */
 
-#define ATRACE_TAG ATRACE_TAG_RESOURCES
-
 #include "androidfw/ApkAssets.h"
 
-#include <algorithm>
-
+#include "android-base/errors.h"
 #include "android-base/logging.h"
-#include "utils/FileMap.h"
-#include "utils/Trace.h"
-#include "ziparchive/zip_archive.h"
-
-#include "androidfw/Asset.h"
-#include "androidfw/Util.h"
+#include "android-base/utf8.h"
 
 namespace android {
 
-std::unique_ptr<const ApkAssets> ApkAssets::Load(const std::string& path, bool system) {
-  return ApkAssets::LoadImpl(path, system, false /*load_as_shared_library*/);
+using base::SystemErrorCodeToString;
+using base::unique_fd;
+
+constexpr const char* kResourcesArsc = "resources.arsc";
+
+ApkAssets::ApkAssets(PrivateConstructorUtil, std::unique_ptr<Asset> resources_asset,
+                     std::unique_ptr<LoadedArsc> loaded_arsc,
+                     std::unique_ptr<AssetsProvider> assets, package_property_t property_flags,
+                     std::unique_ptr<Asset> idmap_asset, std::unique_ptr<LoadedIdmap> loaded_idmap)
+    : resources_asset_(std::move(resources_asset)),
+      loaded_arsc_(std::move(loaded_arsc)),
+      assets_provider_(std::move(assets)),
+      property_flags_(property_flags),
+      idmap_asset_(std::move(idmap_asset)),
+      loaded_idmap_(std::move(loaded_idmap)) {
 }
 
-std::unique_ptr<const ApkAssets> ApkAssets::LoadAsSharedLibrary(const std::string& path,
-                                                                bool system) {
-  return ApkAssets::LoadImpl(path, system, true /*load_as_shared_library*/);
+ApkAssetsPtr ApkAssets::Load(const std::string& path, package_property_t flags) {
+  return Load(ZipAssetsProvider::Create(path, flags), flags);
 }
 
-std::unique_ptr<const ApkAssets> ApkAssets::LoadImpl(const std::string& path, bool system,
-                                                     bool load_as_shared_library) {
-  ATRACE_CALL();
-  ::ZipArchiveHandle unmanaged_handle;
-  int32_t result = ::OpenArchive(path.c_str(), &unmanaged_handle);
-  if (result != 0) {
-    LOG(ERROR) << ::ErrorCodeString(result);
-    return {};
-  }
-
-  // Wrap the handle in a unique_ptr so it gets automatically closed.
-  std::unique_ptr<ApkAssets> loaded_apk(new ApkAssets());
-  loaded_apk->zip_handle_.reset(unmanaged_handle);
-
-  ::ZipString entry_name("resources.arsc");
-  ::ZipEntry entry;
-  result = ::FindEntry(loaded_apk->zip_handle_.get(), entry_name, &entry);
-  if (result != 0) {
-    LOG(ERROR) << ::ErrorCodeString(result);
-    return {};
-  }
-
-  if (entry.method == kCompressDeflated) {
-    LOG(WARNING) << "resources.arsc is compressed.";
-  }
-
-  loaded_apk->path_ = path;
-  loaded_apk->resources_asset_ =
-      loaded_apk->Open("resources.arsc", Asset::AccessMode::ACCESS_BUFFER);
-  if (loaded_apk->resources_asset_ == nullptr) {
-    return {};
-  }
-
-  loaded_apk->loaded_arsc_ =
-      LoadedArsc::Load(loaded_apk->resources_asset_->getBuffer(true /*wordAligned*/),
-                       loaded_apk->resources_asset_->getLength(), system, load_as_shared_library);
-  if (loaded_apk->loaded_arsc_ == nullptr) {
-    return {};
-  }
-
-  // Need to force a move for mingw32.
-  return std::move(loaded_apk);
+ApkAssetsPtr ApkAssets::LoadFromFd(base::unique_fd fd, const std::string& debug_name,
+                                   package_property_t flags, off64_t offset, off64_t len) {
+  return Load(ZipAssetsProvider::Create(std::move(fd), debug_name, offset, len), flags);
 }
 
-std::unique_ptr<Asset> ApkAssets::Open(const std::string& path, Asset::AccessMode mode) const {
-  ATRACE_CALL();
-  CHECK(zip_handle_ != nullptr);
+ApkAssetsPtr ApkAssets::Load(std::unique_ptr<AssetsProvider> assets, package_property_t flags) {
+  return LoadImpl(std::move(assets), flags, nullptr /* idmap_asset */, nullptr /* loaded_idmap */);
+}
 
-  ::ZipString name(path.c_str());
-  ::ZipEntry entry;
-  int32_t result = ::FindEntry(zip_handle_.get(), name, &entry);
-  if (result != 0) {
-    LOG(ERROR) << "No entry '" << path << "' found in APK '" << path_ << "'";
+ApkAssetsPtr ApkAssets::LoadTable(std::unique_ptr<Asset> resources_asset,
+                                  std::unique_ptr<AssetsProvider> assets,
+                                  package_property_t flags) {
+  if (resources_asset == nullptr) {
+    return {};
+  }
+  return LoadImpl(std::move(resources_asset), std::move(assets), flags, nullptr /* idmap_asset */,
+                  nullptr /* loaded_idmap */);
+}
+
+ApkAssetsPtr ApkAssets::LoadOverlay(const std::string& idmap_path, package_property_t flags) {
+  CHECK((flags & PROPERTY_LOADER) == 0U) << "Cannot load RROs through loaders";
+  auto idmap_asset = AssetsProvider::CreateAssetFromFile(idmap_path);
+  if (idmap_asset == nullptr) {
+    LOG(ERROR) << "failed to read IDMAP " << idmap_path;
     return {};
   }
 
-  if (entry.method == kCompressDeflated) {
-    std::unique_ptr<FileMap> map = util::make_unique<FileMap>();
-    if (!map->create(path_.c_str(), ::GetFileDescriptor(zip_handle_.get()), entry.offset,
-                     entry.compressed_length, true /*readOnly*/)) {
-      LOG(ERROR) << "Failed to mmap file '" << path << "' in APK '" << path_ << "'";
-      return {};
-    }
+  StringPiece idmap_data(reinterpret_cast<const char*>(idmap_asset->getBuffer(true /* aligned */)),
+                         static_cast<size_t>(idmap_asset->getLength()));
+  auto loaded_idmap = LoadedIdmap::Load(idmap_path, idmap_data);
+  if (loaded_idmap == nullptr) {
+    LOG(ERROR) << "failed to load IDMAP " << idmap_path;
+    return {};
+  }
 
-    std::unique_ptr<Asset> asset =
-        Asset::createFromCompressedMap(std::move(map), entry.uncompressed_length, mode);
-    if (asset == nullptr) {
-      LOG(ERROR) << "Failed to decompress '" << path << "'.";
-      return {};
-    }
-    return asset;
+  std::string overlay_path(loaded_idmap->OverlayApkPath());
+  auto fd = unique_fd(base::utf8::open(overlay_path.c_str(), O_RDONLY | O_CLOEXEC));
+  std::unique_ptr<AssetsProvider> overlay_assets;
+  if (IsFabricatedOverlayName(overlay_path) && IsFabricatedOverlay(fd)) {
+    // Fabricated overlays do not contain resource definitions. All of the overlay resource values
+    // are defined inline in the idmap.
+    overlay_assets = EmptyAssetsProvider::Create(std::move(overlay_path));
   } else {
-    std::unique_ptr<FileMap> map = util::make_unique<FileMap>();
-    if (!map->create(path_.c_str(), ::GetFileDescriptor(zip_handle_.get()), entry.offset,
-                     entry.uncompressed_length, true /*readOnly*/)) {
-      LOG(ERROR) << "Failed to mmap file '" << path << "' in APK '" << path_ << "'";
-      return {};
-    }
-
-    std::unique_ptr<Asset> asset = Asset::createFromUncompressedMap(std::move(map), mode);
-    if (asset == nullptr) {
-      LOG(ERROR) << "Failed to mmap file '" << path << "' in APK '" << path_ << "'";
-      return {};
-    }
-    return asset;
+    // The overlay should be an APK.
+    overlay_assets = ZipAssetsProvider::Create(std::move(overlay_path), flags, std::move(fd));
   }
+  if (overlay_assets == nullptr) {
+    return {};
+  }
+
+  return LoadImpl(std::move(overlay_assets), flags | PROPERTY_OVERLAY, std::move(idmap_asset),
+                  std::move(loaded_idmap));
 }
 
-bool ApkAssets::ForEachFile(const std::string& root_path,
-                            const std::function<void(const StringPiece&, FileType)>& f) const {
-  CHECK(zip_handle_ != nullptr);
-
-  std::string root_path_full = root_path;
-  if (root_path_full.back() != '/') {
-    root_path_full += '/';
+ApkAssetsPtr ApkAssets::LoadImpl(std::unique_ptr<AssetsProvider> assets,
+                                 package_property_t property_flags,
+                                 std::unique_ptr<Asset> idmap_asset,
+                                 std::unique_ptr<LoadedIdmap> loaded_idmap) {
+  if (assets == nullptr) {
+    return {};
   }
 
-  ::ZipString prefix(root_path_full.c_str());
-  void* cookie;
-  if (::StartIteration(zip_handle_.get(), &cookie, &prefix, nullptr) != 0) {
-    return false;
+  // Open the resource table via mmap unless it is compressed. This logic is taken care of by Open.
+  bool resources_asset_exists = false;
+  auto resources_asset = assets->Open(kResourcesArsc, Asset::AccessMode::ACCESS_BUFFER,
+                                      &resources_asset_exists);
+  if (resources_asset == nullptr && resources_asset_exists) {
+    LOG(ERROR) << "Failed to open '" << kResourcesArsc << "' in APK '" << assets->GetDebugName()
+               << "'.";
+    return {};
   }
 
-  ::ZipString name;
-  ::ZipEntry entry;
+  return LoadImpl(std::move(resources_asset), std::move(assets), property_flags,
+                  std::move(idmap_asset), std::move(loaded_idmap));
+}
 
-  // We need to hold back directories because many paths will contain them and we want to only
-  // surface one.
-  std::set<std::string> dirs;
+ApkAssetsPtr ApkAssets::LoadImpl(std::unique_ptr<Asset> resources_asset,
+                                 std::unique_ptr<AssetsProvider> assets,
+                                 package_property_t property_flags,
+                                 std::unique_ptr<Asset> idmap_asset,
+                                 std::unique_ptr<LoadedIdmap> loaded_idmap) {
+  if (assets == nullptr ) {
+    return {};
+  }
 
-  int32_t result;
-  while ((result = ::Next(cookie, &entry, &name)) == 0) {
-    StringPiece full_file_path(reinterpret_cast<const char*>(name.name), name.name_length);
-    StringPiece leaf_file_path = full_file_path.substr(root_path_full.size());
-    auto iter = std::find(leaf_file_path.begin(), leaf_file_path.end(), '/');
-    if (iter != leaf_file_path.end()) {
-      dirs.insert(
-          leaf_file_path.substr(0, std::distance(leaf_file_path.begin(), iter)).to_string());
-    } else if (!leaf_file_path.empty()) {
-      f(leaf_file_path, kFileTypeRegular);
+  std::unique_ptr<LoadedArsc> loaded_arsc;
+  if (resources_asset != nullptr) {
+    const auto data = resources_asset->getIncFsBuffer(true /* aligned */);
+    const size_t length = resources_asset->getLength();
+    if (!data || length == 0) {
+      LOG(ERROR) << "Failed to read resources table in APK '" << assets->GetDebugName() << "'.";
+      return {};
     }
+    loaded_arsc = LoadedArsc::Load(data, length, loaded_idmap.get(), property_flags);
+  } else if (loaded_idmap != nullptr && IsFabricatedOverlay(loaded_idmap->OverlayApkPath())) {
+    loaded_arsc = LoadedArsc::Load(loaded_idmap.get());
+  } else {
+    loaded_arsc = LoadedArsc::CreateEmpty();
   }
-  ::EndIteration(cookie);
 
-  // Now present the unique directories.
-  for (const std::string& dir : dirs) {
-    f(dir, kFileTypeDirectory);
+  if (loaded_arsc == nullptr) {
+    LOG(ERROR) << "Failed to load resources table in APK '" << assets->GetDebugName() << "'.";
+    return {};
   }
 
-  // -1 is end of iteration, anything else is an error.
-  return result == -1;
+  return ApkAssetsPtr::make(PrivateConstructorUtil{}, std::move(resources_asset),
+                            std::move(loaded_arsc), std::move(assets), property_flags,
+                            std::move(idmap_asset), std::move(loaded_idmap));
+}
+
+std::optional<std::string_view> ApkAssets::GetPath() const {
+  return assets_provider_->GetPath();
+}
+
+const std::string& ApkAssets::GetDebugName() const {
+  return assets_provider_->GetDebugName();
+}
+
+bool ApkAssets::IsUpToDate() const {
+  // Loaders are invalidated by the app, not the system, so assume they are up to date.
+  return IsLoader() || ((!loaded_idmap_ || loaded_idmap_->IsUpToDate())
+                        && assets_provider_->IsUpToDate());
 }
 
 }  // namespace android

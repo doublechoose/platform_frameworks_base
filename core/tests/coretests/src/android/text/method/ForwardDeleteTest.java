@@ -16,14 +16,16 @@
 
 package android.text.method;
 
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.platform.test.annotations.Presubmit;
 import android.text.InputType;
 import android.util.KeyUtils;
 import android.view.KeyEvent;
 import android.widget.EditText;
 import android.widget.TextView.BufferType;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -35,6 +37,7 @@ import org.junit.runner.RunWith;
  * Only contains edge cases. For normal cases, see {@see android.text.method.cts.ForwardDeleteTest}.
  * TODO: introduce test cases for surrogate pairs and replacement span.
  */
+@Presubmit
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class ForwardDeleteTest {
@@ -252,14 +255,10 @@ public class ForwardDeleteTest {
         // Isolated multiple emoji modifier
         state.setByString("| U+1F3FB U+1F3FB");
         forwardDelete(state, 0);
-        state.assertEquals("| U+1F3FB");
-        forwardDelete(state, 0);
         state.assertEquals("|");
 
         // Multiple emoji modifiers
         state.setByString("| U+1F466 U+1F3FB U+1F3FB");
-        forwardDelete(state, 0);
-        state.assertEquals("| U+1F3FB");
         forwardDelete(state, 0);
         state.assertEquals("|");
     }
@@ -305,15 +304,10 @@ public class ForwardDeleteTest {
         forwardDelete(state, 0);
         state.assertEquals("|");
 
-        // Regional indicator symbol + COMBINING ENCLOSING KEYCAP
-        state.setByString("| U+1F1FA U+20E3");
-        forwardDelete(state, 0);
-        state.assertEquals("|");
-
         // COMBINING ENCLOSING KEYCAP + emoji modifier
         state.setByString("| '1' U+20E3 U+1F3FB");
         forwardDelete(state, 0);
-        state.assertEquals("| U+1F3FB");
+        state.assertEquals("|");
 
         // Emoji modifier + COMBINING ENCLOSING KEYCAP
         state.setByString("| U+1F466 U+1F3FB U+20E3");
@@ -355,7 +349,7 @@ public class ForwardDeleteTest {
         // Variation selector + emoji modifier
         state.setByString("| U+2665 U+FE0F U+1F3FB");
         forwardDelete(state, 0);
-        state.assertEquals("| U+1F3FB");
+        state.assertEquals("|");
 
         // Emoji modifier + variation selector
         state.setByString("| U+1F466 U+1F3FB U+FE0F");
@@ -391,7 +385,7 @@ public class ForwardDeleteTest {
         // Start with ZERO WIDTH JOINER + emoji modifier
         state.setByString("| U+200D U+1F3FB");
         forwardDelete(state, 0);
-        state.assertEquals("| U+1F3FB");
+        state.assertEquals("|");
 
         // ZERO WIDTH JOINER + emoji modifier
         state.setByString("| U+1F469 U+200D U+1F3FB");
@@ -404,18 +398,10 @@ public class ForwardDeleteTest {
         state.assertEquals("|");
 
         // Emoji modifier + ZERO WIDTH JOINER
-        state.setByString("| U+1F466 U+1F3FB U+200D U+1F469");
-        forwardDelete(state, 0);
-        state.assertEquals("| U+1F469");
-        forwardDelete(state, 0);
-        state.assertEquals("|");
-
-        // Regional indicator symbol + emoji modifier
-        state.setByString("| U+1F1FA U+1F3FB");
-        forwardDelete(state, 0);
-        state.assertEquals("| U+1F3FB");
-        forwardDelete(state, 0);
-        state.assertEquals("|");
+        // TODO(nona): Revive this test once HarfBuzz is updated to 2.0.2 (b/117953171)
+        // state.setByString("| U+1F466 U+1F3FB U+200D U+1F469");
+        // forwardDelete(state, 0);
+        // state.assertEquals("|");
 
         // Emoji modifier + regional indicator symbol
         state.setByString("| U+1F466 U+1F3FB U+1F1FA");

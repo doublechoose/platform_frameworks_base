@@ -16,12 +16,19 @@
 
 package android.telecom;
 
+import android.annotation.NonNull;
+import android.bluetooth.BluetoothDevice;
+import android.net.Uri;
+import android.os.Binder;
 import android.os.Bundle;
+import android.os.OutcomeReceiver;
 import android.os.RemoteException;
+import android.os.ResultReceiver;
 
 import com.android.internal.telecom.IInCallAdapter;
 
 import java.util.List;
+import java.util.concurrent.Executor;
 
 /**
  * Receives commands from {@link InCallService} implementations which should be executed by
@@ -60,6 +67,19 @@ public final class InCallAdapter {
     }
 
     /**
+     * Instructs Telecom to deflect the specified call.
+     *
+     * @param callId The identifier of the call to deflect.
+     * @param address The address to deflect.
+     */
+    public void deflectCall(String callId, Uri address) {
+        try {
+            mAdapter.deflectCall(callId, address);
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
      * Instructs Telecom to reject the specified call.
      *
      * @param callId The identifier of the call to reject.
@@ -69,6 +89,48 @@ public final class InCallAdapter {
     public void rejectCall(String callId, boolean rejectWithMessage, String textMessage) {
         try {
             mAdapter.rejectCall(callId, rejectWithMessage, textMessage);
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * Instructs Telecom to reject the specified call.
+     *
+     * @param callId The identifier of the call to reject.
+     * @param rejectReason The reason the call was rejected.
+     */
+    public void rejectCall(String callId, @Call.RejectReason int rejectReason) {
+        try {
+            mAdapter.rejectCallWithReason(callId, rejectReason);
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * Instructs Telecom to transfer the specified call.
+     *
+     * @param callId The identifier of the call to transfer.
+     * @param targetNumber The address to transfer to.
+     * @param isConfirmationRequired if {@code true} it will initiate a confirmed transfer,
+     * if {@code false}, it will initiate unconfirmed transfer.
+     */
+    public void transferCall(@NonNull String callId, @NonNull Uri targetNumber,
+            boolean isConfirmationRequired) {
+        try {
+            mAdapter.transferCall(callId, targetNumber, isConfirmationRequired);
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * Instructs Telecom to transfer the specified call to another ongoing call.
+     *
+     * @param callId The identifier of the call to transfer.
+     * @param otherCallId The identifier of the other call to which this will be transferred.
+     */
+    public void transferCall(@NonNull String callId, @NonNull String otherCallId) {
+        try {
+            mAdapter.consultativeTransfer(callId, otherCallId);
         } catch (RemoteException e) {
         }
     }
@@ -128,8 +190,76 @@ public final class InCallAdapter {
      */
     public void setAudioRoute(int route) {
         try {
-            mAdapter.setAudioRoute(route);
+            mAdapter.setAudioRoute(route, null);
         } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * @see Call#enterBackgroundAudioProcessing()
+     */
+    public void enterBackgroundAudioProcessing(String callId) {
+        try {
+            mAdapter.enterBackgroundAudioProcessing(callId);
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * @see Call#exitBackgroundAudioProcessing(boolean)
+     */
+    public void exitBackgroundAudioProcessing(String callId, boolean shouldRing) {
+        try {
+            mAdapter.exitBackgroundAudioProcessing(callId, shouldRing);
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * Request audio routing to a specific bluetooth device. Calling this method may result in
+     * the device routing audio to a different bluetooth device than the one specified. A list of
+     * available devices can be obtained via {@link CallAudioState#getSupportedBluetoothDevices()}
+     *
+     * @param bluetoothAddress The address of the bluetooth device to connect to, as returned by
+     * {@link BluetoothDevice#getAddress()}, or {@code null} if no device is preferred.
+     */
+    public void requestBluetoothAudio(String bluetoothAddress) {
+        try {
+            mAdapter.setAudioRoute(CallAudioState.ROUTE_BLUETOOTH, bluetoothAddress);
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * Request audio routing to a specific CallEndpoint.. See {@link CallEndpoint}.
+     *
+     * @param endpoint The call endpoint to use.
+     * @param executor The executor of where the callback will execute.
+     * @param callback The callback to notify the result of the endpoint change.
+     */
+    public void requestCallEndpointChange(CallEndpoint endpoint, Executor executor,
+            OutcomeReceiver<Void, CallEndpointException> callback) {
+        try {
+            mAdapter.requestCallEndpointChange(endpoint, new ResultReceiver(null) {
+                @Override
+                protected void onReceiveResult(int resultCode, Bundle result) {
+                    super.onReceiveResult(resultCode, result);
+                    final long identity = Binder.clearCallingIdentity();
+                    try {
+                        if (resultCode == CallEndpoint.ENDPOINT_OPERATION_SUCCESS) {
+                            executor.execute(() -> callback.onResult(null));
+                        } else {
+                            executor.execute(() -> callback.onError(
+                                    result.getParcelable(CallEndpointException.CHANGE_ERROR,
+                                            CallEndpointException.class)));
+                        }
+                    } finally {
+                        Binder.restoreCallingIdentity(identity);
+                    }
+                }
+            });
+        } catch (RemoteException e) {
+            Log.d(this, "Remote exception calling requestCallEndpointChange");
         }
     }
 
@@ -220,6 +350,20 @@ public final class InCallAdapter {
     }
 
     /**
+     * Instructs Telecom to pull participants to existing call
+     *
+     * @param callId The unique ID of the call.
+     * @param participants participants to be pulled to existing call.
+     */
+    public void addConferenceParticipants(String callId, List<Uri> participants) {
+        try {
+            mAdapter.addConferenceParticipants(callId, participants);
+        } catch (RemoteException ignored) {
+        }
+    }
+
+
+    /**
      * Instructs Telecom to split the specified call from any conference call with which it may be
      * connected.
      *
@@ -270,11 +414,12 @@ public final class InCallAdapter {
      *
      * @param callId The callId to send the event for.
      * @param event The event.
+     * @param targetSdkVer Target sdk version of the app calling this api
      * @param extras Extras associated with the event.
      */
-    public void sendCallEvent(String callId, String event, Bundle extras) {
+    public void sendCallEvent(String callId, String event, int targetSdkVer, Bundle extras) {
         try {
-            mAdapter.sendCallEvent(callId, event, extras);
+            mAdapter.sendCallEvent(callId, event, targetSdkVer, extras);
         } catch (RemoteException ignored) {
         }
     }
@@ -416,6 +561,23 @@ public final class InCallAdapter {
     public void setRttMode(String callId, int mode) {
         try {
             mAdapter.setRttMode(callId, mode);
+        } catch (RemoteException ignored) {
+        }
+    }
+
+
+    /**
+     * Initiates a handover of this {@link Call} to the {@link ConnectionService} identified
+     * by destAcct.
+     * @param callId The callId of the Call which calls this function.
+     * @param destAcct ConnectionService to which the call should be handed over.
+     * @param videoState The video state desired after the handover.
+     * @param extras Extra information to be passed to ConnectionService
+     */
+    public void handoverTo(String callId, PhoneAccountHandle destAcct, int videoState,
+                           Bundle extras) {
+        try {
+            mAdapter.handoverTo(callId, destAcct, videoState, extras);
         } catch (RemoteException ignored) {
         }
     }

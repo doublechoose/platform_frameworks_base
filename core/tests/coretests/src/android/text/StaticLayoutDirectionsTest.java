@@ -18,16 +18,20 @@ package android.text;
 
 import static org.junit.Assert.fail;
 
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.platform.test.annotations.Presubmit;
 import android.text.Layout.Directions;
 import android.text.StaticLayoutTest.LayoutBuilder;
 
-import java.util.Arrays;
-import java.util.Formatter;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
+
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.util.Arrays;
+import java.util.Formatter;
+
+@Presubmit
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class StaticLayoutDirectionsTest {

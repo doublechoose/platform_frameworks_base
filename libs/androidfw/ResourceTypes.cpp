@@ -25,27 +25,36 @@
 #include <string.h>
 
 #include <algorithm>
+#include <fstream>
 #include <limits>
+#include <map>
 #include <memory>
+#include <set>
 #include <type_traits>
+#include <vector>
 
+#include <android-base/file.h>
+#include <android-base/macros.h>
+#include <android-base/utf8.h>
 #include <androidfw/ByteBucketArray.h>
 #include <androidfw/ResourceTypes.h>
 #include <androidfw/TypeWrappers.h>
-#include <utils/Atomic.h>
+#include <cutils/atomic.h>
 #include <utils/ByteOrder.h>
-#include <utils/Debug.h>
 #include <utils/Log.h>
 #include <utils/String16.h>
 #include <utils/String8.h>
 
 #ifdef __ANDROID__
 #include <binder/TextOutput.h>
+
 #endif
 
 #ifndef INT32_MAX
 #define INT32_MAX ((int32_t)(2147483647))
 #endif
+
+using namespace std::literals;
 
 namespace android {
 
@@ -102,22 +111,26 @@ static void strcpy16_dtoh(char16_t* dst, const uint16_t* src, size_t avail)
     *dst = 0;
 }
 
-static status_t validate_chunk(const ResChunk_header* chunk,
+static status_t validate_chunk(const incfs::map_ptr<ResChunk_header>& chunk,
                                size_t minSize,
-                               const uint8_t* dataEnd,
+                               const incfs::map_ptr<uint8_t> dataEnd,
                                const char* name)
 {
+    if (!chunk) {
+      return BAD_TYPE;
+    }
+
     const uint16_t headerSize = dtohs(chunk->headerSize);
     const uint32_t size = dtohl(chunk->size);
 
     if (headerSize >= minSize) {
         if (headerSize <= size) {
             if (((headerSize|size)&0x3) == 0) {
-                if ((size_t)size <= (size_t)(dataEnd-((const uint8_t*)chunk))) {
+                if ((size_t)size <= (size_t)(dataEnd-chunk.convert<uint8_t>())) {
                     return NO_ERROR;
                 }
                 ALOGW("%s data size 0x%x extends beyond resource end %p.",
-                     name, size, (void*)(dataEnd-((const uint8_t*)chunk)));
+                     name, size, (void*)(dataEnd-chunk.convert<uint8_t>()));
                 return BAD_TYPE;
             }
             ALOGW("%s size 0x%x or headerSize 0x%x is not on an integer boundary.",
@@ -224,6 +237,38 @@ void Res_png_9patch::serialize(const Res_png_9patch& patch, const int32_t* xDivs
     memcpy(data, colors, patch.numColors * sizeof(uint32_t));
 
     fill9patchOffsets(reinterpret_cast<Res_png_9patch*>(outData));
+}
+
+bool IsFabricatedOverlayName(std::string_view path) {
+  static constexpr auto suffixFrro = ".frro"sv;
+  static constexpr auto suffixIdmap = ".frro@idmap"sv;
+
+  return (path.size() > suffixFrro.size() && path.ends_with(suffixFrro))
+        || (path.size() > suffixIdmap.size() && path.ends_with(suffixIdmap));
+}
+
+bool IsFabricatedOverlay(std::string_view path) {
+  if (!IsFabricatedOverlayName(path)) {
+    return false;
+  }
+  std::string path_copy;
+  if (path[path.size()] != '\0') {
+    path_copy.assign(path);
+    path = path_copy;
+  }
+  auto fd = base::unique_fd(base::utf8::open(path.data(), O_RDONLY|O_CLOEXEC|O_BINARY));
+  if (fd < 0) {
+    return false;
+  }
+  return IsFabricatedOverlay(fd);
+}
+
+bool IsFabricatedOverlay(base::borrowed_fd fd) {
+  uint32_t magic;
+  if (!base::ReadFullyAtOffset(fd, &magic, sizeof(magic), 0)) {
+    return false;
+  }
+  return magic == kFabricatedOverlayMagic;
 }
 
 static bool assertIdmapHeader(const void* idmap, size_t size) {
@@ -416,15 +461,19 @@ Res_png_9patch* Res_png_9patch::deserialize(void* inData)
 // --------------------------------------------------------------------
 // --------------------------------------------------------------------
 
-ResStringPool::ResStringPool()
-    : mError(NO_INIT), mOwnedData(NULL), mHeader(NULL), mCache(NULL)
-{
+ResStringPool::ResStringPool() : mError(NO_INIT), mOwnedData(NULL), mHeader(NULL), mCache(NULL) {
 }
 
-ResStringPool::ResStringPool(const void* data, size_t size, bool copyData)
-    : mError(NO_INIT), mOwnedData(NULL), mHeader(NULL), mCache(NULL)
-{
-    setTo(data, size, copyData);
+ResStringPool::ResStringPool(bool optimize_name_lookups) : ResStringPool() {
+  if (optimize_name_lookups) {
+    mIndexLookupCache.emplace();
+  }
+}
+
+ResStringPool::ResStringPool(const void* data, size_t size, bool copyData,
+                             bool optimize_name_lookups)
+    : ResStringPool(optimize_name_lookups) {
+  setTo(data, size, copyData);
 }
 
 ResStringPool::~ResStringPool()
@@ -448,13 +497,29 @@ void ResStringPool::setToEmpty()
     mHeader = (const ResStringPool_header*) header;
 }
 
-status_t ResStringPool::setTo(const void* data, size_t size, bool copyData)
+status_t ResStringPool::setTo(incfs::map_ptr<void> data, size_t size, bool copyData)
 {
     if (!data || !size) {
         return (mError=BAD_TYPE);
     }
 
     uninit();
+
+    // The chunk must be at least the size of the string pool header.
+    if (size < sizeof(ResStringPool_header)) {
+        ALOGW("Bad string block: data size %zu is too small to be a string block", size);
+        return (mError=BAD_TYPE);
+    }
+
+    // The data is at least as big as a ResChunk_header, so we can safely validate the other
+    // header fields.
+    // `data + size` is safe because the source of `size` comes from the kernel/filesystem.
+    const auto chunk_header = data.convert<ResChunk_header>();
+    if (validate_chunk(chunk_header, sizeof(ResStringPool_header), data.convert<uint8_t>() + size,
+                       "ResStringPool_header") != NO_ERROR) {
+        ALOGW("Bad string block: malformed block dimensions");
+        return (mError=BAD_TYPE);
+    }
 
     const bool notDeviceEndian = htods(0xf0) != 0xf0;
 
@@ -463,14 +528,25 @@ status_t ResStringPool::setTo(const void* data, size_t size, bool copyData)
         if (mOwnedData == NULL) {
             return (mError=NO_MEMORY);
         }
-        memcpy(mOwnedData, data, size);
+
+        if (!data.convert<uint8_t>().verify(size)) {
+            return (mError=NO_MEMORY);
+        }
+
+        memcpy(mOwnedData, data.unsafe_ptr(), size);
         data = mOwnedData;
     }
 
-    mHeader = (const ResStringPool_header*)data;
+    // The size has been checked, so it is safe to read the data in the ResStringPool_header
+    // data structure.
+    const auto header = data.convert<ResStringPool_header>();
+    if (!header) {
+      return (mError=BAD_TYPE);
+    }
 
+    mHeader = header.verified();
     if (notDeviceEndian) {
-        ResStringPool_header* h = const_cast<ResStringPool_header*>(mHeader);
+        ResStringPool_header* h = const_cast<ResStringPool_header*>(mHeader.unsafe_ptr());
         h->header.headerSize = dtohs(mHeader->header.headerSize);
         h->header.type = dtohs(mHeader->header.type);
         h->header.size = dtohl(mHeader->header.size);
@@ -488,8 +564,7 @@ status_t ResStringPool::setTo(const void* data, size_t size, bool copyData)
         return (mError=BAD_TYPE);
     }
     mSize = mHeader->header.size;
-    mEntries = (const uint32_t*)
-        (((const uint8_t*)data)+mHeader->header.headerSize);
+    mEntries = data.offset(mHeader->header.headerSize).convert<uint32_t>();
 
     if (mHeader->stringCount > 0) {
         if ((mHeader->stringCount*sizeof(uint32_t) < mHeader->stringCount)  // uint32 overflow?
@@ -516,9 +591,7 @@ status_t ResStringPool::setTo(const void* data, size_t size, bool copyData)
             return (mError=BAD_TYPE);
         }
 
-        mStrings = (const void*)
-            (((const uint8_t*)data) + mHeader->stringsStart);
-
+        mStrings = data.offset(mHeader->stringsStart).convert<void>();
         if (mHeader->styleCount == 0) {
             mStringPoolSize = (mSize - mHeader->stringsStart) / charSize;
         } else {
@@ -540,31 +613,37 @@ status_t ResStringPool::setTo(const void* data, size_t size, bool copyData)
 
         // check invariant: stringCount > 0 requires a string pool to exist
         if (mStringPoolSize == 0) {
-            ALOGW("Bad string block: stringCount is %d but pool size is 0\n", (int)mHeader->stringCount);
+            ALOGW("Bad string block: stringCount is %d but pool size is 0\n",
+                  (int)mHeader->stringCount);
             return (mError=BAD_TYPE);
         }
 
         if (notDeviceEndian) {
             size_t i;
-            uint32_t* e = const_cast<uint32_t*>(mEntries);
+            auto e = const_cast<uint32_t*>(mEntries.unsafe_ptr());
             for (i=0; i<mHeader->stringCount; i++) {
-                e[i] = dtohl(mEntries[i]);
+                e[i] = dtohl(e[i]);
             }
             if (!(mHeader->flags&ResStringPool_header::UTF8_FLAG)) {
-                const uint16_t* strings = (const uint16_t*)mStrings;
-                uint16_t* s = const_cast<uint16_t*>(strings);
+                uint16_t* s = const_cast<uint16_t*>(mStrings.convert<uint16_t>().unsafe_ptr());
                 for (i=0; i<mStringPoolSize; i++) {
-                    s[i] = dtohs(strings[i]);
+                    s[i] = dtohs(s[i]);
                 }
             }
         }
 
-        if ((mHeader->flags&ResStringPool_header::UTF8_FLAG &&
-                ((uint8_t*)mStrings)[mStringPoolSize-1] != 0) ||
-                (!(mHeader->flags&ResStringPool_header::UTF8_FLAG) &&
-                ((uint16_t*)mStrings)[mStringPoolSize-1] != 0)) {
-            ALOGW("Bad string block: last string is not 0-terminated\n");
-            return (mError=BAD_TYPE);
+        if (mHeader->flags&ResStringPool_header::UTF8_FLAG) {
+            auto end = mStrings.convert<uint8_t>() + (mStringPoolSize-1);
+            if (!end || end.value() != 0) {
+                ALOGW("Bad string block: last string is not 0-terminated\n");
+                return (mError=BAD_TYPE);
+            }
+        } else {
+            auto end = mStrings.convert<uint16_t>() + (mStringPoolSize-1);
+            if (!end || end.value() != 0) {
+                ALOGW("Bad string block: last string is not 0-terminated\n");
+                return (mError=BAD_TYPE);
+            }
         }
     } else {
         mStrings = NULL;
@@ -579,14 +658,13 @@ status_t ResStringPool::setTo(const void* data, size_t size, bool copyData)
             return (mError=BAD_TYPE);
         }
 
-        if (((const uint8_t*)mEntryStyles-(const uint8_t*)mHeader) > (int)size) {
+        if ((mEntryStyles.convert<uint8_t>() - mHeader.convert<uint8_t>()) > (int)size) {
             ALOGW("Bad string block: entry of %d styles extends past data size %d\n",
-                    (int)((const uint8_t*)mEntryStyles-(const uint8_t*)mHeader),
+                    (int)(mEntryStyles.convert<uint8_t>()-mHeader.convert<uint8_t>()),
                     (int)size);
             return (mError=BAD_TYPE);
         }
-        mStyles = (const uint32_t*)
-            (((const uint8_t*)data)+mHeader->stylesStart);
+        mStyles = data.offset(mHeader->stylesStart).convert<uint32_t>();
         if (mHeader->stylesStart >= mHeader->header.size) {
             ALOGW("Bad string block: style pool starts %d, after total size %d\n",
                     (int)mHeader->stylesStart, (int)mHeader->header.size);
@@ -597,13 +675,13 @@ status_t ResStringPool::setTo(const void* data, size_t size, bool copyData)
 
         if (notDeviceEndian) {
             size_t i;
-            uint32_t* e = const_cast<uint32_t*>(mEntryStyles);
+            uint32_t* e = const_cast<uint32_t*>(mEntryStyles.unsafe_ptr());
             for (i=0; i<mHeader->styleCount; i++) {
-                e[i] = dtohl(mEntryStyles[i]);
+                e[i] = dtohl(e[i]);
             }
-            uint32_t* s = const_cast<uint32_t*>(mStyles);
+            uint32_t* s = const_cast<uint32_t*>(mStyles.unsafe_ptr());
             for (i=0; i<mStylePoolSize; i++) {
-                s[i] = dtohl(mStyles[i]);
+                s[i] = dtohl(s[i]);
             }
         }
 
@@ -611,8 +689,9 @@ status_t ResStringPool::setTo(const void* data, size_t size, bool copyData)
             { htodl(ResStringPool_span::END) },
             htodl(ResStringPool_span::END), htodl(ResStringPool_span::END)
         };
-        if (memcmp(&mStyles[mStylePoolSize-(sizeof(endSpan)/sizeof(uint32_t))],
-                   &endSpan, sizeof(endSpan)) != 0) {
+
+        auto stylesEnd = mStyles + (mStylePoolSize-(sizeof(endSpan)/sizeof(uint32_t)));
+        if (!stylesEnd || memcmp(stylesEnd.unsafe_ptr(), &endSpan, sizeof(endSpan)) != 0) {
             ALOGW("Bad string block: last style is not 0xFFFFFFFF-terminated\n");
             return (mError=BAD_TYPE);
         }
@@ -620,6 +699,14 @@ status_t ResStringPool::setTo(const void* data, size_t size, bool copyData)
         mEntryStyles = NULL;
         mStyles = NULL;
         mStylePoolSize = 0;
+    }
+
+    if (mIndexLookupCache) {
+      if ((mHeader->flags & ResStringPool_header::UTF8_FLAG) != 0) {
+        mIndexLookupCache->first.reserve(mHeader->stringCount);
+      } else {
+        mIndexLookupCache->second.reserve(mHeader->stringCount);
+      }
     }
 
     return (mError=NO_ERROR);
@@ -633,7 +720,7 @@ status_t ResStringPool::getError() const
 void ResStringPool::uninit()
 {
     mError = NO_INIT;
-    if (mHeader != NULL && mCache != NULL) {
+    if (mHeader && mCache != NULL) {
         for (size_t x = 0; x < mHeader->stringCount; x++) {
             if (mCache[x] != NULL) {
                 free(mCache[x]);
@@ -647,6 +734,10 @@ void ResStringPool::uninit()
         free(mOwnedData);
         mOwnedData = NULL;
     }
+    if (mIndexLookupCache) {
+      mIndexLookupCache->first.clear();
+      mIndexLookupCache->second.clear();
+    }
 }
 
 /**
@@ -659,15 +750,21 @@ void ResStringPool::uninit()
  * data encoded. In that case, drop the high bit of the first character and
  * add it together with the next character.
  */
-static inline size_t
-decodeLength(const uint16_t** str)
+static inline base::expected<size_t, IOError> decodeLength(incfs::map_ptr<uint16_t>* str)
 {
-    size_t len = **str;
-    if ((len & 0x8000) != 0) {
-        (*str)++;
-        len = ((len & 0x7FFF) << 16) | **str;
+    if (UNLIKELY(!*str)) {
+        return base::unexpected(IOError::PAGES_MISSING);
     }
-    (*str)++;
+
+    size_t len = str->value();
+    if ((len & 0x8000U) != 0) {
+        ++(*str);
+        if (UNLIKELY(!*str)) {
+            return base::unexpected(IOError::PAGES_MISSING);
+        }
+        len = ((len & 0x7FFFU) << 16U) | str->value();
+    }
+    ++(*str);
     return len;
 }
 
@@ -681,57 +778,125 @@ decodeLength(const uint16_t** str)
  * data encoded. In that case, drop the high bit of the first character and
  * add it together with the next character.
  */
-static inline size_t
-decodeLength(const uint8_t** str)
+static inline base::expected<size_t, IOError> decodeLength(incfs::map_ptr<uint8_t>* str)
 {
-    size_t len = **str;
-    if ((len & 0x80) != 0) {
-        (*str)++;
-        len = ((len & 0x7F) << 8) | **str;
+    if (UNLIKELY(!*str)) {
+        return base::unexpected(IOError::PAGES_MISSING);
     }
-    (*str)++;
+
+    size_t len = str->value();
+    if ((len & 0x80U) != 0) {
+        ++(*str);
+        if (UNLIKELY(!*str)) {
+            return base::unexpected(IOError::PAGES_MISSING);
+        }
+        len = ((len & 0x7FU) << 8U) | str->value();
+    }
+    ++(*str);
     return len;
 }
 
-const char16_t* ResStringPool::stringAt(size_t idx, size_t* u16len) const
+base::expected<StringPiece16, NullOrIOError> ResStringPool::stringAt(size_t idx) const
 {
     if (mError == NO_ERROR && idx < mHeader->stringCount) {
         const bool isUTF8 = (mHeader->flags&ResStringPool_header::UTF8_FLAG) != 0;
-        const uint32_t off = mEntries[idx]/(isUTF8?sizeof(uint8_t):sizeof(uint16_t));
+        auto offPtr = mEntries + idx;
+        if (UNLIKELY(!offPtr)) {
+           return base::unexpected(IOError::PAGES_MISSING);
+        }
+
+        const uint32_t off = (offPtr.value())/(isUTF8?sizeof(uint8_t):sizeof(uint16_t));
         if (off < (mStringPoolSize-1)) {
             if (!isUTF8) {
-                const uint16_t* strings = (uint16_t*)mStrings;
-                const uint16_t* str = strings+off;
+                auto strings = mStrings.convert<uint16_t>();
+                auto str = strings+off;
 
-                *u16len = decodeLength(&str);
+                const base::expected<size_t, IOError> u16len = decodeLength(&str);
+                if (UNLIKELY(!u16len.has_value())) {
+                    return base::unexpected(u16len.error());
+                }
+
                 if ((uint32_t)(str+*u16len-strings) < mStringPoolSize) {
                     // Reject malformed (non null-terminated) strings
-                    if (str[*u16len] != 0x0000) {
-                        ALOGW("Bad string block: string #%d is not null-terminated",
-                              (int)idx);
-                        return NULL;
+                    const auto nullAddress = str + (*u16len);
+                    if (UNLIKELY(!nullAddress)) {
+                       return base::unexpected(IOError::PAGES_MISSING);
                     }
-                    return reinterpret_cast<const char16_t*>(str);
+
+                    if (nullAddress.value() != 0x0000) {
+                        ALOGW("Bad string block: string #%d is not null-terminated", (int)idx);
+                        return base::unexpected(std::nullopt);
+                    }
+
+                    if (UNLIKELY(!str.verify(*u16len + 1U))) {
+                      return base::unexpected(IOError::PAGES_MISSING);
+                    }
+
+                    return StringPiece16(reinterpret_cast<const char16_t*>(str.unsafe_ptr()),
+                                         *u16len);
                 } else {
                     ALOGW("Bad string block: string #%d extends to %d, past end at %d\n",
                             (int)idx, (int)(str+*u16len-strings), (int)mStringPoolSize);
                 }
             } else {
-                const uint8_t* strings = (uint8_t*)mStrings;
-                const uint8_t* u8str = strings+off;
+                auto strings = mStrings.convert<uint8_t>();
+                auto u8str = strings+off;
 
-                *u16len = decodeLength(&u8str);
-                size_t u8len = decodeLength(&u8str);
+                base::expected<size_t, IOError> u16len = decodeLength(&u8str);
+                if (UNLIKELY(!u16len.has_value())) {
+                    return base::unexpected(u16len.error());
+                }
+
+                const base::expected<size_t, IOError> u8len = decodeLength(&u8str);
+                if (UNLIKELY(!u8len.has_value())) {
+                    return base::unexpected(u8len.error());
+                }
 
                 // encLen must be less than 0x7FFF due to encoding.
-                if ((uint32_t)(u8str+u8len-strings) < mStringPoolSize) {
-                    AutoMutex lock(mDecodeLock);
+                if ((uint32_t)(u8str+*u8len-strings) < mStringPoolSize) {
+                  AutoMutex lock(mCachesLock);
+
+                  if (mCache != NULL && mCache[idx] != NULL) {
+                    return StringPiece16(mCache[idx], *u16len);
+                  }
+
+                    // Retrieve the actual length of the utf8 string if the
+                    // encoded length was truncated
+                    auto decodedString = stringDecodeAt(idx, u8str, *u8len);
+                    if (!decodedString.has_value()) {
+                        return base::unexpected(decodedString.error());
+                    }
+
+                    // Since AAPT truncated lengths longer than 0x7FFF, check
+                    // that the bits that remain after truncation at least match
+                    // the bits of the actual length
+                    ssize_t actualLen = utf8_to_utf16_length(
+                        reinterpret_cast<const uint8_t*>(decodedString->data()),
+                        decodedString->size());
+
+                    if (actualLen < 0 || ((size_t)actualLen & 0x7FFFU) != *u16len) {
+                        ALOGW("Bad string block: string #%lld decoded length is not correct "
+                                "%lld vs %llu\n",
+                                (long long)idx, (long long)actualLen, (long long)*u16len);
+                        return base::unexpected(std::nullopt);
+                    }
+
+                    u16len = (size_t) actualLen;
+                    auto u16str = (char16_t *)calloc(*u16len+1, sizeof(char16_t));
+                    if (!u16str) {
+                        ALOGW("No memory when trying to allocate decode cache for string #%d\n",
+                                (int)idx);
+                        return base::unexpected(std::nullopt);
+                    }
+
+                    utf8_to_utf16(reinterpret_cast<const uint8_t*>(decodedString->data()),
+                                  decodedString->size(), u16str, *u16len + 1);
 
                     if (mCache == NULL) {
 #ifndef __ANDROID__
                         if (kDebugStringPoolNoisy) {
                             ALOGI("CREATING STRING CACHE OF %zu bytes",
-                                    mHeader->stringCount*sizeof(char16_t**));
+                                  mHeader->stringCount*sizeof(char16_t**));
                         }
 #else
                         // We do not want to be in this case when actually running Android.
@@ -741,46 +906,20 @@ const char16_t* ResStringPool::stringAt(size_t idx, size_t* u16len) const
                         mCache = (char16_t**)calloc(mHeader->stringCount, sizeof(char16_t*));
                         if (mCache == NULL) {
                             ALOGW("No memory trying to allocate decode cache table of %d bytes\n",
-                                    (int)(mHeader->stringCount*sizeof(char16_t**)));
-                            return NULL;
+                                  (int)(mHeader->stringCount*sizeof(char16_t**)));
+                            return base::unexpected(std::nullopt);
                         }
                     }
 
-                    if (mCache[idx] != NULL) {
-                        return mCache[idx];
-                    }
-
-                    ssize_t actualLen = utf8_to_utf16_length(u8str, u8len);
-                    if (actualLen < 0 || (size_t)actualLen != *u16len) {
-                        ALOGW("Bad string block: string #%lld decoded length is not correct "
-                                "%lld vs %llu\n",
-                                (long long)idx, (long long)actualLen, (long long)*u16len);
-                        return NULL;
-                    }
-
-                    // Reject malformed (non null-terminated) strings
-                    if (u8str[u8len] != 0x00) {
-                        ALOGW("Bad string block: string #%d is not null-terminated",
-                              (int)idx);
-                        return NULL;
-                    }
-
-                    char16_t *u16str = (char16_t *)calloc(*u16len+1, sizeof(char16_t));
-                    if (!u16str) {
-                        ALOGW("No memory when trying to allocate decode cache for string #%d\n",
-                                (int)idx);
-                        return NULL;
-                    }
-
                     if (kDebugStringPoolNoisy) {
-                        ALOGI("Caching UTF8 string: %s", u8str);
+                      ALOGI("Caching UTF8 string: %s", u8str.unsafe_ptr());
                     }
-                    utf8_to_utf16(u8str, u8len, u16str, *u16len + 1);
+
                     mCache[idx] = u16str;
-                    return u16str;
+                    return StringPiece16(u16str, *u16len);
                 } else {
                     ALOGW("Bad string block: string #%lld extends to %lld, past end at %lld\n",
-                            (long long)idx, (long long)(u8str+u8len-strings),
+                            (long long)idx, (long long)(u8str+*u8len-strings),
                             (long long)mStringPoolSize);
                 }
             }
@@ -790,32 +929,43 @@ const char16_t* ResStringPool::stringAt(size_t idx, size_t* u16len) const
                     (int)(mStringPoolSize*sizeof(uint16_t)));
         }
     }
-    return NULL;
+    return base::unexpected(std::nullopt);
 }
 
-const char* ResStringPool::string8At(size_t idx, size_t* outLen) const
+base::expected<StringPiece, NullOrIOError> ResStringPool::string8At(size_t idx) const
 {
     if (mError == NO_ERROR && idx < mHeader->stringCount) {
         if ((mHeader->flags&ResStringPool_header::UTF8_FLAG) == 0) {
-            return NULL;
+            return base::unexpected(std::nullopt);
         }
-        const uint32_t off = mEntries[idx]/sizeof(char);
+
+        auto offPtr = mEntries + idx;
+        if (UNLIKELY(!offPtr)) {
+           return base::unexpected(IOError::PAGES_MISSING);
+        }
+
+        const uint32_t off = (offPtr.value())/sizeof(char);
         if (off < (mStringPoolSize-1)) {
-            const uint8_t* strings = (uint8_t*)mStrings;
-            const uint8_t* str = strings+off;
+            auto strings = mStrings.convert<uint8_t>();
+            auto str = strings+off;
 
             // Decode the UTF-16 length. This is not used if we're not
             // converting to UTF-16 from UTF-8.
-            decodeLength(&str);
+            const base::expected<size_t, IOError> u16len = decodeLength(&str);
+            if (UNLIKELY(!u16len.has_value())) {
+                return base::unexpected(u16len.error());
+            }
 
-            const size_t encLen = decodeLength(&str);
-            *outLen = encLen;
+            const base::expected<size_t, IOError> u8len = decodeLength(&str);
+            if (UNLIKELY(!u8len.has_value())) {
+                return base::unexpected(u8len.error());
+            }
 
-            if ((uint32_t)(str+encLen-strings) < mStringPoolSize) {
-                return (const char*)str;
+            if ((uint32_t)(str+*u8len-strings) < mStringPoolSize) {
+                return stringDecodeAt(idx, str, *u8len);
             } else {
                 ALOGW("Bad string block: string #%d extends to %d, past end at %d\n",
-                        (int)idx, (int)(str+encLen-strings), (int)mStringPoolSize);
+                        (int)idx, (int)(str+*u8len-strings), (int)mStringPoolSize);
             }
         } else {
             ALOGW("Bad string block: string #%d entry is at %d, past end at %d\n",
@@ -823,55 +973,106 @@ const char* ResStringPool::string8At(size_t idx, size_t* outLen) const
                     (int)(mStringPoolSize*sizeof(uint16_t)));
         }
     }
-    return NULL;
+    return base::unexpected(std::nullopt);
 }
 
-const String8 ResStringPool::string8ObjectAt(size_t idx) const
+/**
+ * AAPT incorrectly writes a truncated string length when the string size
+ * exceeded the maximum possible encode length value (0x7FFF). To decode a
+ * truncated length, iterate through length values that end in the encode length
+ * bits. Strings that exceed the maximum encode length are not placed into
+ * StringPools in AAPT2.
+ **/
+base::expected<StringPiece, NullOrIOError> ResStringPool::stringDecodeAt(
+      size_t idx, incfs::map_ptr<uint8_t> str, size_t encLen) const
 {
-    size_t len;
-    const char *str = string8At(idx, &len);
-    if (str != NULL) {
-        return String8(str, len);
+    const auto strings = mStrings.convert<uint8_t>();
+    size_t i = 0, end = encLen;
+    while ((uint32_t)(str+end-strings) < mStringPoolSize) {
+        const auto nullAddress = str + end;
+        if (UNLIKELY(!nullAddress)) {
+            return base::unexpected(IOError::PAGES_MISSING);
+        }
+
+        if (nullAddress.value() == 0x00) {
+            if (i != 0) {
+                ALOGW("Bad string block: string #%d is truncated (actual length is %d)",
+                      (int)idx, (int)end);
+            }
+
+            if (UNLIKELY(!str.verify(end + 1U))) {
+              return base::unexpected(IOError::PAGES_MISSING);
+            }
+
+            return StringPiece((const char*) str.unsafe_ptr(), end);
+        }
+
+        end = (++i << (sizeof(uint8_t) * 8 * 2 - 1)) | encLen;
     }
 
-    const char16_t *str16 = stringAt(idx, &len);
-    if (str16 != NULL) {
-        return String8(str16, len);
+    // Reject malformed (non null-terminated) strings
+    ALOGW("Bad string block: string #%d is not null-terminated", (int)idx);
+    return base::unexpected(std::nullopt);
+}
+
+base::expected<String8, IOError> ResStringPool::string8ObjectAt(size_t idx) const
+{
+    const base::expected<StringPiece, NullOrIOError> str = string8At(idx);
+    if (UNLIKELY(IsIOError(str))) {
+        return base::unexpected(GetIOError(str.error()));
     }
+    if (str.has_value()) {
+        return String8(str->data(), str->size());
+    }
+
+    const base::expected<StringPiece16, NullOrIOError> str16 = stringAt(idx);
+    if (UNLIKELY(IsIOError(str16))) {
+        return base::unexpected(GetIOError(str16.error()));
+    }
+    if (str16.has_value()) {
+        return String8(str16->data(), str16->size());
+    }
+
     return String8();
 }
 
-const ResStringPool_span* ResStringPool::styleAt(const ResStringPool_ref& ref) const
+base::expected<incfs::map_ptr<ResStringPool_span>, NullOrIOError> ResStringPool::styleAt(
+    const ResStringPool_ref& ref) const
 {
     return styleAt(ref.index);
 }
 
-const ResStringPool_span* ResStringPool::styleAt(size_t idx) const
+base::expected<incfs::map_ptr<ResStringPool_span>, NullOrIOError> ResStringPool::styleAt(
+    size_t idx) const
 {
     if (mError == NO_ERROR && idx < mHeader->styleCount) {
-        const uint32_t off = (mEntryStyles[idx]/sizeof(uint32_t));
+        auto offPtr = mEntryStyles + idx;
+        if (UNLIKELY(!offPtr)) {
+           return base::unexpected(IOError::PAGES_MISSING);
+        }
+
+        const uint32_t off = ((offPtr.value())/sizeof(uint32_t));
         if (off < mStylePoolSize) {
-            return (const ResStringPool_span*)(mStyles+off);
+            return (mStyles+off).convert<ResStringPool_span>();
         } else {
             ALOGW("Bad string block: style #%d entry is at %d, past end at %d\n",
                     (int)idx, (int)(off*sizeof(uint32_t)),
                     (int)(mStylePoolSize*sizeof(uint32_t)));
         }
     }
-    return NULL;
+    return base::unexpected(std::nullopt);
 }
 
-ssize_t ResStringPool::indexOfString(const char16_t* str, size_t strLen) const
+base::expected<size_t, NullOrIOError> ResStringPool::indexOfString(const char16_t* str,
+                                                                   size_t strLen) const
 {
     if (mError != NO_ERROR) {
-        return mError;
+        return base::unexpected(std::nullopt);
     }
-
-    size_t len;
 
     if ((mHeader->flags&ResStringPool_header::UTF8_FLAG) != 0) {
         if (kDebugStringPoolNoisy) {
-            ALOGI("indexOfString UTF-8: %s", String8(str, strLen).string());
+            ALOGI("indexOfString UTF-8: %s", String8(str, strLen).c_str());
         }
 
         // The string pool contains UTF 8 strings; we don't want to cause
@@ -883,30 +1084,31 @@ ssize_t ResStringPool::indexOfString(const char16_t* str, size_t strLen) const
             // But we don't want to hit the cache, so instead we will have a
             // local temporary allocation for the conversions.
             size_t convBufferLen = strLen + 4;
-            char16_t* convBuffer = (char16_t*)calloc(convBufferLen, sizeof(char16_t));
+            std::vector<char16_t> convBuffer(convBufferLen);
             ssize_t l = 0;
             ssize_t h = mHeader->stringCount-1;
 
             ssize_t mid;
             while (l <= h) {
                 mid = l + (h - l)/2;
-                const uint8_t* s = (const uint8_t*)string8At(mid, &len);
-                int c;
-                if (s != NULL) {
-                    char16_t* end = utf8_to_utf16(s, len, convBuffer, convBufferLen);
-                    c = strzcmp16(convBuffer, end-convBuffer, str, strLen);
-                } else {
-                    c = -1;
+                int c = -1;
+                const base::expected<StringPiece, NullOrIOError> s = string8At(mid);
+                if (UNLIKELY(IsIOError(s))) {
+                    return base::unexpected(s.error());
+                }
+                if (s.has_value()) {
+                    char16_t* end = utf8_to_utf16(reinterpret_cast<const uint8_t*>(s->data()),
+                                                  s->size(), convBuffer.data(), convBufferLen);
+                    c = strzcmp16(convBuffer.data(), end-convBuffer.data(), str, strLen);
                 }
                 if (kDebugStringPoolNoisy) {
                     ALOGI("Looking at %s, cmp=%d, l/mid/h=%d/%d/%d\n",
-                            (const char*)s, c, (int)l, (int)mid, (int)h);
+                          s->data(), c, (int)l, (int)mid, (int)h);
                 }
                 if (c == 0) {
                     if (kDebugStringPoolNoisy) {
                         ALOGI("MATCH!");
                     }
-                    free(convBuffer);
                     return mid;
                 } else if (c < 0) {
                     l = mid + 1;
@@ -914,7 +1116,6 @@ ssize_t ResStringPool::indexOfString(const char16_t* str, size_t strLen) const
                     h = mid - 1;
                 }
             }
-            free(convBuffer);
         } else {
             // It is unusual to get the ID from an unsorted string block...
             // most often this happens because we want to get IDs for style
@@ -922,23 +1123,41 @@ ssize_t ResStringPool::indexOfString(const char16_t* str, size_t strLen) const
             // block, start searching at the back.
             String8 str8(str, strLen);
             const size_t str8Len = str8.size();
+            std::optional<AutoMutex> cacheLock;
+            if (mIndexLookupCache) {
+              cacheLock.emplace(mCachesLock);
+              if (auto it = mIndexLookupCache->first.find(std::string_view(str8));
+                  it != mIndexLookupCache->first.end()) {
+                return it->second;
+              }
+            }
+
             for (int i=mHeader->stringCount-1; i>=0; i--) {
-                const char* s = string8At(i, &len);
-                if (kDebugStringPoolNoisy) {
-                    ALOGI("Looking at %s, i=%d\n", String8(s).string(), i);
+                const base::expected<StringPiece, NullOrIOError> s = string8At(i);
+                if (UNLIKELY(IsIOError(s))) {
+                    return base::unexpected(s.error());
                 }
-                if (s && str8Len == len && memcmp(s, str8.string(), str8Len) == 0) {
+                if (s.has_value()) {
+                  if (mIndexLookupCache) {
+                    mIndexLookupCache->first.insert({*s, i});
+                  }
                     if (kDebugStringPoolNoisy) {
-                        ALOGI("MATCH!");
+                        ALOGI("Looking at %s, i=%d\n", s->data(), i);
                     }
-                    return i;
+                    if (str8Len == s->size()
+                            && memcmp(s->data(), str8.c_str(), str8Len) == 0) {
+                        if (kDebugStringPoolNoisy) {
+                            ALOGI("MATCH!");
+                        }
+                        return i;
+                    }
                 }
             }
         }
 
     } else {
         if (kDebugStringPoolNoisy) {
-            ALOGI("indexOfString UTF-16: %s", String8(str, strLen).string());
+            ALOGI("indexOfString UTF-16: %s", String8(str, strLen).c_str());
         }
 
         if (mHeader->flags&ResStringPool_header::SORTED_FLAG) {
@@ -949,11 +1168,14 @@ ssize_t ResStringPool::indexOfString(const char16_t* str, size_t strLen) const
             ssize_t mid;
             while (l <= h) {
                 mid = l + (h - l)/2;
-                const char16_t* s = stringAt(mid, &len);
-                int c = s ? strzcmp16(s, len, str, strLen) : -1;
+                const base::expected<StringPiece16, NullOrIOError> s = stringAt(mid);
+                if (UNLIKELY(IsIOError(s))) {
+                    return base::unexpected(s.error());
+                }
+                int c = s.has_value() ? strzcmp16(s->data(), s->size(), str, strLen) : -1;
                 if (kDebugStringPoolNoisy) {
                     ALOGI("Looking at %s, cmp=%d, l/mid/h=%d/%d/%d\n",
-                            String8(s).string(), c, (int)l, (int)mid, (int)h);
+                          String8(s->data(), s->size()).c_str(), c, (int)l, (int)mid, (int)h);
                 }
                 if (c == 0) {
                     if (kDebugStringPoolNoisy) {
@@ -971,22 +1193,37 @@ ssize_t ResStringPool::indexOfString(const char16_t* str, size_t strLen) const
             // most often this happens because we want to get IDs for style
             // span tags; since those always appear at the end of the string
             // block, start searching at the back.
+            std::optional<AutoMutex> cacheLock;
+            if (mIndexLookupCache) {
+              cacheLock.emplace(mCachesLock);
+              if (auto it = mIndexLookupCache->second.find({str, strLen});
+                  it != mIndexLookupCache->second.end()) {
+                return it->second;
+              }
+            }
             for (int i=mHeader->stringCount-1; i>=0; i--) {
-                const char16_t* s = stringAt(i, &len);
-                if (kDebugStringPoolNoisy) {
-                    ALOGI("Looking at %s, i=%d\n", String8(s).string(), i);
+                const base::expected<StringPiece16, NullOrIOError> s = stringAt(i);
+                if (UNLIKELY(IsIOError(s))) {
+                    return base::unexpected(s.error());
                 }
-                if (s && strLen == len && strzcmp16(s, len, str, strLen) == 0) {
+                if (kDebugStringPoolNoisy) {
+                  ALOGI("Looking16 at %s, i=%d\n", String8(s->data(), s->size()).c_str(), i);
+                }
+                if (s.has_value()) {
+                  if (mIndexLookupCache) {
+                    mIndexLookupCache->second.insert({*s, i});
+                  }
+                  if (strLen == s->size() && strzcmp16(s->data(), s->size(), str, strLen) == 0) {
                     if (kDebugStringPoolNoisy) {
-                        ALOGI("MATCH!");
+                      ALOGI("MATCH16!");
                     }
                     return i;
+                  }
                 }
             }
         }
     }
-
-    return NAME_NOT_FOUND;
+    return base::unexpected(std::nullopt);
 }
 
 size_t ResStringPool::size() const
@@ -1002,6 +1239,12 @@ size_t ResStringPool::styleCount() const
 size_t ResStringPool::bytes() const
 {
     return (mError == NO_ERROR) ? mHeader->header.size : 0;
+}
+
+incfs::map_ptr<void> ResStringPool::data() const
+{
+
+    return mHeader.unsafe_ptr();
 }
 
 bool ResStringPool::isSorted() const
@@ -1058,7 +1301,7 @@ int32_t ResXMLParser::getCommentID() const
 const char16_t* ResXMLParser::getComment(size_t* outLen) const
 {
     int32_t id = getCommentID();
-    return id >= 0 ? mTree.mStrings.stringAt(id, outLen) : NULL;
+    return id >= 0 ? UnpackOptionalString(mTree.mStrings.stringAt(id), outLen) : NULL;
 }
 
 uint32_t ResXMLParser::getLineNumber() const
@@ -1077,7 +1320,7 @@ int32_t ResXMLParser::getTextID() const
 const char16_t* ResXMLParser::getText(size_t* outLen) const
 {
     int32_t id = getTextID();
-    return id >= 0 ? mTree.mStrings.stringAt(id, outLen) : NULL;
+    return id >= 0 ? UnpackOptionalString(mTree.mStrings.stringAt(id), outLen) : NULL;
 }
 
 ssize_t ResXMLParser::getTextValue(Res_value* outValue) const
@@ -1101,7 +1344,7 @@ const char16_t* ResXMLParser::getNamespacePrefix(size_t* outLen) const
 {
     int32_t id = getNamespacePrefixID();
     //printf("prefix=%d  event=%p\n", id, mEventCode);
-    return id >= 0 ? mTree.mStrings.stringAt(id, outLen) : NULL;
+    return id >= 0 ? UnpackOptionalString(mTree.mStrings.stringAt(id), outLen) : NULL;
 }
 
 int32_t ResXMLParser::getNamespaceUriID() const
@@ -1116,7 +1359,7 @@ const char16_t* ResXMLParser::getNamespaceUri(size_t* outLen) const
 {
     int32_t id = getNamespaceUriID();
     //printf("uri=%d  event=%p\n", id, mEventCode);
-    return id >= 0 ? mTree.mStrings.stringAt(id, outLen) : NULL;
+    return id >= 0 ? UnpackOptionalString(mTree.mStrings.stringAt(id), outLen) : NULL;
 }
 
 int32_t ResXMLParser::getElementNamespaceID() const
@@ -1133,7 +1376,7 @@ int32_t ResXMLParser::getElementNamespaceID() const
 const char16_t* ResXMLParser::getElementNamespace(size_t* outLen) const
 {
     int32_t id = getElementNamespaceID();
-    return id >= 0 ? mTree.mStrings.stringAt(id, outLen) : NULL;
+    return id >= 0 ? UnpackOptionalString(mTree.mStrings.stringAt(id), outLen) : NULL;
 }
 
 int32_t ResXMLParser::getElementNameID() const
@@ -1150,7 +1393,7 @@ int32_t ResXMLParser::getElementNameID() const
 const char16_t* ResXMLParser::getElementName(size_t* outLen) const
 {
     int32_t id = getElementNameID();
-    return id >= 0 ? mTree.mStrings.stringAt(id, outLen) : NULL;
+    return id >= 0 ? UnpackOptionalString(mTree.mStrings.stringAt(id), outLen) : NULL;
 }
 
 size_t ResXMLParser::getAttributeCount() const
@@ -1183,7 +1426,7 @@ const char16_t* ResXMLParser::getAttributeNamespace(size_t idx, size_t* outLen) 
     if (kDebugXMLNoisy) {
         printf("getAttributeNamespace 0x%zx=0x%x\n", idx, id);
     }
-    return id >= 0 ? mTree.mStrings.stringAt(id, outLen) : NULL;
+    return id >= 0 ? UnpackOptionalString(mTree.mStrings.stringAt(id), outLen) : NULL;
 }
 
 const char* ResXMLParser::getAttributeNamespace8(size_t idx, size_t* outLen) const
@@ -1193,7 +1436,7 @@ const char* ResXMLParser::getAttributeNamespace8(size_t idx, size_t* outLen) con
     if (kDebugXMLNoisy) {
         printf("getAttributeNamespace 0x%zx=0x%x\n", idx, id);
     }
-    return id >= 0 ? mTree.mStrings.string8At(id, outLen) : NULL;
+    return id >= 0 ? UnpackOptionalString(mTree.mStrings.string8At(id), outLen) : NULL;
 }
 
 int32_t ResXMLParser::getAttributeNameID(size_t idx) const
@@ -1218,7 +1461,7 @@ const char16_t* ResXMLParser::getAttributeName(size_t idx, size_t* outLen) const
     if (kDebugXMLNoisy) {
         printf("getAttributeName 0x%zx=0x%x\n", idx, id);
     }
-    return id >= 0 ? mTree.mStrings.stringAt(id, outLen) : NULL;
+    return id >= 0 ? UnpackOptionalString(mTree.mStrings.stringAt(id), outLen) : NULL;
 }
 
 const char* ResXMLParser::getAttributeName8(size_t idx, size_t* outLen) const
@@ -1228,7 +1471,7 @@ const char* ResXMLParser::getAttributeName8(size_t idx, size_t* outLen) const
     if (kDebugXMLNoisy) {
         printf("getAttributeName 0x%zx=0x%x\n", idx, id);
     }
-    return id >= 0 ? mTree.mStrings.string8At(id, outLen) : NULL;
+    return id >= 0 ? UnpackOptionalString(mTree.mStrings.string8At(id), outLen) : NULL;
 }
 
 uint32_t ResXMLParser::getAttributeNameResID(size_t idx) const
@@ -1265,7 +1508,7 @@ const char16_t* ResXMLParser::getAttributeStringValue(size_t idx, size_t* outLen
     if (kDebugXMLNoisy) {
         printf("getAttributeValue 0x%zx=0x%x\n", idx, id);
     }
-    return id >= 0 ? mTree.mStrings.stringAt(id, outLen) : NULL;
+    return id >= 0 ? UnpackOptionalString(mTree.mStrings.stringAt(id), outLen) : NULL;
 }
 
 int32_t ResXMLParser::getAttributeDataType(size_t idx) const
@@ -1299,11 +1542,10 @@ int32_t ResXMLParser::getAttributeData(size_t idx) const
                 (((const uint8_t*)tag)
                  + dtohs(tag->attributeStart)
                  + (dtohs(tag->attributeSize)*idx));
-            if (attr->typedValue.dataType != Res_value::TYPE_DYNAMIC_REFERENCE ||
-                    mTree.mDynamicRefTable == NULL) {
+            if (mTree.mDynamicRefTable == NULL ||
+                    !mTree.mDynamicRefTable->requiresLookup(&attr->typedValue)) {
                 return dtohl(attr->typedValue.data);
             }
-
             uint32_t data = dtohl(attr->typedValue.data);
             if (mTree.mDynamicRefTable->lookupResourceId(&data) == NO_ERROR) {
                 return data;
@@ -1337,8 +1579,8 @@ ssize_t ResXMLParser::indexOfAttribute(const char* ns, const char* attr) const
 {
     String16 nsStr(ns != NULL ? ns : "");
     String16 attrStr(attr);
-    return indexOfAttribute(ns ? nsStr.string() : NULL, ns ? nsStr.size() : 0,
-                            attrStr.string(), attrStr.size());
+    return indexOfAttribute(ns ? nsStr.c_str() : NULL, ns ? nsStr.size() : 0,
+                            attrStr.c_str(), attrStr.size());
 }
 
 ssize_t ResXMLParser::indexOfAttribute(const char16_t* ns, size_t nsLen,
@@ -1356,8 +1598,8 @@ ssize_t ResXMLParser::indexOfAttribute(const char16_t* ns, size_t nsLen,
             }
             attr8 = String8(attr, attrLen);
             if (kDebugStringPoolNoisy) {
-                ALOGI("indexOfAttribute UTF8 %s (%zu) / %s (%zu)", ns8.string(), nsLen,
-                        attr8.string(), attrLen);
+                ALOGI("indexOfAttribute UTF8 %s (%zu) / %s (%zu)", ns8.c_str(), nsLen,
+                        attr8.c_str(), attrLen);
             }
             for (size_t i=0; i<N; i++) {
                 size_t curNsLen = 0, curAttrLen = 0;
@@ -1367,7 +1609,7 @@ ssize_t ResXMLParser::indexOfAttribute(const char16_t* ns, size_t nsLen,
                     ALOGI("  curNs=%s (%zu), curAttr=%s (%zu)", curNs, curNsLen, curAttr, curAttrLen);
                 }
                 if (curAttr != NULL && curNsLen == nsLen && curAttrLen == attrLen
-                        && memcmp(attr8.string(), curAttr, attrLen) == 0) {
+                        && memcmp(attr8.c_str(), curAttr, attrLen) == 0) {
                     if (ns == NULL) {
                         if (curNs == NULL) {
                             if (kDebugStringPoolNoisy) {
@@ -1377,8 +1619,8 @@ ssize_t ResXMLParser::indexOfAttribute(const char16_t* ns, size_t nsLen,
                         }
                     } else if (curNs != NULL) {
                         //printf(" --> ns=%s, curNs=%s\n",
-                        //       String8(ns).string(), String8(curNs).string());
-                        if (memcmp(ns8.string(), curNs, nsLen) == 0) {
+                        //       String8(ns).c_str(), String8(curNs).c_str());
+                        if (memcmp(ns8.c_str(), curNs, nsLen) == 0) {
                             if (kDebugStringPoolNoisy) {
                                 ALOGI("  FOUND!");
                             }
@@ -1390,8 +1632,8 @@ ssize_t ResXMLParser::indexOfAttribute(const char16_t* ns, size_t nsLen,
         } else {
             if (kDebugStringPoolNoisy) {
                 ALOGI("indexOfAttribute UTF16 %s (%zu) / %s (%zu)",
-                        String8(ns, nsLen).string(), nsLen,
-                        String8(attr, attrLen).string(), attrLen);
+                        String8(ns, nsLen).c_str(), nsLen,
+                        String8(attr, attrLen).c_str(), attrLen);
             }
             for (size_t i=0; i<N; i++) {
                 size_t curNsLen = 0, curAttrLen = 0;
@@ -1399,8 +1641,8 @@ ssize_t ResXMLParser::indexOfAttribute(const char16_t* ns, size_t nsLen,
                 const char16_t* curAttr = getAttributeName(i, &curAttrLen);
                 if (kDebugStringPoolNoisy) {
                     ALOGI("  curNs=%s (%zu), curAttr=%s (%zu)",
-                            String8(curNs, curNsLen).string(), curNsLen,
-                            String8(curAttr, curAttrLen).string(), curAttrLen);
+                            String8(curNs, curNsLen).c_str(), curNsLen,
+                            String8(curAttr, curAttrLen).c_str(), curAttrLen);
                 }
                 if (curAttr != NULL && curNsLen == nsLen && curAttrLen == attrLen
                         && (memcmp(attr, curAttr, attrLen*sizeof(char16_t)) == 0)) {
@@ -1413,7 +1655,7 @@ ssize_t ResXMLParser::indexOfAttribute(const char16_t* ns, size_t nsLen,
                         }
                     } else if (curNs != NULL) {
                         //printf(" --> ns=%s, curNs=%s\n",
-                        //       String8(ns).string(), String8(curNs).string());
+                        //       String8(ns).c_str(), String8(curNs).c_str());
                         if (memcmp(ns, curNs, nsLen*sizeof(char16_t)) == 0) {
                             if (kDebugStringPoolNoisy) {
                                 ALOGI("  FOUND!");
@@ -1535,13 +1777,23 @@ void ResXMLParser::setPosition(const ResXMLParser::ResXMLPosition& pos)
     mCurExt = pos.curExt;
 }
 
+void ResXMLParser::setSourceResourceId(const uint32_t resId)
+{
+    mSourceResourceId = resId;
+}
+
+uint32_t ResXMLParser::getSourceResourceId() const
+{
+    return mSourceResourceId;
+}
+
 // --------------------------------------------------------------------
 
 static volatile int32_t gCount = 0;
 
-ResXMLTree::ResXMLTree(const DynamicRefTable* dynamicRefTable)
+ResXMLTree::ResXMLTree(std::shared_ptr<const DynamicRefTable> dynamicRefTable)
     : ResXMLParser(*this)
-    , mDynamicRefTable(dynamicRefTable)
+    , mDynamicRefTable(std::move(dynamicRefTable))
     , mError(NO_INIT), mOwnedData(NULL)
 {
     if (kDebugResXMLTree) {
@@ -1552,7 +1804,7 @@ ResXMLTree::ResXMLTree(const DynamicRefTable* dynamicRefTable)
 
 ResXMLTree::ResXMLTree()
     : ResXMLParser(*this)
-    , mDynamicRefTable(NULL)
+    , mDynamicRefTable(nullptr)
     , mError(NO_INIT), mOwnedData(NULL)
 {
     if (kDebugResXMLTree) {
@@ -1571,13 +1823,21 @@ ResXMLTree::~ResXMLTree()
 
 status_t ResXMLTree::setTo(const void* data, size_t size, bool copyData)
 {
+    const ResChunk_header* chunk = nullptr;
+    const ResChunk_header* lastChunk = nullptr;
+
     uninit();
     mEventCode = START_DOCUMENT;
 
     if (!data || !size) {
         return (mError=BAD_TYPE);
     }
-
+    if (size < sizeof(ResXMLTree_header)) {
+        ALOGW("Bad XML block: total size %d is less than the header size %d\n",
+              int(size), int(sizeof(ResXMLTree_header)));
+        mError = BAD_TYPE;
+        goto done;
+    }
     if (copyData) {
         mOwnedData = malloc(size);
         if (mOwnedData == NULL) {
@@ -1594,9 +1854,15 @@ status_t ResXMLTree::setTo(const void* data, size_t size, bool copyData)
              (int)dtohs(mHeader->header.headerSize),
              (int)dtohl(mHeader->header.size), (int)size);
         mError = BAD_TYPE;
-        restart();
-        return mError;
+        goto done;
     }
+    if (dtohs(mHeader->header.type) != RES_XML_TYPE) {
+        ALOGW("Bad XML block: expected root block type %d, got %d\n",
+            int(RES_XML_TYPE), int(dtohs(mHeader->header.type)));
+        mError = BAD_TYPE;
+        goto done;
+    }
+
     mDataEnd = ((const uint8_t*)mHeader) + mSize;
 
     mStrings.uninit();
@@ -1606,9 +1872,8 @@ status_t ResXMLTree::setTo(const void* data, size_t size, bool copyData)
 
     // First look for a couple interesting chunks: the string block
     // and first XML node.
-    const ResChunk_header* chunk =
-        (const ResChunk_header*)(((const uint8_t*)mHeader) + dtohs(mHeader->header.headerSize));
-    const ResChunk_header* lastChunk = chunk;
+    chunk = (const ResChunk_header*)(((const uint8_t*)mHeader) + dtohs(mHeader->header.headerSize));
+    lastChunk = chunk;
     while (((const uint8_t*)chunk) < (mDataEnd-sizeof(ResChunk_header)) &&
            ((const uint8_t*)chunk) < (mDataEnd-dtohl(chunk->size))) {
         status_t err = validate_chunk(chunk, sizeof(ResChunk_header), mDataEnd, "XML");
@@ -1662,7 +1927,11 @@ status_t ResXMLTree::setTo(const void* data, size_t size, bool copyData)
     mError = mStrings.getError();
 
 done:
-    restart();
+    if (mError) {
+        uninit();
+    } else {
+        restart();
+    }
     return mError;
 }
 
@@ -1868,52 +2137,79 @@ void ResTable_config::swapHtoD() {
 
 /* static */ inline int compareLocales(const ResTable_config &l, const ResTable_config &r) {
     if (l.locale != r.locale) {
-        // NOTE: This is the old behaviour with respect to comparison orders.
-        // The diff value here doesn't make much sense (given our bit packing scheme)
-        // but it's stable, and that's all we need.
-        return l.locale - r.locale;
+        return (l.locale > r.locale) ? 1 : -1;
     }
 
-    // The language & region are equal, so compare the scripts and variants.
+    // The language & region are equal, so compare the scripts, variants and
+    // numbering systms in this order. Comparison of variants and numbering
+    // systems should happen very infrequently (if at all.)
+    // The comparison code relies on memcmp low-level optimizations that make it
+    // more efficient than strncmp.
     const char emptyScript[sizeof(l.localeScript)] = {'\0', '\0', '\0', '\0'};
     const char *lScript = l.localeScriptWasComputed ? emptyScript : l.localeScript;
     const char *rScript = r.localeScriptWasComputed ? emptyScript : r.localeScript;
+
     int script = memcmp(lScript, rScript, sizeof(l.localeScript));
     if (script) {
         return script;
     }
 
-    // The language, region and script are equal, so compare variants.
-    //
-    // This should happen very infrequently (if at all.)
-    return memcmp(l.localeVariant, r.localeVariant, sizeof(l.localeVariant));
+    int variant = memcmp(l.localeVariant, r.localeVariant, sizeof(l.localeVariant));
+    if (variant) {
+        return variant;
+    }
+
+    return memcmp(l.localeNumberingSystem, r.localeNumberingSystem,
+                  sizeof(l.localeNumberingSystem));
 }
 
 int ResTable_config::compare(const ResTable_config& o) const {
-    int32_t diff = (int32_t)(imsi - o.imsi);
-    if (diff != 0) return diff;
-    diff = compareLocales(*this, o);
-    if (diff != 0) return diff;
-    diff = (int32_t)(screenType - o.screenType);
-    if (diff != 0) return diff;
-    diff = (int32_t)(input - o.input);
-    if (diff != 0) return diff;
-    diff = (int32_t)(screenSize - o.screenSize);
-    if (diff != 0) return diff;
-    diff = (int32_t)(version - o.version);
-    if (diff != 0) return diff;
-    diff = (int32_t)(screenLayout - o.screenLayout);
-    if (diff != 0) return diff;
-    diff = (int32_t)(screenLayout2 - o.screenLayout2);
-    if (diff != 0) return diff;
-    diff = (int32_t)(colorMode - o.colorMode);
-    if (diff != 0) return diff;
-    diff = (int32_t)(uiMode - o.uiMode);
-    if (diff != 0) return diff;
-    diff = (int32_t)(smallestScreenWidthDp - o.smallestScreenWidthDp);
-    if (diff != 0) return diff;
-    diff = (int32_t)(screenSizeDp - o.screenSizeDp);
-    return (int)diff;
+    if (imsi != o.imsi) {
+        return (imsi > o.imsi) ? 1 : -1;
+    }
+
+    int32_t diff = compareLocales(*this, o);
+    if (diff < 0) {
+        return -1;
+    }
+    if (diff > 0) {
+        return 1;
+    }
+
+    if (grammaticalInflection != o.grammaticalInflection) {
+        return grammaticalInflection < o.grammaticalInflection ? -1 : 1;
+    }
+    if (screenType != o.screenType) {
+        return (screenType > o.screenType) ? 1 : -1;
+    }
+    if (input != o.input) {
+        return (input > o.input) ? 1 : -1;
+    }
+    if (screenSize != o.screenSize) {
+        return (screenSize > o.screenSize) ? 1 : -1;
+    }
+    if (version != o.version) {
+        return (version > o.version) ? 1 : -1;
+    }
+    if (screenLayout != o.screenLayout) {
+        return (screenLayout > o.screenLayout) ? 1 : -1;
+    }
+    if (screenLayout2 != o.screenLayout2) {
+        return (screenLayout2 > o.screenLayout2) ? 1 : -1;
+    }
+    if (colorMode != o.colorMode) {
+        return (colorMode > o.colorMode) ? 1 : -1;
+    }
+    if (uiMode != o.uiMode) {
+        return (uiMode > o.uiMode) ? 1 : -1;
+    }
+    if (smallestScreenWidthDp != o.smallestScreenWidthDp) {
+        return (smallestScreenWidthDp > o.smallestScreenWidthDp) ? 1 : -1;
+    }
+    if (screenSizeDp != o.screenSizeDp) {
+        return (screenSizeDp > o.screenSizeDp) ? 1 : -1;
+    }
+    return 0;
 }
 
 int ResTable_config::compareLogical(const ResTable_config& o) const {
@@ -1931,7 +2227,9 @@ int ResTable_config::compareLogical(const ResTable_config& o) const {
     if (diff > 0) {
         return 1;
     }
-
+    if (grammaticalInflection != o.grammaticalInflection) {
+        return grammaticalInflection < o.grammaticalInflection ? -1 : 1;
+    }
     if ((screenLayout & MASK_LAYOUTDIR) != (o.screenLayout & MASK_LAYOUTDIR)) {
         return (screenLayout & MASK_LAYOUTDIR) < (o.screenLayout & MASK_LAYOUTDIR) ? -1 : 1;
     }
@@ -2001,11 +2299,28 @@ int ResTable_config::diff(const ResTable_config& o) const {
     if (uiMode != o.uiMode) diffs |= CONFIG_UI_MODE;
     if (smallestScreenWidthDp != o.smallestScreenWidthDp) diffs |= CONFIG_SMALLEST_SCREEN_SIZE;
     if (screenSizeDp != o.screenSizeDp) diffs |= CONFIG_SCREEN_SIZE;
+    if (grammaticalInflection != o.grammaticalInflection) diffs |= CONFIG_GRAMMATICAL_GENDER;
 
     const int diff = compareLocales(*this, o);
     if (diff) diffs |= CONFIG_LOCALE;
 
     return diffs;
+}
+
+// There isn't a well specified "importance" order between variants and
+// scripts. We can't easily tell whether, say "en-Latn-US" is more or less
+// specific than "en-US-POSIX".
+//
+// We therefore arbitrarily decide to give priority to variants over
+// scripts since it seems more useful to do so. We will consider
+// "en-US-POSIX" to be more specific than "en-Latn-US".
+//
+// Unicode extension keywords are considered to be less important than
+// scripts and variants.
+inline int ResTable_config::getImportanceScoreOfLocale() const {
+  return (localeVariant[0] ? 4 : 0)
+      + (localeScript[0] && !localeScriptWasComputed ? 2: 0)
+      + (localeNumberingSystem[0] ? 1: 0);
 }
 
 int ResTable_config::isLocaleMoreSpecificThan(const ResTable_config& o) const {
@@ -2021,21 +2336,7 @@ int ResTable_config::isLocaleMoreSpecificThan(const ResTable_config& o) const {
         }
     }
 
-    // There isn't a well specified "importance" order between variants and
-    // scripts. We can't easily tell whether, say "en-Latn-US" is more or less
-    // specific than "en-US-POSIX".
-    //
-    // We therefore arbitrarily decide to give priority to variants over
-    // scripts since it seems more useful to do so. We will consider
-    // "en-US-POSIX" to be more specific than "en-Latn-US".
-
-    const int score = ((localeScript[0] != '\0' && !localeScriptWasComputed) ? 1 : 0) +
-        ((localeVariant[0] != '\0') ? 2 : 0);
-
-    const int oScore = (o.localeScript[0] != '\0' && !o.localeScriptWasComputed ? 1 : 0) +
-        ((o.localeVariant[0] != '\0') ? 2 : 0);
-
-    return score - oScore;
+    return getImportanceScoreOfLocale() - o.getImportanceScoreOfLocale();
 }
 
 bool ResTable_config::isMoreSpecificThan(const ResTable_config& o) const {
@@ -2062,6 +2363,13 @@ bool ResTable_config::isMoreSpecificThan(const ResTable_config& o) const {
 
         if (diff > 0) {
             return true;
+        }
+    }
+
+    if (grammaticalInflection || o.grammaticalInflection) {
+        if (grammaticalInflection != o.grammaticalInflection) {
+            if (!grammaticalInflection) return false;
+            if (!o.grammaticalInflection) return true;
         }
     }
 
@@ -2292,6 +2600,17 @@ bool ResTable_config::isLocaleBetterThan(const ResTable_config& o,
         return localeMatches;
     }
 
+    // The variants are the same, try numbering system.
+    const bool localeNumsysMatches = strncmp(localeNumberingSystem,
+                                             requested->localeNumberingSystem,
+                                             sizeof(localeNumberingSystem)) == 0;
+    const bool otherNumsysMatches = strncmp(o.localeNumberingSystem,
+                                            requested->localeNumberingSystem,
+                                            sizeof(localeNumberingSystem)) == 0;
+    if (localeNumsysMatches != otherNumsysMatches) {
+        return localeNumsysMatches;
+    }
+
     // Finally, the languages, although equivalent, may still be different
     // (like for Tagalog and Filipino). Identical is better than just
     // equivalent.
@@ -2300,6 +2619,22 @@ bool ResTable_config::isLocaleBetterThan(const ResTable_config& o,
         return true;
     }
 
+    return false;
+}
+
+bool ResTable_config::isBetterThanBeforeLocale(const ResTable_config& o,
+        const ResTable_config* requested) const {
+    if (requested) {
+        if (imsi || o.imsi) {
+            if ((mcc != o.mcc) && requested->mcc) {
+                return (mcc);
+            }
+
+            if ((mnc != o.mnc) && requested->mnc) {
+                return (mnc);
+            }
+        }
+    }
     return false;
 }
 
@@ -2315,9 +2650,17 @@ bool ResTable_config::isBetterThan(const ResTable_config& o,
                 return (mnc);
             }
         }
-
-        if (isLocaleBetterThan(o, requested)) {
+        // Cheaper to check for the empty locales here before calling the function
+        // as we often can skip it completely.
+        if (requested->locale && (locale || o.locale) && isLocaleBetterThan(o, requested)) {
             return true;
+        }
+
+        if (grammaticalInflection || o.grammaticalInflection) {
+            if (grammaticalInflection != o.grammaticalInflection
+                && requested->grammaticalInflection) {
+                return !!grammaticalInflection;
+            }
         }
 
         if (screenLayout || o.screenLayout) {
@@ -2455,30 +2798,27 @@ bool ResTable_config::isBetterThan(const ResTable_config& o,
                 // DENSITY_ANY is now dealt with. We should look to
                 // pick a density bucket and potentially scale it.
                 // Any density is potentially useful
-                // because the system will scale it.  Scaling down
-                // is generally better than scaling up.
+                // because the system will scale it.  Always prefer
+                // scaling down.
                 int h = thisDensity;
                 int l = otherDensity;
                 bool bImBigger = true;
                 if (l > h) {
-                    int t = h;
-                    h = l;
-                    l = t;
+                    std::swap(l, h);
                     bImBigger = false;
                 }
 
-                if (requestedDensity >= h) {
-                    // requested value higher than both l and h, give h
+                if (h == requestedDensity) {
+                    // This handles the case where l == h == requestedDensity.
+                    // In that case, this and o are equally good so both
+                    // true and false are valid. This preserves previous
+                    // behavior.
                     return bImBigger;
-                }
-                if (l >= requestedDensity) {
+                } else if (l >= requestedDensity) {
                     // requested value lower than both l and h, give l
                     return !bImBigger;
-                }
-                // saying that scaling down is 2x better than up
-                if (((2 * l) - requestedDensity) * h > requestedDensity * requestedDensity) {
-                    return !bImBigger;
                 } else {
+                    // otherwise give h
                     return bImBigger;
                 }
             }
@@ -2622,6 +2962,10 @@ bool ResTable_config::match(const ResTable_config& settings) const {
         }
     }
 
+    if (grammaticalInflection && grammaticalInflection != settings.grammaticalInflection) {
+        return false;
+    }
+
     if (screenConfig != 0) {
         const int layoutDir = screenLayout&MASK_LAYOUTDIR;
         const int setLayoutDir = settings.screenLayout&MASK_LAYOUTDIR;
@@ -2759,7 +3103,7 @@ void ResTable_config::appendDirLocale(String8& out) const {
         return;
     }
     const bool scriptWasProvided = localeScript[0] != '\0' && !localeScriptWasComputed;
-    if (!scriptWasProvided && !localeVariant[0]) {
+    if (!scriptWasProvided && !localeVariant[0] && !localeNumberingSystem[0]) {
         // Legacy format.
         if (out.size() > 0) {
             out.append("-");
@@ -2804,6 +3148,12 @@ void ResTable_config::appendDirLocale(String8& out) const {
         out.append("+");
         out.append(localeVariant, strnlen(localeVariant, sizeof(localeVariant)));
     }
+
+    if (localeNumberingSystem[0]) {
+        out.append("+u+nu+");
+        out.append(localeNumberingSystem,
+                   strnlen(localeNumberingSystem, sizeof(localeNumberingSystem)));
+    }
 }
 
 void ResTable_config::getBcp47Locale(char str[RESTABLE_MAX_LOCALE_LEN], bool canonicalize) const {
@@ -2846,15 +3196,119 @@ void ResTable_config::getBcp47Locale(char str[RESTABLE_MAX_LOCALE_LEN], bool can
             str[charsWritten++] = '-';
         }
         memcpy(str + charsWritten, localeVariant, sizeof(localeVariant));
+        charsWritten += strnlen(str + charsWritten, sizeof(localeVariant));
+    }
+
+    // Add Unicode extension only if at least one other locale component is present
+    if (localeNumberingSystem[0] != '\0' && charsWritten > 0) {
+        static constexpr char NU_PREFIX[] = "-u-nu-";
+        static constexpr size_t NU_PREFIX_LEN = sizeof(NU_PREFIX) - 1;
+        memcpy(str + charsWritten, NU_PREFIX, NU_PREFIX_LEN);
+        charsWritten += NU_PREFIX_LEN;
+        memcpy(str + charsWritten, localeNumberingSystem, sizeof(localeNumberingSystem));
     }
 }
 
-/* static */ inline bool assignLocaleComponent(ResTable_config* config,
-        const char* start, size_t size) {
+struct LocaleParserState {
+    enum State : uint8_t {
+        BASE, UNICODE_EXTENSION, IGNORE_THE_REST
+    } parserState;
+    enum UnicodeState : uint8_t {
+        /* Initial state after the Unicode singleton is detected. Either a keyword
+         * or an attribute is expected. */
+        NO_KEY,
+        /* Unicode extension key (but not attribute) is expected. Next states:
+         * NO_KEY, IGNORE_KEY or NUMBERING_SYSTEM. */
+        EXPECT_KEY,
+        /* A key is detected, however it is not supported for now. Ignore its
+         * value. Next states: IGNORE_KEY or NUMBERING_SYSTEM. */
+        IGNORE_KEY,
+        /* Numbering system key was detected. Store its value in the configuration
+         * localeNumberingSystem field. Next state: EXPECT_KEY */
+        NUMBERING_SYSTEM
+    } unicodeState;
+
+    LocaleParserState(): parserState(BASE), unicodeState(NO_KEY) {}
+};
+
+/* static */ inline LocaleParserState assignLocaleComponent(ResTable_config* config,
+        const char* start, size_t size, LocaleParserState state) {
+
+    /* It is assumed that this function is not invoked with state.parserState
+     * set to IGNORE_THE_REST. The condition is checked by setBcp47Locale
+     * function. */
+
+    if (state.parserState == LocaleParserState::UNICODE_EXTENSION) {
+        switch (size) {
+            case 1:
+                /* Other BCP 47 extensions are not supported at the moment */
+                state.parserState = LocaleParserState::IGNORE_THE_REST;
+                break;
+            case 2:
+                if (state.unicodeState == LocaleParserState::NO_KEY ||
+                    state.unicodeState == LocaleParserState::EXPECT_KEY) {
+                    /* Analyze Unicode extension key. Currently only 'nu'
+                     * (numbering system) is supported.*/
+                    if ((start[0] == 'n' || start[0] == 'N') &&
+                        (start[1] == 'u' || start[1] == 'U')) {
+                        state.unicodeState = LocaleParserState::NUMBERING_SYSTEM;
+                    } else {
+                        state.unicodeState = LocaleParserState::IGNORE_KEY;
+                    }
+                } else {
+                    /* Keys are not allowed in other state allowed, ignore the rest. */
+                    state.parserState = LocaleParserState::IGNORE_THE_REST;
+                }
+                break;
+            case 3:
+            case 4:
+            case 5:
+            case 6:
+            case 7:
+            case 8:
+                switch (state.unicodeState) {
+                    case LocaleParserState::NUMBERING_SYSTEM:
+                        /* Accept only the first occurrence of the numbering system. */
+                        if (config->localeNumberingSystem[0] == '\0') {
+                            for (size_t i = 0; i < size; ++i) {
+                               config->localeNumberingSystem[i] = tolower(start[i]);
+                            }
+                            state.unicodeState = LocaleParserState::EXPECT_KEY;
+                        } else {
+                            state.parserState = LocaleParserState::IGNORE_THE_REST;
+                        }
+                        break;
+                    case LocaleParserState::IGNORE_KEY:
+                        /* Unsupported Unicode keyword. Ignore. */
+                        state.unicodeState = LocaleParserState::EXPECT_KEY;
+                        break;
+                    case LocaleParserState::EXPECT_KEY:
+                        /* A keyword followed by an attribute is not allowed. */
+                        state.parserState = LocaleParserState::IGNORE_THE_REST;
+                        break;
+                    case LocaleParserState::NO_KEY:
+                        /* Extension attribute. Do nothing. */
+                        break;
+                    default:
+                        break;
+                }
+                break;
+            default:
+                /* Unexpected field length - ignore the rest and treat as an error */
+                state.parserState = LocaleParserState::IGNORE_THE_REST;
+        }
+        return state;
+    }
 
   switch (size) {
        case 0:
-           return false;
+           state.parserState = LocaleParserState::IGNORE_THE_REST;
+           break;
+       case 1:
+           state.parserState = (start[0] == 'u' || start[0] == 'U')
+                   ? LocaleParserState::UNICODE_EXTENSION
+                   : LocaleParserState::IGNORE_THE_REST;
+           break;
        case 2:
        case 3:
            config->language[0] ? config->packRegion(start) : config->packLanguage(start);
@@ -2869,6 +3323,7 @@ void ResTable_config::getBcp47Locale(char str[RESTABLE_MAX_LOCALE_LEN], bool can
                }
                break;
            }
+           FALLTHROUGH_INTENDED;
        case 5:
        case 6:
        case 7:
@@ -2878,30 +3333,32 @@ void ResTable_config::getBcp47Locale(char str[RESTABLE_MAX_LOCALE_LEN], bool can
            }
            break;
        default:
-           return false;
+           state.parserState = LocaleParserState::IGNORE_THE_REST;
   }
 
-  return true;
+  return state;
 }
 
 void ResTable_config::setBcp47Locale(const char* in) {
-    locale = 0;
-    memset(localeScript, 0, sizeof(localeScript));
-    memset(localeVariant, 0, sizeof(localeVariant));
+    clearLocale();
 
-    const char* separator = in;
     const char* start = in;
-    while ((separator = strchr(start, '-')) != NULL) {
+    LocaleParserState state;
+    while (const char* separator = strchr(start, '-')) {
         const size_t size = separator - start;
-        if (!assignLocaleComponent(this, start, size)) {
-            fprintf(stderr, "Invalid BCP-47 locale string: %s", in);
+        state = assignLocaleComponent(this, start, size, state);
+        if (state.parserState == LocaleParserState::IGNORE_THE_REST) {
+            fprintf(stderr, "Invalid BCP-47 locale string: %s\n", in);
+            break;
         }
-
         start = (separator + 1);
     }
 
-    const size_t size = in + strlen(in) - start;
-    assignLocaleComponent(this, start, size);
+    if (state.parserState != LocaleParserState::IGNORE_THE_REST) {
+        const size_t size = strlen(start);
+        assignLocaleComponent(this, start, size, state);
+    }
+
     localeScriptWasComputed = (localeScript[0] == '\0');
     if (localeScriptWasComputed) {
         computeScript();
@@ -2921,6 +3378,15 @@ String8 ResTable_config::toString() const {
     }
 
     appendDirLocale(res);
+
+    if ((grammaticalInflection & GRAMMATICAL_INFLECTION_GENDER_MASK) != 0) {
+        if (res.size() > 0) res.append("-");
+        switch (grammaticalInflection & GRAMMATICAL_INFLECTION_GENDER_MASK) {
+            case GRAMMATICAL_GENDER_NEUTER: res.append("neuter"); break;
+            case GRAMMATICAL_GENDER_FEMININE: res.append("feminine"); break;
+            case GRAMMATICAL_GENDER_MASCULINE: res.append("masculine"); break;
+        }
+    }
 
     if ((screenLayout&MASK_LAYOUTDIR) != 0) {
         if (res.size() > 0) res.append("-");
@@ -2999,20 +3465,6 @@ String8 ResTable_config::toString() const {
                 break;
         }
     }
-    if ((colorMode&MASK_HDR) != 0) {
-        if (res.size() > 0) res.append("-");
-        switch (colorMode&MASK_HDR) {
-            case ResTable_config::HDR_NO:
-                res.append("lowdr");
-                break;
-            case ResTable_config::HDR_YES:
-                res.append("highdr");
-                break;
-            default:
-                res.appendFormat("hdr=%d", dtohs(colorMode&MASK_HDR));
-                break;
-        }
-    }
     if ((colorMode&MASK_WIDE_COLOR_GAMUT) != 0) {
         if (res.size() > 0) res.append("-");
         switch (colorMode&MASK_WIDE_COLOR_GAMUT) {
@@ -3024,6 +3476,20 @@ String8 ResTable_config::toString() const {
                 break;
             default:
                 res.appendFormat("wideColorGamut=%d", dtohs(colorMode&MASK_WIDE_COLOR_GAMUT));
+                break;
+        }
+    }
+    if ((colorMode&MASK_HDR) != 0) {
+        if (res.size() > 0) res.append("-");
+        switch (colorMode&MASK_HDR) {
+            case ResTable_config::HDR_NO:
+                res.append("lowdr");
+                break;
+            case ResTable_config::HDR_YES:
+                res.append("highdr");
+                break;
+            default:
+                res.appendFormat("hdr=%d", dtohs(colorMode&MASK_HDR));
                 break;
         }
     }
@@ -3290,6 +3756,7 @@ struct ResTable::Package
     ResStringPool                   keyStrings;
 
     size_t                          typeIdOffset;
+    bool                            definesOverlayable = false;
 };
 
 // A group of objects describing a particular resource package.
@@ -3299,13 +3766,14 @@ struct ResTable::PackageGroup
 {
     PackageGroup(
             ResTable* _owner, const String16& _name, uint32_t _id,
-            bool appAsLib, bool _isSystemAsset)
+            bool appAsLib, bool _isSystemAsset, bool _isDynamic)
         : owner(_owner)
         , name(_name)
         , id(_id)
         , largestTypeId(0)
         , dynamicRefTable(static_cast<uint8_t>(_id), appAsLib)
         , isSystemAsset(_isSystemAsset)
+        , isDynamic(_isDynamic)
     { }
 
     ~PackageGroup() {
@@ -3372,9 +3840,10 @@ struct ResTable::PackageGroup
     ssize_t findType16(const char16_t* type, size_t len) const {
         const size_t N = packages.size();
         for (size_t i = 0; i < N; i++) {
-            ssize_t index = packages[i]->typeStrings.indexOfString(type, len);
-            if (index >= 0) {
-                return index + packages[i]->typeIdOffset;
+            const base::expected<size_t, NullOrIOError> index =
+                packages[i]->typeStrings.indexOfString(type, len);
+            if (index.has_value()) {
+                return *index + packages[i]->typeIdOffset;
             }
         }
         return -1;
@@ -3409,6 +3878,7 @@ struct ResTable::PackageGroup
     // If the package group comes from a system asset. Used in
     // determining non-system locales.
     const bool                      isSystemAsset;
+    const bool isDynamic;
 };
 
 ResTable::Theme::Theme(const ResTable& table)
@@ -3777,6 +4247,11 @@ inline ssize_t ResTable::getResourcePackageIndex(uint32_t resID) const
     return ((ssize_t)mPackageMap[Res_GETPACKAGE(resID)+1])-1;
 }
 
+inline ssize_t ResTable::getResourcePackageIndexFromPackage(uint8_t packageID) const
+{
+    return ((ssize_t)mPackageMap[packageID])-1;
+}
+
 status_t ResTable::add(const void* data, size_t size, const int32_t cookie, bool copyData) {
     return addInternal(data, size, NULL, 0, false, cookie, copyData);
 }
@@ -3832,7 +4307,7 @@ status_t ResTable::add(ResTable* src, bool isSystemAsset)
     for (size_t i=0; i < src->mPackageGroups.size(); i++) {
         PackageGroup* srcPg = src->mPackageGroups[i];
         PackageGroup* pg = new PackageGroup(this, srcPg->name, srcPg->id,
-                false /* appAsLib */, isSystemAsset || srcPg->isSystemAsset);
+                false /* appAsLib */, isSystemAsset || srcPg->isSystemAsset, srcPg->isDynamic);
         for (size_t j=0; j<srcPg->packages.size(); j++) {
             pg->packages.add(srcPg->packages[j]);
         }
@@ -4071,24 +4546,24 @@ bool ResTable::getResourceName(uint32_t resID, bool allowUtf8, resource_name* ou
         return false;
     }
 
-    outName->package = grp->name.string();
+    outName->package = grp->name.c_str();
     outName->packageLen = grp->name.size();
     if (allowUtf8) {
-        outName->type8 = entry.typeStr.string8(&outName->typeLen);
-        outName->name8 = entry.keyStr.string8(&outName->nameLen);
+        outName->type8 = UnpackOptionalString(entry.typeStr.string8(), &outName->typeLen);
+        outName->name8 = UnpackOptionalString(entry.keyStr.string8(), &outName->nameLen);
     } else {
         outName->type8 = NULL;
         outName->name8 = NULL;
     }
     if (outName->type8 == NULL) {
-        outName->type = entry.typeStr.string16(&outName->typeLen);
+        outName->type = UnpackOptionalString(entry.typeStr.string16(), &outName->typeLen);
         // If we have a bad index for some reason, we should abort.
         if (outName->type == NULL) {
             return false;
         }
     }
     if (outName->name8 == NULL) {
-        outName->name = entry.keyStr.string16(&outName->nameLen);
+        outName->name = UnpackOptionalString(entry.keyStr.string16(), &outName->nameLen);
         // If we have a bad index for some reason, we should abort.
         if (outName->name == NULL) {
             return false;
@@ -4146,20 +4621,14 @@ ssize_t ResTable::getResource(uint32_t resID, Res_value* outValue, bool mayBeBag
         return err;
     }
 
-    if ((dtohs(entry.entry->flags) & ResTable_entry::FLAG_COMPLEX) != 0) {
+    if (entry.entry->map_entry()) {
         if (!mayBeBag) {
             ALOGW("Requesting resource 0x%08x failed because it is complex\n", resID);
         }
         return BAD_VALUE;
     }
 
-    const Res_value* value = reinterpret_cast<const Res_value*>(
-            reinterpret_cast<const uint8_t*>(entry.entry) + entry.entry->size);
-
-    outValue->size = dtohs(value->size);
-    outValue->res0 = value->res0;
-    outValue->dataType = value->dataType;
-    outValue->data = dtohl(value->data);
+    *outValue = entry.entry->value();
 
     // The reference may be pointing to a resource in a shared library. These
     // references have build-time generated package IDs. These ids may not match
@@ -4176,7 +4645,8 @@ ssize_t ResTable::getResource(uint32_t resID, Res_value* outValue, bool mayBeBag
                 entry.package->header->index,
                 outValue->dataType,
                 outValue->dataType == Res_value::TYPE_STRING ?
-                    String8(entry.package->header->values.stringAt(outValue->data, &len)).string() :
+                    String8(UnpackOptionalString(
+                        entry.package->header->values.stringAt(outValue->data), &len)).c_str() :
                     "",
                 outValue->data);
     }
@@ -4232,7 +4702,8 @@ const char16_t* ResTable::valueToString(
         return NULL;
     }
     if (value->dataType == value->TYPE_STRING) {
-        return getTableStringBlock(stringBlock)->stringAt(value->data, outLen);
+        return UnpackOptionalString(getTableStringBlock(stringBlock)->stringAt(value->data),
+                                    outLen);
     }
     // XXX do int to string conversions.
     return NULL;
@@ -4348,11 +4819,10 @@ ssize_t ResTable::getBagLocked(uint32_t resID, const bag_entry** outBag,
         return err;
     }
 
-    const uint16_t entrySize = dtohs(entry.entry->size);
-    const uint32_t parent = entrySize >= sizeof(ResTable_map_entry)
-        ? dtohl(((const ResTable_map_entry*)entry.entry)->parent.ident) : 0;
-    const uint32_t count = entrySize >= sizeof(ResTable_map_entry)
-        ? dtohl(((const ResTable_map_entry*)entry.entry)->count) : 0;
+    const uint16_t entrySize = entry.entry->size();
+    const ResTable_map_entry* map_entry = entry.entry->map_entry();
+    const uint32_t parent = map_entry ? dtohl(map_entry->parent.ident) : 0;
+    const uint32_t count = map_entry ? dtohl(map_entry->count) : 0;
 
     size_t N = count;
 
@@ -4416,7 +4886,7 @@ ssize_t ResTable::getBagLocked(uint32_t resID, const bag_entry** outBag,
 
     // Now merge in the new attributes...
     size_t curOff = (reinterpret_cast<uintptr_t>(entry.entry) - reinterpret_cast<uintptr_t>(entry.type))
-        + dtohs(entry.entry->size);
+        + entrySize;
     const ResTable_map* map;
     bag_entry* entries = (bag_entry*)(set+1);
     size_t curEntry = 0;
@@ -4545,7 +5015,7 @@ void ResTable::setParameters(const ResTable_config* params)
     AutoMutex _lock2(mFilteredConfigLock);
 
     if (kDebugTableGetEntry) {
-        ALOGI("Setting parameters: %s\n", params->toString().string());
+        ALOGI("Setting parameters: %s\n", params->toString().c_str());
     }
     mParams = *params;
     for (size_t p = 0; p < mPackageGroups.size(); p++) {
@@ -4556,7 +5026,7 @@ void ResTable::setParameters(const ResTable_config* params)
         packageGroup->clearBagCache();
 
         // Find which configurations match the set of parameters. This allows for a much
-        // faster lookup in getEntry() if the set of values is narrowed down.
+        // faster lookup in Lookup() if the set of values is narrowed down.
         for (size_t t = 0; t < packageGroup->types.size(); t++) {
             if (packageGroup->types[t].isEmpty()) {
                 continue;
@@ -4656,7 +5126,7 @@ nope:
             if (name[1] == 'i' && name[2] == 'n'
                 && name[3] == 'd' && name[4] == 'e' && name[5] == 'x'
                 && name[6] == '_') {
-                int index = atoi(String8(name + 7, nameLen - 7).string());
+                int index = atoi(String8(name + 7, nameLen - 7).c_str());
                 if (Res_CHECKID(index)) {
                     ALOGW("Array resource index: %d is too large.",
                          index);
@@ -4722,9 +5192,9 @@ nope:
 
     if (kDebugTableNoisy) {
         printf("Looking for identifier: type=%s, name=%s, package=%s\n",
-                String8(type, typeLen).string(),
-                String8(name, nameLen).string(),
-                String8(package, packageLen).string());
+                String8(type, typeLen).c_str(),
+                String8(name, nameLen).c_str(),
+                String8(package, packageLen).c_str());
     }
 
     const String16 attr("attr");
@@ -4735,9 +5205,9 @@ nope:
         const PackageGroup* group = mPackageGroups[ig];
 
         if (strzcmp16(package, packageLen,
-                      group->name.string(), group->name.size())) {
+                      group->name.c_str(), group->name.size())) {
             if (kDebugTableNoisy) {
-                printf("Skipping package group: %s\n", String8(group->name).string());
+                printf("Skipping package group: %s\n", String8(group->name).c_str());
             }
             continue;
         }
@@ -4748,15 +5218,13 @@ nope:
             size_t targetTypeLen = typeLen;
 
             do {
-                ssize_t ti = group->packages[pi]->typeStrings.indexOfString(
-                        targetType, targetTypeLen);
-                if (ti < 0) {
+                auto ti = group->packages[pi]->typeStrings.indexOfString(targetType, targetTypeLen);
+                if (!ti.has_value()) {
                     continue;
                 }
 
-                ti += group->packages[pi]->typeIdOffset;
-
-                const uint32_t identifier = findEntry(group, ti, name, nameLen,
+                *ti += group->packages[pi]->typeIdOffset;
+                const uint32_t identifier = findEntry(group, *ti, name, nameLen,
                         outTypeSpecFlags);
                 if (identifier != 0) {
                     if (fakePublic && outTypeSpecFlags) {
@@ -4764,8 +5232,8 @@ nope:
                     }
                     return identifier;
                 }
-            } while (strzcmp16(attr.string(), attr.size(), targetType, targetTypeLen) == 0
-                    && (targetType = attrPrivate.string())
+            } while (strzcmp16(attr.c_str(), attr.size(), targetType, targetTypeLen) == 0
+                    && (targetType = attrPrivate.c_str())
                     && (targetTypeLen = attrPrivate.size())
             );
         }
@@ -4779,8 +5247,9 @@ uint32_t ResTable::findEntry(const PackageGroup* group, ssize_t typeIndex, const
     const size_t typeCount = typeList.size();
     for (size_t i = 0; i < typeCount; i++) {
         const Type* t = typeList[i];
-        const ssize_t ei = t->package->keyStrings.indexOfString(name, nameLen);
-        if (ei < 0) {
+        const base::expected<size_t, NullOrIOError> ei =
+            t->package->keyStrings.indexOfString(name, nameLen);
+        if (!ei.has_value()) {
             continue;
         }
 
@@ -4795,7 +5264,7 @@ uint32_t ResTable::findEntry(const PackageGroup* group, ssize_t typeIndex, const
                     continue;
                 }
 
-                if (dtohl(entry->key.index) == (size_t) ei) {
+                if (entry->key() == (size_t) *ei) {
                     uint32_t resId = Res_MAKEID(group->id - 1, typeIndex, iter.index());
                     if (outTypeSpecFlags) {
                         Entry result;
@@ -4872,19 +5341,19 @@ bool ResTable::expandResourceRef(const char16_t* refStr, size_t refLen,
         *outType = *defType;
     }
     *outName = String16(p, end-p);
-    if(**outPackage == 0) {
+    if(outPackage->empty()) {
         if(outErrorMsg) {
             *outErrorMsg = "Resource package cannot be an empty string";
         }
         return false;
     }
-    if(**outType == 0) {
+    if(outType->empty()) {
         if(outErrorMsg) {
             *outErrorMsg = "Resource type cannot be an empty string";
         }
         return false;
     }
-    if(**outName == 0) {
+    if(outName->empty()) {
         if(outErrorMsg) {
             *outErrorMsg = "Resource id cannot be an empty string";
         }
@@ -5055,37 +5524,66 @@ bool ResTable::stringToInt(const char16_t* s, size_t len, Res_value* outValue)
     return U16StringToInt(s, len, outValue);
 }
 
-bool ResTable::stringToFloat(const char16_t* s, size_t len, Res_value* outValue)
-{
-    while (len > 0 && isspace16(*s)) {
-        s++;
-        len--;
+template <typename T>
+bool parseFloatingPoint(const char16_t* inBuf, size_t inLen, char* tempBuf,
+                                  const char** outEnd, T& out){
+    while (inLen > 0 && isspace16(*inBuf)) {
+        inBuf++;
+        inLen--;
     }
 
-    if (len <= 0) {
+    if (inLen <= 0) {
         return false;
     }
 
-    char buf[128];
     int i=0;
-    while (len > 0 && *s != 0 && i < 126) {
-        if (*s > 255) {
+    while (inLen > 0 && *inBuf != 0 && i < 126) {
+        if (*inBuf > 255) {
             return false;
         }
-        buf[i++] = *s++;
-        len--;
+        tempBuf[i++] = *inBuf++;
+        inLen--;
     }
 
-    if (len > 0) {
+    if (inLen > 0) {
         return false;
     }
-    if ((buf[0] < '0' || buf[0] > '9') && buf[0] != '.' && buf[0] != '-' && buf[0] != '+') {
+    if ((tempBuf[0] < '0' || tempBuf[0] > '9') && tempBuf[0] != '.' && tempBuf[0] != '-' && tempBuf[0] != '+') {
         return false;
     }
 
-    buf[i] = 0;
-    const char* end;
-    float f = strtof(buf, (char**)&end);
+    tempBuf[i] = 0;
+    if constexpr(std::is_same_v<T, float>) {
+        out = strtof(tempBuf, (char**)outEnd);
+    } else {
+        out = strtod(tempBuf, (char**)outEnd);
+    }
+    return true;
+}
+
+bool ResTable::stringToDouble(const char16_t* s, size_t len, double& d){
+    char buf[128];
+    const char* end = nullptr;
+    if (!parseFloatingPoint(s, len, buf, &end, d)) {
+        return false;
+    }
+
+    while (*end != 0 && isspace((unsigned char)*end)) {
+        end++;
+    }
+
+    return *end == 0;
+}
+
+bool ResTable::stringToFloat(const char16_t* s, size_t len, Res_value* outValue)
+{
+    char buf[128];
+    const char* end = nullptr;
+    float f;
+
+    if (!parseFloatingPoint(s, len, buf, &end, f)) {
+        return false;
+    }
 
     if (*end != 0 && !isspace((unsigned char)*end)) {
         // Might be a unit...
@@ -5183,7 +5681,7 @@ bool ResTable::stringToValue(Res_value* outValue, String16* outString,
         }
     }
 
-    //printf("Value for: %s\n", String8(s, len).string());
+    //printf("Value for: %s\n", String8(s, len).c_str());
 
     uint32_t l10nReq = ResTable_map::L10N_NOT_REQUIRED;
     uint32_t attrMin = 0x80000000, attrMax = 0x7fffffff;
@@ -5238,7 +5736,7 @@ bool ResTable::stringToValue(Res_value* outValue, String16* outString,
         // be to any other type; we just need to count on the client making
         // sure the referenced type is correct.
 
-        //printf("Looking up ref: %s\n", String8(s, len).string());
+        //printf("Looking up ref: %s\n", String8(s, len).c_str());
 
         // It's a reference!
         if (len == 5 && s[1]=='n' && s[2]=='u' && s[3]=='l' && s[4]=='l') {
@@ -5278,8 +5776,8 @@ bool ResTable::stringToValue(Res_value* outValue, String16* outString,
             }
 
             uint32_t specFlags = 0;
-            uint32_t rid = identifierForName(name.string(), name.size(), type.string(),
-                    type.size(), package.string(), package.size(), &specFlags);
+            uint32_t rid = identifierForName(name.c_str(), name.size(), type.c_str(),
+                    type.size(), package.c_str(), package.size(), &specFlags);
             if (rid != 0) {
                 if (enforcePrivate) {
                     if (accessor == NULL || accessor->getAssetsPackage() != package) {
@@ -5298,8 +5796,8 @@ bool ResTable::stringToValue(Res_value* outValue, String16* outString,
                         Res_GETTYPE(rid), Res_GETENTRY(rid));
                     if (kDebugTableNoisy) {
                         ALOGI("Incl %s:%s/%s: 0x%08x\n",
-                                String8(package).string(), String8(type).string(),
-                                String8(name).string(), rid);
+                                String8(package).c_str(), String8(type).c_str(),
+                                String8(name).c_str(), rid);
                     }
                 }
 
@@ -5317,8 +5815,8 @@ bool ResTable::stringToValue(Res_value* outValue, String16* outString,
                 if (rid != 0) {
                     if (kDebugTableNoisy) {
                         ALOGI("Pckg %s:%s/%s: 0x%08x\n",
-                                String8(package).string(), String8(type).string(),
-                                String8(name).string(), rid);
+                                String8(package).c_str(), String8(type).c_str(),
+                                String8(name).c_str(), rid);
                     }
                     uint32_t packageId = Res_GETPACKAGE(rid) + 1;
                     if (packageId == 0x00) {
@@ -5407,7 +5905,7 @@ bool ResTable::stringToValue(Res_value* outValue, String16* outString,
                 }
             } else {
                 outValue->data = color;
-                //printf("Color input=%s, output=0x%x\n", String8(s, len).string(), color);
+                //printf("Color input=%s, output=0x%x\n", String8(s, len).c_str(), color);
                 return true;
             }
         } else {
@@ -5419,8 +5917,8 @@ bool ResTable::stringToValue(Res_value* outValue, String16* outString,
                 #if 0
                 fprintf(stderr, "%s: Color ID %s value %s is not valid\n",
                         "Resource File", //(const char*)in->getPrintableSource(),
-                        String8(*curTag).string(),
-                        String8(s, len).string());
+                        String8(*curTag).c_str(),
+                        String8(s, len).c_str());
                 #endif
                 return false;
             }
@@ -5434,7 +5932,7 @@ bool ResTable::stringToValue(Res_value* outValue, String16* outString,
         // be to any other type; we just need to count on the client making
         // sure the referenced type is correct.
 
-        //printf("Looking up attr: %s\n", String8(s, len).string());
+        //printf("Looking up attr: %s\n", String8(s, len).c_str());
 
         static const String16 attr16("attr");
         String16 package, type, name;
@@ -5447,13 +5945,13 @@ bool ResTable::stringToValue(Res_value* outValue, String16* outString,
         }
 
         //printf("Pkg: %s, Type: %s, Name: %s\n",
-        //       String8(package).string(), String8(type).string(),
-        //       String8(name).string());
+        //       String8(package).c_str(), String8(type).c_str(),
+        //       String8(name).c_str());
         uint32_t specFlags = 0;
         uint32_t rid =
-            identifierForName(name.string(), name.size(),
-                              type.string(), type.size(),
-                              package.string(), package.size(), &specFlags);
+            identifierForName(name.c_str(), name.size(),
+                              type.c_str(), type.size(),
+                              package.c_str(), package.size(), &specFlags);
         if (rid != 0) {
             if (enforcePrivate) {
                 if ((specFlags&ResTable_typeSpec::SPEC_PUBLIC) == 0) {
@@ -5611,8 +6109,8 @@ bool ResTable::stringToValue(Res_value* outValue, String16* outString,
                     if (getResourceName(bag->map.name.ident, false, &rname)) {
                         #if 0
                         printf("Matching %s against %s (0x%08x)\n",
-                               String8(s, len).string(),
-                               String8(rname.name, rname.nameLen).string(),
+                               String8(s, len).c_str(),
+                               String8(rname.name, rname.nameLen).c_str(),
                                bag->map.name.ident);
                         #endif
                         if (strzcmp16(s, len, rname.name, rname.nameLen) == 0) {
@@ -5655,7 +6153,7 @@ bool ResTable::stringToValue(Res_value* outValue, String16* outString,
                 while (pos < end && *pos != '|') {
                     pos++;
                 }
-                //printf("Looking for: %s\n", String8(start, pos-start).string());
+                //printf("Looking for: %s\n", String8(start, pos-start).c_str());
                 const bag_entry* bagi = bag;
                 ssize_t i;
                 for (i=0; i<cnt; i++, bagi++) {
@@ -5664,8 +6162,8 @@ bool ResTable::stringToValue(Res_value* outValue, String16* outString,
                         if (getResourceName(bagi->map.name.ident, false, &rname)) {
                             #if 0
                             printf("Matching %s against %s (0x%08x)\n",
-                                   String8(start,pos-start).string(),
-                                   String8(rname.name, rname.nameLen).string(),
+                                   String8(start,pos-start).c_str(),
+                                   String8(rname.name, rname.nameLen).c_str(),
                                    bagi->map.name.ident);
                             #endif
                             if (strzcmp16(start, pos-start, rname.name, rname.nameLen) == 0) {
@@ -5848,13 +6346,13 @@ bool ResTable::collectString(String16* outString,
         if (append) {
             outString->append(tmp);
         } else {
-            outString->setTo(tmp);
+            *outString = tmp;
         }
     } else {
         if (append) {
             outString->append(String16(s, len));
         } else {
-            outString->setTo(s, len);
+            *outString = String16(s, len);
         }
     }
 
@@ -5957,8 +6455,9 @@ void ResTable::forEachConfiguration(bool ignoreMipmap, bool ignoreAndroidPackage
             for (size_t k = 0; k < numTypes; k++) {
                 const Type* type = typeList[k];
                 const ResStringPool& typeStrings = type->package->typeStrings;
-                if (ignoreMipmap && typeStrings.string8ObjectAt(
-                            type->typeSpec->id - 1) == "mipmap") {
+                const base::expected<String8, NullOrIOError> typeStr = typeStrings.string8ObjectAt(
+                    type->typeSpec->id - 1);
+                if (ignoreMipmap && typeStr.has_value() && *typeStr == "mipmap") {
                     continue;
                 }
 
@@ -5991,7 +6490,7 @@ void ResTable::getConfigurations(Vector<ResTable_config>* configs, bool ignoreMi
 }
 
 static bool compareString8AndCString(const String8& str, const char* cStr) {
-    return strcmp(str.string(), cStr) < 0;
+    return strcmp(str.c_str(), cStr) < 0;
 }
 
 void ResTable::getLocales(Vector<String8>* locales, bool includeSystemLocales,
@@ -6005,7 +6504,7 @@ void ResTable::getLocales(Vector<String8>* locales, bool includeSystemLocales,
         const auto endIter = locales->end();
 
         auto iter = std::lower_bound(beginIter, endIter, locale, compareString8AndCString);
-        if (iter == endIter || strcmp(iter->string(), locale) != 0) {
+        if (iter == endIter || strcmp(iter->c_str(), locale) != 0) {
             locales->insertAt(String8(locale), std::distance(beginIter, iter));
         }
     });
@@ -6014,27 +6513,18 @@ void ResTable::getLocales(Vector<String8>* locales, bool includeSystemLocales,
 StringPoolRef::StringPoolRef(const ResStringPool* pool, uint32_t index)
     : mPool(pool), mIndex(index) {}
 
-StringPoolRef::StringPoolRef()
-    : mPool(NULL), mIndex(0) {}
-
-const char* StringPoolRef::string8(size_t* outLen) const {
-    if (mPool != NULL) {
-        return mPool->string8At(mIndex, outLen);
+base::expected<StringPiece, NullOrIOError> StringPoolRef::string8() const {
+    if (LIKELY(mPool != NULL)) {
+        return mPool->string8At(mIndex);
     }
-    if (outLen != NULL) {
-        *outLen = 0;
-    }
-    return NULL;
+    return base::unexpected(std::nullopt);
 }
 
-const char16_t* StringPoolRef::string16(size_t* outLen) const {
-    if (mPool != NULL) {
-        return mPool->stringAt(mIndex, outLen);
+base::expected<StringPiece16, NullOrIOError> StringPoolRef::string16() const {
+    if (LIKELY(mPool != NULL)) {
+        return mPool->stringAt(mIndex);
     }
-    if (outLen != NULL) {
-        *outLen = 0;
-    }
-    return NULL;
+    return base::unexpected(std::nullopt);
 }
 
 bool ResTable::getResourceFlags(uint32_t resID, uint32_t* outFlags) const {
@@ -6073,6 +6563,68 @@ bool ResTable::getResourceFlags(uint32_t resID, uint32_t* outFlags) const {
 
     *outFlags = entry.specFlags;
     return true;
+}
+
+bool ResTable::isPackageDynamic(uint8_t packageID) const {
+  if (mError != NO_ERROR) {
+      return false;
+  }
+  if (packageID == 0) {
+      ALOGW("Invalid package number 0x%08x", packageID);
+      return false;
+  }
+
+  const ssize_t p = getResourcePackageIndexFromPackage(packageID);
+
+  if (p < 0) {
+      ALOGW("Unknown package number 0x%08x", packageID);
+      return false;
+  }
+
+  const PackageGroup* const grp = mPackageGroups[p];
+  if (grp == NULL) {
+      ALOGW("Bad identifier for package number 0x%08x", packageID);
+      return false;
+  }
+
+  return grp->isDynamic;
+}
+
+bool ResTable::isResourceDynamic(uint32_t resID) const {
+    if (mError != NO_ERROR) {
+        return false;
+    }
+
+    const ssize_t p = getResourcePackageIndex(resID);
+    const int t = Res_GETTYPE(resID);
+    const int e = Res_GETENTRY(resID);
+
+    if (p < 0) {
+        if (Res_GETPACKAGE(resID)+1 == 0) {
+            ALOGW("No package identifier for resource number 0x%08x", resID);
+        } else {
+            ALOGW("No known package for resource number 0x%08x", resID);
+        }
+        return false;
+    }
+    if (t < 0) {
+        ALOGW("No type identifier for resource number 0x%08x", resID);
+        return false;
+    }
+
+    const PackageGroup* const grp = mPackageGroups[p];
+    if (grp == NULL) {
+        ALOGW("Bad identifier for resource number 0x%08x", resID);
+        return false;
+    }
+
+    Entry entry;
+    status_t err = getEntry(grp, t, e, NULL, &entry);
+    if (err != NO_ERROR) {
+        return false;
+    }
+
+    return grp->isDynamic;
 }
 
 static bool keyCompare(const ResTable_sparseTypeEntry& entry , uint16_t entryIdx) {
@@ -6204,8 +6756,12 @@ status_t ResTable::getEntry(
                     // Entry does not exist.
                     continue;
                 }
-
-                thisOffset = dtohl(eindex[realEntryIndex]);
+                if (thisType->flags & ResTable_type::FLAG_OFFSET16) {
+                    auto eindex16 = reinterpret_cast<const uint16_t*>(eindex);
+                    thisOffset = offset_from16(eindex16[realEntryIndex]);
+                } else {
+                    thisOffset = dtohl(eindex[realEntryIndex]);
+                }
             }
 
             if (thisOffset == ResTable_type::NO_ENTRY) {
@@ -6255,8 +6811,8 @@ status_t ResTable::getEntry(
 
     const ResTable_entry* const entry = reinterpret_cast<const ResTable_entry*>(
             reinterpret_cast<const uint8_t*>(bestType) + bestOffset);
-    if (dtohs(entry->size) < sizeof(*entry)) {
-        ALOGW("ResTable_entry size 0x%x is too small", dtohs(entry->size));
+    if (entry->size() < sizeof(*entry)) {
+        ALOGW("ResTable_entry size 0x%zx is too small", entry->size());
         return BAD_TYPE;
     }
 
@@ -6267,7 +6823,7 @@ status_t ResTable::getEntry(
         outEntry->specFlags = specFlags;
         outEntry->package = bestPackage;
         outEntry->typeStr = StringPoolRef(&bestPackage->typeStrings, actualTypeIndex - bestPackage->typeIdOffset);
-        outEntry->keyStr = StringPoolRef(&bestPackage->keyStrings, dtohl(entry->key.index));
+        outEntry->keyStr = StringPoolRef(&bestPackage->keyStrings, entry->key());
     }
     return NO_ERROR;
 }
@@ -6318,12 +6874,14 @@ status_t ResTable::parsePackage(const ResTable_package* const pkg,
         id = targetPackageId;
     }
 
+    bool isDynamic = false;
     if (id >= 256) {
         LOG_ALWAYS_FATAL("Package id out of range");
         return NO_ERROR;
     } else if (id == 0 || (id == 0x7f && appAsLib) || isSystemAsset) {
         // This is a library or a system asset, so assign an ID
         id = mNextPackageId++;
+        isDynamic = true;
     }
 
     PackageGroup* group = NULL;
@@ -6351,10 +6909,9 @@ status_t ResTable::parsePackage(const ResTable_package* const pkg,
     size_t idx = mPackageMap[id];
     if (idx == 0) {
         idx = mPackageGroups.size() + 1;
-
         char16_t tmpName[sizeof(pkg->name)/sizeof(pkg->name[0])];
         strcpy16_dtoh(tmpName, pkg->name, sizeof(pkg->name)/sizeof(pkg->name[0]));
-        group = new PackageGroup(this, String16(tmpName), id, appAsLib, isSystemAsset);
+        group = new PackageGroup(this, String16(tmpName), id, appAsLib, isSystemAsset, isDynamic);
         if (group == NULL) {
             delete package;
             return (mError=NO_MEMORY);
@@ -6483,7 +7040,8 @@ status_t ResTable::parsePackage(const ResTable_package* const pkg,
 
             const uint32_t typeSize = dtohl(type->header.size);
             const size_t newEntryCount = dtohl(type->entryCount);
-
+            const size_t entrySize = type->flags & ResTable_type::FLAG_OFFSET16 ?
+                                       sizeof(uint16_t) : sizeof(uint32_t);
             if (kDebugLoadTableNoisy) {
                 printf("Type off %p: type=0x%x, headerSize=0x%x, size=%u\n",
                         (void*)(base-(const uint8_t*)chunk),
@@ -6491,9 +7049,9 @@ status_t ResTable::parsePackage(const ResTable_package* const pkg,
                         dtohs(type->header.headerSize),
                         typeSize);
             }
-            if (dtohs(type->header.headerSize)+(sizeof(uint32_t)*newEntryCount) > typeSize) {
+            if (dtohs(type->header.headerSize)+(entrySize*newEntryCount) > typeSize) {
                 ALOGW("ResTable_type entry index to %p extends beyond chunk end 0x%x.",
-                        (void*)(dtohs(type->header.headerSize) + (sizeof(uint32_t)*newEntryCount)),
+                        (void*)(dtohs(type->header.headerSize) + (entrySize*newEntryCount)),
                         typeSize);
                 return (mError=BAD_TYPE);
             }
@@ -6543,7 +7101,7 @@ status_t ResTable::parsePackage(const ResTable_package* const pkg,
                         ResTable_config thisConfig;
                         thisConfig.copyFromDtoH(type->config);
                         ALOGI("Adding config to type %d: %s\n", type->id,
-                                thisConfig.toString().string());
+                                thisConfig.toString().c_str());
                     }
                 }
             } else {
@@ -6551,8 +7109,16 @@ status_t ResTable::parsePackage(const ResTable_package* const pkg,
             }
 
         } else if (ctype == RES_TABLE_LIBRARY_TYPE) {
+
             if (group->dynamicRefTable.entries().size() == 0) {
-                status_t err = group->dynamicRefTable.load((const ResTable_lib_header*) chunk);
+                const ResTable_lib_header* lib = (const ResTable_lib_header*) chunk;
+                status_t err = validate_chunk(&lib->header, sizeof(*lib),
+                                              endPos, "ResTable_lib_header");
+                if (err != NO_ERROR) {
+                    return (mError=err);
+                }
+
+                err = group->dynamicRefTable.load(lib);
                 if (err != NO_ERROR) {
                     return (mError=err);
                 }
@@ -6566,6 +7132,10 @@ status_t ResTable::parsePackage(const ResTable_package* const pkg,
                 ALOGW("Found multiple library tables, ignoring...");
             }
         } else {
+            if (ctype == RES_TABLE_OVERLAYABLE_TYPE) {
+                package->definesOverlayable = true;
+            }
+
             status_t err = validate_chunk(chunk, sizeof(ResChunk_header),
                                           endPos, "ResTable_package:unknown");
             if (err != NO_ERROR) {
@@ -6582,11 +7152,10 @@ status_t ResTable::parsePackage(const ResTable_package* const pkg,
 DynamicRefTable::DynamicRefTable() : DynamicRefTable(0, false) {}
 
 DynamicRefTable::DynamicRefTable(uint8_t packageId, bool appAsLib)
-    : mAssignedPackageId(packageId)
+    : mLookupTable()
+    , mAssignedPackageId(packageId)
     , mAppAsLib(appAsLib)
 {
-    memset(mLookupTable, 0, sizeof(mLookupTable));
-
     // Reserved package ids
     mLookupTable[APP_PACKAGE_ID] = APP_PACKAGE_ID;
     mLookupTable[SYS_PACKAGE_ID] = SYS_PACKAGE_ID;
@@ -6595,9 +7164,8 @@ DynamicRefTable::DynamicRefTable(uint8_t packageId, bool appAsLib)
 status_t DynamicRefTable::load(const ResTable_lib_header* const header)
 {
     const uint32_t entryCount = dtohl(header->count);
-    const uint32_t sizeOfEntries = sizeof(ResTable_lib_entry) * entryCount;
     const uint32_t expectedSize = dtohl(header->header.size) - dtohl(header->header.headerSize);
-    if (sizeOfEntries > expectedSize) {
+    if (entryCount > (expectedSize / sizeof(ResTable_lib_entry))) {
         ALOGE("ResTable_lib_header size %u is too small to fit %u entries (x %u).",
                 expectedSize, entryCount, (uint32_t)sizeof(ResTable_lib_entry));
         return UNKNOWN_ERROR;
@@ -6610,7 +7178,7 @@ status_t DynamicRefTable::load(const ResTable_lib_header* const header)
         char16_t tmpName[sizeof(entry->packageName) / sizeof(char16_t)];
         strcpy16_dtoh(tmpName, entry->packageName, sizeof(entry->packageName) / sizeof(char16_t));
         if (kDebugLibNoisy) {
-            ALOGV("Found lib entry %s with id %d\n", String8(tmpName).string(),
+            ALOGV("Found lib entry %s with id %d\n", String8(tmpName).c_str(),
                     dtohl(entry->packageId));
         }
         if (packageId >= 256) {
@@ -6632,7 +7200,7 @@ status_t DynamicRefTable::addMappings(const DynamicRefTable& other) {
     for (size_t i = 0; i < entryCount; i++) {
         ssize_t index = mEntries.indexOfKey(other.mEntries.keyAt(i));
         if (index < 0) {
-            mEntries.add(other.mEntries.keyAt(i), other.mEntries[i]);
+            mEntries.add(String16(other.mEntries.keyAt(i)), other.mEntries[i]);
         } else {
             if (other.mEntries[i] != mEntries[index]) {
                 return UNKNOWN_ERROR;
@@ -6670,13 +7238,11 @@ void DynamicRefTable::addMapping(uint8_t buildPackageId, uint8_t runtimePackageI
 
 status_t DynamicRefTable::lookupResourceId(uint32_t* resId) const {
     uint32_t res = *resId;
-    size_t packageId = Res_GETPACKAGE(res) + 1;
-
-    if (packageId == APP_PACKAGE_ID && !mAppAsLib) {
-        // No lookup needs to be done, app package IDs are absolute.
+    if (!Res_VALIDID(res)) {
+        // Cannot look up a null or invalid id, so no lookup needs to be done.
         return NO_ERROR;
     }
-
+    const size_t packageId = Res_GETPACKAGE(res) + 1;
     if (packageId == 0 || (packageId == APP_PACKAGE_ID && mAppAsLib)) {
         // The package ID is 0x00. That means that a shared library is accessing
         // its own local resource.
@@ -6684,6 +7250,24 @@ status_t DynamicRefTable::lookupResourceId(uint32_t* resId) const {
         // app package Id is local resources.
         // so we fix up those resources with the calling package ID.
         *resId = (0xFFFFFF & (*resId)) | (((uint32_t) mAssignedPackageId) << 24);
+        return NO_ERROR;
+    }
+    // All aliases are coming from the framework, and usually have their own separate ID range,
+    // skipping the whole binary search is much more efficient than not finding anything.
+    if (packageId == SYS_PACKAGE_ID && !mAliasId.empty() &&
+            res >= mAliasId.front().first && res <= mAliasId.back().first) {
+        const auto alias_it = std::lower_bound(mAliasId.begin(), mAliasId.end(), res,
+                                               [](const AliasMap::value_type& pair,
+                                                  uint32_t val) { return pair.first < val; });
+        if (alias_it != mAliasId.end() && alias_it->first == res) {
+            // Rewrite the resource id to its alias resource id. Since the alias resource id is a
+            // compile-time id, it still needs to be resolved further.
+            res = alias_it->second;
+        }
+    }
+    if (packageId == SYS_PACKAGE_ID || (packageId == APP_PACKAGE_ID && !mAppAsLib)) {
+        // No lookup needs to be done, app and framework package IDs are absolute.
+        *resId = res;
         return NO_ERROR;
     }
 
@@ -6704,27 +7288,37 @@ status_t DynamicRefTable::lookupResourceId(uint32_t* resId) const {
     return NO_ERROR;
 }
 
+bool DynamicRefTable::requiresLookup(const Res_value* value) const {
+    // Only resolve non-dynamic references and attributes if the package is loaded as a
+    // library or if a shared library is attempting to retrieve its own resource
+    if ((value->dataType == Res_value::TYPE_REFERENCE ||
+         value->dataType == Res_value::TYPE_ATTRIBUTE) &&
+        (mAppAsLib || (Res_GETPACKAGE(value->data) + 1) == 0)) {
+        return true;
+    }
+    return value->dataType == Res_value::TYPE_DYNAMIC_ATTRIBUTE ||
+           value->dataType == Res_value::TYPE_DYNAMIC_REFERENCE;
+}
+
 status_t DynamicRefTable::lookupResourceValue(Res_value* value) const {
+    if (!requiresLookup(value)) {
+      return NO_ERROR;
+    }
+
     uint8_t resolvedType = Res_value::TYPE_REFERENCE;
     switch (value->dataType) {
-    case Res_value::TYPE_ATTRIBUTE:
-        resolvedType = Res_value::TYPE_ATTRIBUTE;
-        // fallthrough
-    case Res_value::TYPE_REFERENCE:
-        if (!mAppAsLib) {
+        case Res_value::TYPE_ATTRIBUTE:
+            resolvedType = Res_value::TYPE_ATTRIBUTE;
+            FALLTHROUGH_INTENDED;
+        case Res_value::TYPE_REFERENCE:
+        break;
+        case Res_value::TYPE_DYNAMIC_ATTRIBUTE:
+            resolvedType = Res_value::TYPE_ATTRIBUTE;
+            FALLTHROUGH_INTENDED;
+        case Res_value::TYPE_DYNAMIC_REFERENCE:
+            break;
+        default:
             return NO_ERROR;
-        }
-
-        // If the package is loaded as shared library, the resource reference
-        // also need to be fixed.
-        break;
-    case Res_value::TYPE_DYNAMIC_ATTRIBUTE:
-        resolvedType = Res_value::TYPE_ATTRIBUTE;
-        // fallthrough
-    case Res_value::TYPE_DYNAMIC_REFERENCE:
-        break;
-    default:
-        return NO_ERROR;
     }
 
     status_t err = lookupResourceId(&value->data);
@@ -6736,157 +7330,204 @@ status_t DynamicRefTable::lookupResourceValue(Res_value* value) const {
     return NO_ERROR;
 }
 
-struct IdmapTypeMap {
-    ssize_t overlayTypeId;
-    size_t entryOffset;
-    Vector<uint32_t> entryMap;
+class IdmapMatchingResources;
+
+class IdmapTypeMapping {
+public:
+    void add(uint32_t targetResId, uint32_t overlayResId) {
+        uint8_t targetTypeId = Res_GETTYPE(targetResId);
+        auto& entries = mData[targetTypeId];
+        entries.insert(std::make_pair(targetResId, overlayResId));
+    }
+
+    bool empty() const {
+        return mData.empty();
+    }
+
+private:
+    // resource type ID in context of target -> set of resource entries mapping target -> overlay
+    std::map<uint8_t, std::set<std::pair<uint32_t, uint32_t>>> mData;
+
+    friend IdmapMatchingResources;
 };
 
-status_t ResTable::createIdmap(const ResTable& overlay,
+class IdmapMatchingResources {
+public:
+    IdmapMatchingResources(std::unique_ptr<IdmapTypeMapping> tm) : mTypeMapping(std::move(tm)) {
+        assert(mTypeMapping);
+        for (auto ti = mTypeMapping->mData.cbegin(); ti != mTypeMapping->mData.cend(); ++ti) {
+            uint32_t lastSeen = 0xffffffff;
+            size_t totalEntries = 0;
+            for (auto ei = ti->second.cbegin(); ei != ti->second.cend(); ++ei) {
+                assert(lastSeen == 0xffffffff || lastSeen < ei->first);
+                mEntryPadding[ei->first] = (lastSeen == 0xffffffff) ? 0 : ei->first - lastSeen - 1;
+                lastSeen = ei->first;
+                totalEntries += 1 + mEntryPadding[ei->first];
+            }
+            mNumberOfEntriesIncludingPadding[ti->first] = totalEntries;
+        }
+    }
+
+    const std::map<uint8_t, std::set<std::pair<uint32_t, uint32_t>>>& getTypeMapping() const {
+        return mTypeMapping->mData;
+    }
+
+    size_t getNumberOfEntriesIncludingPadding(uint8_t type) const {
+        return mNumberOfEntriesIncludingPadding.at(type);
+    }
+
+    size_t getPadding(uint32_t resid) const {
+        return mEntryPadding.at(resid);
+    }
+
+private:
+    // resource type ID in context of target -> set of resource entries mapping target -> overlay
+    const std::unique_ptr<IdmapTypeMapping> mTypeMapping;
+
+    // resource ID in context of target -> trailing padding for that resource (call FixPadding
+    // before use)
+    std::map<uint32_t, size_t> mEntryPadding;
+
+    // resource type ID in context of target -> total number of entries, including padding entries,
+    // for that type (call FixPadding before use)
+    std::map<uint8_t, size_t> mNumberOfEntriesIncludingPadding;
+};
+
+status_t ResTable::createIdmap(const ResTable& targetResTable,
         uint32_t targetCrc, uint32_t overlayCrc,
         const char* targetPath, const char* overlayPath,
         void** outData, size_t* outSize) const
 {
-    // see README for details on the format of map
-    if (mPackageGroups.size() == 0) {
-        ALOGW("idmap: target package has no package groups, cannot create idmap\n");
+    if (targetPath == NULL || overlayPath == NULL || outData == NULL || outSize == NULL) {
+        ALOGE("idmap: unexpected NULL parameter");
+        return UNKNOWN_ERROR;
+    }
+    if (strlen(targetPath) > 255) {
+        ALOGE("idmap: target path exceeds idmap file format limit of 255 chars");
+        return UNKNOWN_ERROR;
+    }
+    if (strlen(overlayPath) > 255) {
+        ALOGE("idmap: overlay path exceeds idmap file format limit of 255 chars");
+        return UNKNOWN_ERROR;
+    }
+    if (mPackageGroups.size() == 0 || mPackageGroups[0]->packages.size() == 0) {
+        ALOGE("idmap: invalid overlay package");
+        return UNKNOWN_ERROR;
+    }
+    if (targetResTable.mPackageGroups.size() == 0 ||
+            targetResTable.mPackageGroups[0]->packages.size() == 0) {
+        ALOGE("idmap: invalid target package");
         return UNKNOWN_ERROR;
     }
 
-    if (mPackageGroups[0]->packages.size() == 0) {
-        ALOGW("idmap: target package has no packages in its first package group, "
-                "cannot create idmap\n");
+    // Idmap is not aware of overlayable, exit since policy checks can't be done
+    if (targetResTable.mPackageGroups[0]->packages[0]->definesOverlayable) {
         return UNKNOWN_ERROR;
     }
 
-    KeyedVector<uint8_t, IdmapTypeMap> map;
+    const ResTable_package* targetPackageStruct =
+        targetResTable.mPackageGroups[0]->packages[0]->package;
+    const size_t tmpNameSize = arraysize(targetPackageStruct->name);
+    char16_t tmpName[tmpNameSize];
+    strcpy16_dtoh(tmpName, targetPackageStruct->name, tmpNameSize);
+    const String16 targetPackageName(tmpName);
 
-    // overlaid packages are assumed to contain only one package group
-    const PackageGroup* pg = mPackageGroups[0];
+    const PackageGroup* packageGroup = mPackageGroups[0];
 
-    // starting size is header
-    *outSize = ResTable::IDMAP_HEADER_SIZE_BYTES;
-
-    // target package id and number of types in map
-    *outSize += 2 * sizeof(uint16_t);
-
-    // overlay packages are assumed to contain only one package group
-    const ResTable_package* overlayPackageStruct = overlay.mPackageGroups[0]->packages[0]->package;
-    char16_t tmpName[sizeof(overlayPackageStruct->name)/sizeof(overlayPackageStruct->name[0])];
-    strcpy16_dtoh(tmpName, overlayPackageStruct->name, sizeof(overlayPackageStruct->name)/sizeof(overlayPackageStruct->name[0]));
-    const String16 overlayPackage(tmpName);
-
-    for (size_t typeIndex = 0; typeIndex < pg->types.size(); ++typeIndex) {
-        const TypeList& typeList = pg->types[typeIndex];
+    // find the resources that exist in both packages
+    auto typeMapping = std::make_unique<IdmapTypeMapping>();
+    for (size_t typeIndex = 0; typeIndex < packageGroup->types.size(); ++typeIndex) {
+        const TypeList& typeList = packageGroup->types[typeIndex];
         if (typeList.isEmpty()) {
             continue;
         }
-
         const Type* typeConfigs = typeList[0];
 
-        IdmapTypeMap typeMap;
-        typeMap.overlayTypeId = -1;
-        typeMap.entryOffset = 0;
-
         for (size_t entryIndex = 0; entryIndex < typeConfigs->entryCount; ++entryIndex) {
-            uint32_t resID = Res_MAKEID(pg->id - 1, typeIndex, entryIndex);
-            resource_name resName;
-            if (!this->getResourceName(resID, false, &resName)) {
-                if (typeMap.entryMap.isEmpty()) {
-                    typeMap.entryOffset++;
-                }
+            uint32_t overlay_resid = Res_MAKEID(packageGroup->id - 1, typeIndex, entryIndex);
+            resource_name current_res;
+            if (!getResourceName(overlay_resid, false, &current_res)) {
                 continue;
             }
 
-            const String16 overlayType(resName.type, resName.typeLen);
-            const String16 overlayName(resName.name, resName.nameLen);
-            uint32_t overlayResID = overlay.identifierForName(overlayName.string(),
-                                                              overlayName.size(),
-                                                              overlayType.string(),
-                                                              overlayType.size(),
-                                                              overlayPackage.string(),
-                                                              overlayPackage.size());
-            if (overlayResID == 0) {
-                if (typeMap.entryMap.isEmpty()) {
-                    typeMap.entryOffset++;
-                }
+            uint32_t typeSpecFlags = 0u;
+            const uint32_t target_resid = targetResTable.identifierForName(
+                    current_res.name,
+                    current_res.nameLen,
+                    current_res.type,
+                    current_res.typeLen,
+                    targetPackageName.c_str(),
+                    targetPackageName.size(),
+                    &typeSpecFlags);
+
+            if (target_resid == 0) {
                 continue;
             }
 
-            if (typeMap.overlayTypeId == -1) {
-                typeMap.overlayTypeId = Res_GETTYPE(overlayResID) + 1;
-            }
-
-            if (Res_GETTYPE(overlayResID) + 1 != static_cast<size_t>(typeMap.overlayTypeId)) {
-                ALOGE("idmap: can't mix type ids in entry map. Resource 0x%08x maps to 0x%08x"
-                        " but entries should map to resources of type %02zx",
-                        resID, overlayResID, typeMap.overlayTypeId);
-                return BAD_TYPE;
-            }
-
-            if (typeMap.entryOffset + typeMap.entryMap.size() < entryIndex) {
-                // pad with 0xffffffff's (indicating non-existing entries) before adding this entry
-                size_t index = typeMap.entryMap.size();
-                size_t numItems = entryIndex - (typeMap.entryOffset + index);
-                if (typeMap.entryMap.insertAt(0xffffffff, index, numItems) < 0) {
-                    return NO_MEMORY;
-                }
-            }
-            typeMap.entryMap.add(Res_GETENTRY(overlayResID));
-        }
-
-        if (!typeMap.entryMap.isEmpty()) {
-            if (map.add(static_cast<uint8_t>(typeIndex), typeMap) < 0) {
-                return NO_MEMORY;
-            }
-            *outSize += (4 * sizeof(uint16_t)) + (typeMap.entryMap.size() * sizeof(uint32_t));
+            typeMapping->add(target_resid, overlay_resid);
         }
     }
 
-    if (map.isEmpty()) {
-        ALOGW("idmap: no resources in overlay package present in base package");
+    if (typeMapping->empty()) {
+        ALOGE("idmap: no matching resources");
         return UNKNOWN_ERROR;
     }
 
+    const IdmapMatchingResources matchingResources(std::move(typeMapping));
+
+    // write idmap
+    *outSize = ResTable::IDMAP_HEADER_SIZE_BYTES; // magic, version, target and overlay crc
+    *outSize += 2 * sizeof(uint16_t); // target package id, type count
+    auto fixedTypeMapping = matchingResources.getTypeMapping();
+    const auto typesEnd = fixedTypeMapping.cend();
+    for (auto ti = fixedTypeMapping.cbegin(); ti != typesEnd; ++ti) {
+        *outSize += 4 * sizeof(uint16_t); // target type, overlay type, entry count, entry offset
+        *outSize += matchingResources.getNumberOfEntriesIncludingPadding(ti->first) *
+            sizeof(uint32_t); // entries
+    }
     if ((*outData = malloc(*outSize)) == NULL) {
         return NO_MEMORY;
     }
 
-    uint32_t* data = (uint32_t*)*outData;
-    *data++ = htodl(IDMAP_MAGIC);
-    *data++ = htodl(ResTable::IDMAP_CURRENT_VERSION);
-    *data++ = htodl(targetCrc);
-    *data++ = htodl(overlayCrc);
-    const char* paths[] = { targetPath, overlayPath };
-    for (int j = 0; j < 2; ++j) {
-        char* p = (char*)data;
-        const char* path = paths[j];
-        const size_t I = strlen(path);
-        if (I > 255) {
-            ALOGV("path exceeds expected 255 characters: %s\n", path);
-            return UNKNOWN_ERROR;
-        }
-        for (size_t i = 0; i < 256; ++i) {
-            *p++ = i < I ? path[i] : '\0';
-        }
-        data += 256 / sizeof(uint32_t);
-    }
-    const size_t mapSize = map.size();
-    uint16_t* typeData = reinterpret_cast<uint16_t*>(data);
-    *typeData++ = htods(pg->id);
-    *typeData++ = htods(mapSize);
-    for (size_t i = 0; i < mapSize; ++i) {
-        uint8_t targetTypeId = map.keyAt(i);
-        const IdmapTypeMap& typeMap = map[i];
-        *typeData++ = htods(targetTypeId + 1);
-        *typeData++ = htods(typeMap.overlayTypeId);
-        *typeData++ = htods(typeMap.entryMap.size());
-        *typeData++ = htods(typeMap.entryOffset);
+    // write idmap header
+    uint32_t* data = reinterpret_cast<uint32_t*>(*outData);
+    *data++ = htodl(IDMAP_MAGIC); // write: magic
+    *data++ = htodl(ResTable::IDMAP_CURRENT_VERSION); // write: version
+    *data++ = htodl(targetCrc); // write: target crc
+    *data++ = htodl(overlayCrc); // write: overlay crc
 
-        const size_t entryCount = typeMap.entryMap.size();
-        uint32_t* entries = reinterpret_cast<uint32_t*>(typeData);
-        for (size_t j = 0; j < entryCount; j++) {
-            entries[j] = htodl(typeMap.entryMap[j]);
+    char* charData = reinterpret_cast<char*>(data);
+    size_t pathLen = strlen(targetPath);
+    for (size_t i = 0; i < 256; ++i) {
+        *charData++ = i < pathLen ? targetPath[i] : '\0'; // write: target path
+    }
+    pathLen = strlen(overlayPath);
+    for (size_t i = 0; i < 256; ++i) {
+        *charData++ = i < pathLen ? overlayPath[i] : '\0'; // write: overlay path
+    }
+    data += (2 * 256) / sizeof(uint32_t);
+
+    // write idmap data header
+    uint16_t* typeData = reinterpret_cast<uint16_t*>(data);
+    *typeData++ = htods(targetPackageStruct->id); // write: target package id
+    *typeData++ =
+        htods(static_cast<uint16_t>(fixedTypeMapping.size())); // write: type count
+
+    // write idmap data
+    for (auto ti = fixedTypeMapping.cbegin(); ti != typesEnd; ++ti) {
+        const size_t entryCount = matchingResources.getNumberOfEntriesIncludingPadding(ti->first);
+        auto ei = ti->second.cbegin();
+        *typeData++ = htods(Res_GETTYPE(ei->first) + 1); // write: target type id
+        *typeData++ = htods(Res_GETTYPE(ei->second) + 1); // write: overlay type id
+        *typeData++ = htods(entryCount); // write: entry count
+        *typeData++ = htods(Res_GETENTRY(ei->first)); // write: (target) entry offset
+        uint32_t *entryData = reinterpret_cast<uint32_t*>(typeData);
+        for (; ei != ti->second.cend(); ++ei) {
+            const size_t padding = matchingResources.getPadding(ei->first);
+            for (size_t i = 0; i < padding; ++i) {
+                *entryData++ = htodl(0xffffffff); // write: padding
+            }
+            *entryData++ = htodl(Res_GETENTRY(ei->second)); // write: (overlay) entry
         }
         typeData += entryCount * 2;
     }
@@ -6913,16 +7554,16 @@ bool ResTable::getIdmapInfo(const void* idmap, size_t sizeBytes,
         *pOverlayCrc = dtohl(map[3]);
     }
     if (pTargetPath) {
-        pTargetPath->setTo(reinterpret_cast<const char*>(map + 4));
+        *pTargetPath = reinterpret_cast<const char*>(map + 4);
     }
     if (pOverlayPath) {
-        pOverlayPath->setTo(reinterpret_cast<const char*>(map + 4 + 256 / sizeof(uint32_t)));
+        *pOverlayPath = reinterpret_cast<const char*>(map + 4 + 256 / sizeof(uint32_t));
     }
     return true;
 }
 
 
-#define CHAR16_TO_CSTR(c16, len) (String8(String16(c16,len)).string())
+#define CHAR16_TO_CSTR(c16, len) (String8(String16(c16,len)).c_str())
 
 #define CHAR16_ARRAY_EQ(constant, var, len) \
         (((len) == (sizeof(constant)/sizeof((constant)[0]))) && (0 == memcmp((var), (constant), (len))))
@@ -7014,16 +7655,16 @@ void ResTable::print_value(const Package* pkg, const Res_value& value) const
         printf("(dynamic attribute) 0x%08x\n", value.data);
     } else if (value.dataType == Res_value::TYPE_STRING) {
         size_t len;
-        const char* str8 = pkg->header->values.string8At(
-                value.data, &len);
+        const char* str8 = UnpackOptionalString(pkg->header->values.string8At(
+                value.data), &len);
         if (str8 != NULL) {
-            printf("(string8) \"%s\"\n", normalizeForOutput(str8).string());
+            printf("(string8) \"%s\"\n", normalizeForOutput(str8).c_str());
         } else {
-            const char16_t* str16 = pkg->header->values.stringAt(
-                    value.data, &len);
+            const char16_t* str16 = UnpackOptionalString(pkg->header->values.stringAt(
+                    value.data), &len);
             if (str16 != NULL) {
                 printf("(string16) \"%s\"\n",
-                    normalizeForOutput(String8(str16, len).string()).string());
+                    normalizeForOutput(String8(str16, len).c_str()).c_str());
             } else {
                 printf("(string) null\n");
             }
@@ -7039,12 +7680,12 @@ void ResTable::print_value(const Package* pkg, const Res_value& value) const
         print_complex(value.data, true);
         printf("\n");
     } else if (value.dataType >= Res_value::TYPE_FIRST_COLOR_INT
-            || value.dataType <= Res_value::TYPE_LAST_COLOR_INT) {
+            && value.dataType <= Res_value::TYPE_LAST_COLOR_INT) {
         printf("(color) #%08x\n", value.data);
     } else if (value.dataType == Res_value::TYPE_INT_BOOLEAN) {
         printf("(boolean) %s\n", value.data ? "true" : "false");
     } else if (value.dataType >= Res_value::TYPE_FIRST_INT
-            || value.dataType <= Res_value::TYPE_LAST_INT) {
+            && value.dataType <= Res_value::TYPE_LAST_INT) {
         printf("(int) 0x%08x or %d\n", value.data, value.data);
     } else {
         printf("(unknown type) t=0x%02x d=0x%08x (s=0x%04x r=0x%02x)\n",
@@ -7064,7 +7705,7 @@ void ResTable::print(bool inclValues) const
         const PackageGroup* pg = mPackageGroups[pgIndex];
         printf("Package Group %d id=0x%02x packageCount=%d name=%s\n",
                 (int)pgIndex, pg->id, (int)pg->packages.size(),
-                String8(pg->name).string());
+                String8(pg->name).c_str());
 
         const KeyedVector<String16, uint8_t>& refEntries = pg->dynamicRefTable.entries();
         const size_t refEntryCount = refEntries.size();
@@ -7073,227 +7714,249 @@ void ResTable::print(bool inclValues) const
             for (size_t refIndex = 0; refIndex < refEntryCount; refIndex++) {
                 printf("    0x%02x -> %s\n",
                         refEntries.valueAt(refIndex),
-                        String8(refEntries.keyAt(refIndex)).string());
+                        String8(refEntries.keyAt(refIndex)).c_str());
             }
             printf("\n");
         }
 
-        int packageId = pg->id;
-        size_t pkgCount = pg->packages.size();
-        for (size_t pkgIndex=0; pkgIndex<pkgCount; pkgIndex++) {
-            const Package* pkg = pg->packages[pkgIndex];
-            // Use a package's real ID, since the ID may have been assigned
-            // if this package is a shared library.
-            packageId = pkg->package->id;
-            char16_t tmpName[sizeof(pkg->package->name)/sizeof(pkg->package->name[0])];
-            strcpy16_dtoh(tmpName, pkg->package->name, sizeof(pkg->package->name)/sizeof(pkg->package->name[0]));
-            printf("  Package %d id=0x%02x name=%s\n", (int)pkgIndex,
-                    pkg->package->id, String8(tmpName).string());
+        // Determine the number of resource splits for the resource types in this package.
+        // It needs to be done outside of the loop below so all of the information for a
+        // is displayed in a single block. Otherwise, a resource split's resource types
+        // would be interleaved with other splits.
+        size_t splitCount = 0;
+        for (size_t typeIndex = 0; typeIndex < pg->types.size(); typeIndex++) {
+            splitCount = max(splitCount, pg->types[typeIndex].size());
         }
 
-        for (size_t typeIndex=0; typeIndex < pg->types.size(); typeIndex++) {
-            const TypeList& typeList = pg->types[typeIndex];
-            if (typeList.isEmpty()) {
-                continue;
+        int packageId = pg->id;
+        for (size_t splitIndex = 0; splitIndex < splitCount; splitIndex++) {
+            size_t pkgCount = pg->packages.size();
+            for (size_t pkgIndex=0; pkgIndex<pkgCount; pkgIndex++) {
+                const Package* pkg = pg->packages[pkgIndex];
+                // Use a package's real ID, since the ID may have been assigned
+                // if this package is a shared library.
+                packageId = pkg->package->id;
+                char16_t tmpName[sizeof(pkg->package->name)/sizeof(pkg->package->name[0])];
+                strcpy16_dtoh(tmpName, pkg->package->name,
+                              sizeof(pkg->package->name)/sizeof(pkg->package->name[0]));
+                printf("  Package %d id=0x%02x name=%s\n", (int)pkgIndex,
+                        pkg->package->id, String8(tmpName).c_str());
             }
-            const Type* typeConfigs = typeList[0];
-            const size_t NTC = typeConfigs->configs.size();
-            printf("    type %d configCount=%d entryCount=%d\n",
-                   (int)typeIndex, (int)NTC, (int)typeConfigs->entryCount);
-            if (typeConfigs->typeSpecFlags != NULL) {
-                for (size_t entryIndex=0; entryIndex<typeConfigs->entryCount; entryIndex++) {
-                    uint32_t resID = (0xff000000 & ((packageId)<<24))
-                                | (0x00ff0000 & ((typeIndex+1)<<16))
-                                | (0x0000ffff & (entryIndex));
-                    // Since we are creating resID without actually
-                    // iterating over them, we have no idea which is a
-                    // dynamic reference. We must check.
-                    if (packageId == 0) {
-                        pg->dynamicRefTable.lookupResourceId(&resID);
-                    }
 
-                    resource_name resName;
-                    if (this->getResourceName(resID, true, &resName)) {
-                        String8 type8;
-                        String8 name8;
-                        if (resName.type8 != NULL) {
-                            type8 = String8(resName.type8, resName.typeLen);
-                        } else {
-                            type8 = String8(resName.type, resName.typeLen);
+            for (size_t typeIndex = 0; typeIndex < pg->types.size(); typeIndex++) {
+                const TypeList& typeList = pg->types[typeIndex];
+                if (splitIndex >= typeList.size() || typeList.isEmpty()) {
+                    // Only dump if the split exists and contains entries for this type
+                    continue;
+                }
+                const Type* typeConfigs = typeList[splitIndex];
+                const size_t NTC = typeConfigs->configs.size();
+                printf("    type %d configCount=%d entryCount=%d\n",
+                       (int)typeIndex, (int)NTC, (int)typeConfigs->entryCount);
+                if (typeConfigs->typeSpecFlags != NULL) {
+                    for (size_t entryIndex=0; entryIndex<typeConfigs->entryCount; entryIndex++) {
+                        uint32_t resID = (0xff000000 & ((packageId)<<24))
+                                    | (0x00ff0000 & ((typeIndex+1)<<16))
+                                    | (0x0000ffff & (entryIndex));
+                        // Since we are creating resID without actually
+                        // iterating over them, we have no idea which is a
+                        // dynamic reference. We must check.
+                        if (packageId == 0) {
+                            pg->dynamicRefTable.lookupResourceId(&resID);
                         }
-                        if (resName.name8 != NULL) {
-                            name8 = String8(resName.name8, resName.nameLen);
+
+                        resource_name resName;
+                        if (this->getResourceName(resID, true, &resName)) {
+                            String8 type8;
+                            String8 name8;
+                            if (resName.type8 != NULL) {
+                                type8 = String8(resName.type8, resName.typeLen);
+                            } else {
+                                type8 = String8(resName.type, resName.typeLen);
+                            }
+                            if (resName.name8 != NULL) {
+                                name8 = String8(resName.name8, resName.nameLen);
+                            } else {
+                                name8 = String8(resName.name, resName.nameLen);
+                            }
+                            printf("      spec resource 0x%08x %s:%s/%s: flags=0x%08x\n",
+                                resID,
+                                CHAR16_TO_CSTR(resName.package, resName.packageLen),
+                                type8.c_str(), name8.c_str(),
+                                dtohl(typeConfigs->typeSpecFlags[entryIndex]));
                         } else {
-                            name8 = String8(resName.name, resName.nameLen);
+                            printf("      INVALID TYPE CONFIG FOR RESOURCE 0x%08x\n", resID);
                         }
-                        printf("      spec resource 0x%08x %s:%s/%s: flags=0x%08x\n",
-                            resID,
-                            CHAR16_TO_CSTR(resName.package, resName.packageLen),
-                            type8.string(), name8.string(),
-                            dtohl(typeConfigs->typeSpecFlags[entryIndex]));
-                    } else {
-                        printf("      INVALID TYPE CONFIG FOR RESOURCE 0x%08x\n", resID);
                     }
                 }
-            }
-            for (size_t configIndex=0; configIndex<NTC; configIndex++) {
-                const ResTable_type* type = typeConfigs->configs[configIndex];
-                if ((((uint64_t)type)&0x3) != 0) {
-                    printf("      NON-INTEGER ResTable_type ADDRESS: %p\n", type);
-                    continue;
-                }
-
-                // Always copy the config, as fields get added and we need to
-                // set the defaults.
-                ResTable_config thisConfig;
-                thisConfig.copyFromDtoH(type->config);
-
-                String8 configStr = thisConfig.toString();
-                printf("      config %s", configStr.size() > 0
-                        ? configStr.string() : "(default)");
-                if (type->flags != 0u) {
-                    printf(" flags=0x%02x", type->flags);
-                    if (type->flags & ResTable_type::FLAG_SPARSE) {
-                        printf(" [sparse]");
+                for (size_t configIndex=0; configIndex<NTC; configIndex++) {
+                    const ResTable_type* type = typeConfigs->configs[configIndex];
+                    if ((((uint64_t)type)&0x3) != 0) {
+                        printf("      NON-INTEGER ResTable_type ADDRESS: %p\n", type);
+                        continue;
                     }
-                }
 
-                printf(":\n");
+                    // Always copy the config, as fields get added and we need to
+                    // set the defaults.
+                    ResTable_config thisConfig;
+                    thisConfig.copyFromDtoH(type->config);
 
-                size_t entryCount = dtohl(type->entryCount);
-                uint32_t entriesStart = dtohl(type->entriesStart);
-                if ((entriesStart&0x3) != 0) {
-                    printf("      NON-INTEGER ResTable_type entriesStart OFFSET: 0x%x\n", entriesStart);
-                    continue;
-                }
-                uint32_t typeSize = dtohl(type->header.size);
-                if ((typeSize&0x3) != 0) {
-                    printf("      NON-INTEGER ResTable_type header.size: 0x%x\n", typeSize);
-                    continue;
-                }
+                    String8 configStr = thisConfig.toString();
+                    printf("      config %s", configStr.size() > 0
+                            ? configStr.c_str() : "(default)");
+                    if (type->flags != 0u) {
+                        printf(" flags=0x%02x", type->flags);
+                        if (type->flags & ResTable_type::FLAG_SPARSE) {
+                            printf(" [sparse]");
+                        }
+                        if (type->flags & ResTable_type::FLAG_OFFSET16) {
+                            printf(" [offset16]");
+                        }
+                    }
 
-                const uint32_t* const eindex = (const uint32_t*)
-                        (((const uint8_t*)type) + dtohs(type->header.headerSize));
-                for (size_t entryIndex=0; entryIndex<entryCount; entryIndex++) {
-                    size_t entryId;
-                    uint32_t thisOffset;
-                    if (type->flags & ResTable_type::FLAG_SPARSE) {
-                        const ResTable_sparseTypeEntry* entry =
-                                reinterpret_cast<const ResTable_sparseTypeEntry*>(
-                                        eindex + entryIndex);
-                        entryId = dtohs(entry->idx);
-                        // Offsets are encoded as divided by 4.
-                        thisOffset = static_cast<uint32_t>(dtohs(entry->offset)) * 4u;
-                    } else {
-                        entryId = entryIndex;
-                        thisOffset = dtohl(eindex[entryIndex]);
-                        if (thisOffset == ResTable_type::NO_ENTRY) {
+                    printf(":\n");
+
+                    size_t entryCount = dtohl(type->entryCount);
+                    uint32_t entriesStart = dtohl(type->entriesStart);
+                    if ((entriesStart&0x3) != 0) {
+                        printf("      NON-INTEGER ResTable_type entriesStart OFFSET: 0x%x\n",
+                               entriesStart);
+                        continue;
+                    }
+                    uint32_t typeSize = dtohl(type->header.size);
+                    if ((typeSize&0x3) != 0) {
+                        printf("      NON-INTEGER ResTable_type header.size: 0x%x\n", typeSize);
+                        continue;
+                    }
+
+                    const uint32_t* const eindex = (const uint32_t*)
+                            (((const uint8_t*)type) + dtohs(type->header.headerSize));
+                    for (size_t entryIndex=0; entryIndex<entryCount; entryIndex++) {
+                        size_t entryId;
+                        uint32_t thisOffset;
+                        if (type->flags & ResTable_type::FLAG_SPARSE) {
+                            const ResTable_sparseTypeEntry* entry =
+                                    reinterpret_cast<const ResTable_sparseTypeEntry*>(
+                                            eindex + entryIndex);
+                            entryId = dtohs(entry->idx);
+                            // Offsets are encoded as divided by 4.
+                            thisOffset = static_cast<uint32_t>(dtohs(entry->offset)) * 4u;
+                        } else {
+                            entryId = entryIndex;
+                            if (type->flags & ResTable_type::FLAG_OFFSET16) {
+                                const auto eindex16 =
+                                    reinterpret_cast<const uint16_t*>(eindex);
+                                thisOffset = offset_from16(eindex16[entryIndex]);
+                            } else {
+                                thisOffset = dtohl(eindex[entryIndex]);
+                            }
+                            if (thisOffset == ResTable_type::NO_ENTRY) {
+                                continue;
+                            }
+                        }
+
+                        uint32_t resID = (0xff000000 & ((packageId)<<24))
+                                    | (0x00ff0000 & ((typeIndex+1)<<16))
+                                    | (0x0000ffff & (entryId));
+                        if (packageId == 0) {
+                            pg->dynamicRefTable.lookupResourceId(&resID);
+                        }
+                        resource_name resName;
+                        if (this->getResourceName(resID, true, &resName)) {
+                            String8 type8;
+                            String8 name8;
+                            if (resName.type8 != NULL) {
+                                type8 = String8(resName.type8, resName.typeLen);
+                            } else {
+                                type8 = String8(resName.type, resName.typeLen);
+                            }
+                            if (resName.name8 != NULL) {
+                                name8 = String8(resName.name8, resName.nameLen);
+                            } else {
+                                name8 = String8(resName.name, resName.nameLen);
+                            }
+                            printf("        resource 0x%08x %s:%s/%s: ", resID,
+                                    CHAR16_TO_CSTR(resName.package, resName.packageLen),
+                                    type8.c_str(), name8.c_str());
+                        } else {
+                            printf("        INVALID RESOURCE 0x%08x: ", resID);
+                        }
+                        if ((thisOffset&0x3) != 0) {
+                            printf("NON-INTEGER OFFSET: 0x%x\n", thisOffset);
                             continue;
                         }
-                    }
-
-                    uint32_t resID = (0xff000000 & ((packageId)<<24))
-                                | (0x00ff0000 & ((typeIndex+1)<<16))
-                                | (0x0000ffff & (entryId));
-                    if (packageId == 0) {
-                        pg->dynamicRefTable.lookupResourceId(&resID);
-                    }
-                    resource_name resName;
-                    if (this->getResourceName(resID, true, &resName)) {
-                        String8 type8;
-                        String8 name8;
-                        if (resName.type8 != NULL) {
-                            type8 = String8(resName.type8, resName.typeLen);
-                        } else {
-                            type8 = String8(resName.type, resName.typeLen);
+                        if ((thisOffset+sizeof(ResTable_entry)) > typeSize) {
+                            printf("OFFSET OUT OF BOUNDS: 0x%x+0x%x (size is 0x%x)\n",
+                                   entriesStart, thisOffset, typeSize);
+                            continue;
                         }
-                        if (resName.name8 != NULL) {
-                            name8 = String8(resName.name8, resName.nameLen);
-                        } else {
-                            name8 = String8(resName.name, resName.nameLen);
+
+                        const ResTable_entry* ent = (const ResTable_entry*)
+                            (((const uint8_t*)type) + entriesStart + thisOffset);
+                        if (((entriesStart + thisOffset)&0x3) != 0) {
+                            printf("NON-INTEGER ResTable_entry OFFSET: 0x%x\n",
+                                 (entriesStart + thisOffset));
+                            continue;
                         }
-                        printf("        resource 0x%08x %s:%s/%s: ", resID,
-                                CHAR16_TO_CSTR(resName.package, resName.packageLen),
-                                type8.string(), name8.string());
-                    } else {
-                        printf("        INVALID RESOURCE 0x%08x: ", resID);
-                    }
-                    if ((thisOffset&0x3) != 0) {
-                        printf("NON-INTEGER OFFSET: 0x%x\n", thisOffset);
-                        continue;
-                    }
-                    if ((thisOffset+sizeof(ResTable_entry)) > typeSize) {
-                        printf("OFFSET OUT OF BOUNDS: 0x%x+0x%x (size is 0x%x)\n",
-                               entriesStart, thisOffset, typeSize);
-                        continue;
-                    }
 
-                    const ResTable_entry* ent = (const ResTable_entry*)
-                        (((const uint8_t*)type) + entriesStart + thisOffset);
-                    if (((entriesStart + thisOffset)&0x3) != 0) {
-                        printf("NON-INTEGER ResTable_entry OFFSET: 0x%x\n",
-                             (entriesStart + thisOffset));
-                        continue;
-                    }
+                        uintptr_t esize = ent->size();
+                        if ((esize&0x3) != 0) {
+                            printf("NON-INTEGER ResTable_entry SIZE: %p\n", (void *)esize);
+                            continue;
+                        }
+                        if ((thisOffset+esize) > typeSize) {
+                            printf("ResTable_entry OUT OF BOUNDS: 0x%x+0x%x+%p (size is 0x%x)\n",
+                                   entriesStart, thisOffset, (void *)esize, typeSize);
+                            continue;
+                        }
 
-                    uintptr_t esize = dtohs(ent->size);
-                    if ((esize&0x3) != 0) {
-                        printf("NON-INTEGER ResTable_entry SIZE: %p\n", (void *)esize);
-                        continue;
-                    }
-                    if ((thisOffset+esize) > typeSize) {
-                        printf("ResTable_entry OUT OF BOUNDS: 0x%x+0x%x+%p (size is 0x%x)\n",
-                               entriesStart, thisOffset, (void *)esize, typeSize);
-                        continue;
-                    }
+                        const Res_value* valuePtr = NULL;
+                        const ResTable_map_entry* bagPtr = ent->map_entry();
+                        Res_value value;
+                        if (bagPtr) {
+                            printf("<bag>");
+                        } else {
+                            value = ent->value();
+                            printf("t=0x%02x d=0x%08x (s=0x%04x r=0x%02x)",
+                                   (int)value.dataType, (int)value.data,
+                                   (int)value.size, (int)value.res0);
+                        }
 
-                    const Res_value* valuePtr = NULL;
-                    const ResTable_map_entry* bagPtr = NULL;
-                    Res_value value;
-                    if ((dtohs(ent->flags)&ResTable_entry::FLAG_COMPLEX) != 0) {
-                        printf("<bag>");
-                        bagPtr = (const ResTable_map_entry*)ent;
-                    } else {
-                        valuePtr = (const Res_value*)
-                            (((const uint8_t*)ent) + esize);
-                        value.copyFrom_dtoh(*valuePtr);
-                        printf("t=0x%02x d=0x%08x (s=0x%04x r=0x%02x)",
-                               (int)value.dataType, (int)value.data,
-                               (int)value.size, (int)value.res0);
-                    }
+                        if (ent->flags() & ResTable_entry::FLAG_PUBLIC) {
+                            printf(" (PUBLIC)");
+                        }
+                        printf("\n");
 
-                    if ((dtohs(ent->flags)&ResTable_entry::FLAG_PUBLIC) != 0) {
-                        printf(" (PUBLIC)");
-                    }
-                    printf("\n");
-
-                    if (inclValues) {
-                        if (valuePtr != NULL) {
-                            printf("          ");
-                            print_value(typeConfigs->package, value);
-                        } else if (bagPtr != NULL) {
-                            const int N = dtohl(bagPtr->count);
-                            const uint8_t* baseMapPtr = (const uint8_t*)ent;
-                            size_t mapOffset = esize;
-                            const ResTable_map* mapPtr = (ResTable_map*)(baseMapPtr+mapOffset);
-                            const uint32_t parent = dtohl(bagPtr->parent.ident);
-                            uint32_t resolvedParent = parent;
-                            if (Res_GETPACKAGE(resolvedParent) + 1 == 0) {
-                                status_t err = pg->dynamicRefTable.lookupResourceId(&resolvedParent);
-                                if (err != NO_ERROR) {
-                                    resolvedParent = 0;
-                                }
-                            }
-                            printf("          Parent=0x%08x(Resolved=0x%08x), Count=%d\n",
-                                    parent, resolvedParent, N);
-                            for (int i=0; i<N && mapOffset < (typeSize-sizeof(ResTable_map)); i++) {
-                                printf("          #%i (Key=0x%08x): ",
-                                    i, dtohl(mapPtr->name.ident));
-                                value.copyFrom_dtoh(mapPtr->value);
+                        if (inclValues) {
+                            if (bagPtr == NULL) {
+                                printf("          ");
                                 print_value(typeConfigs->package, value);
-                                const size_t size = dtohs(mapPtr->value.size);
-                                mapOffset += size + sizeof(*mapPtr)-sizeof(mapPtr->value);
-                                mapPtr = (ResTable_map*)(baseMapPtr+mapOffset);
+                            } else {
+                                const int N = dtohl(bagPtr->count);
+                                const uint8_t* baseMapPtr = (const uint8_t*)ent;
+                                size_t mapOffset = esize;
+                                const ResTable_map* mapPtr = (ResTable_map*)(baseMapPtr+mapOffset);
+                                const uint32_t parent = dtohl(bagPtr->parent.ident);
+                                uint32_t resolvedParent = parent;
+                                if (Res_GETPACKAGE(resolvedParent) + 1 == 0) {
+                                    status_t err =
+                                        pg->dynamicRefTable.lookupResourceId(&resolvedParent);
+                                    if (err != NO_ERROR) {
+                                        resolvedParent = 0;
+                                    }
+                                }
+                                printf("          Parent=0x%08x(Resolved=0x%08x), Count=%d\n",
+                                        parent, resolvedParent, N);
+                                for (int i=0;
+                                     i<N && mapOffset < (typeSize-sizeof(ResTable_map)); i++) {
+                                    printf("          #%i (Key=0x%08x): ",
+                                        i, dtohl(mapPtr->name.ident));
+                                    value.copyFrom_dtoh(mapPtr->value);
+                                    print_value(typeConfigs->package, value);
+                                    const size_t size = dtohs(mapPtr->value.size);
+                                    mapOffset += size + sizeof(*mapPtr)-sizeof(mapPtr->value);
+                                    mapPtr = (ResTable_map*)(baseMapPtr+mapOffset);
+                                }
                             }
                         }
                     }

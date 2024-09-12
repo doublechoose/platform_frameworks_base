@@ -16,21 +16,20 @@
 
 package com.android.settingslib.widget;
 
+import static com.google.common.truth.Truth.assertThat;
+
 import android.app.Activity;
 import android.graphics.drawable.AnimatedRotateDrawable;
 import android.view.View;
-import com.android.settingslib.TestConfig;
+
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
-import org.robolectric.annotation.Config;
-
-import static com.google.common.truth.Truth.assertThat;
+import org.robolectric.annotation.LooperMode;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(manifest = TestConfig.MANIFEST_PATH, sdk = TestConfig.SDK_VERSION)
 public class AnimatedImageViewTest {
     private AnimatedImageView mAnimatedImageView;
 
@@ -42,11 +41,11 @@ public class AnimatedImageViewTest {
     }
 
     @Test
+    @LooperMode(LooperMode.Mode.PAUSED)
     public void testAnimation_ViewVisible_AnimationRunning() {
         mAnimatedImageView.setVisibility(View.VISIBLE);
         mAnimatedImageView.setAnimating(true);
         AnimatedRotateDrawable drawable = (AnimatedRotateDrawable) mAnimatedImageView.getDrawable();
         assertThat(drawable.isRunning()).isTrue();
     }
-
 }

@@ -17,12 +17,12 @@
 package com.android.printservice.recommendation;
 
 import android.content.res.Configuration;
+import android.net.wifi.WifiManager;
 import android.printservice.PrintService;
 import android.printservice.recommendation.RecommendationInfo;
 import android.printservice.recommendation.RecommendationService;
 import android.util.Log;
 
-import com.android.printservice.recommendation.plugin.google.CloudPrintPlugin;
 import com.android.printservice.recommendation.plugin.hp.HPRecommendationPlugin;
 import com.android.printservice.recommendation.plugin.mdnsFilter.MDNSFilterPlugin;
 import com.android.printservice.recommendation.plugin.mdnsFilter.VendorConfig;
@@ -45,11 +45,21 @@ public class RecommendationServiceImpl extends RecommendationService
     private static final String LOG_TAG = "PrintServiceRecService";
 
     /** All registered plugins */
-    private ArrayList<RemotePrintServicePlugin> mPlugins;
+    private final ArrayList<RemotePrintServicePlugin> mPlugins = new ArrayList<>();
+
+    /** Lock to keep multi-cast enabled */
+    private WifiManager.MulticastLock mMultiCastLock;
 
     @Override
     public void onConnected() {
-        mPlugins = new ArrayList<>();
+        WifiManager wifiManager = getSystemService(WifiManager.class);
+        if (wifiManager != null) {
+            if (mMultiCastLock == null) {
+                mMultiCastLock = wifiManager.createMulticastLock(LOG_TAG);
+            }
+
+            mMultiCastLock.acquire();
+        }
 
         try {
             for (VendorConfig config : VendorConfig.getAllConfigs(this)) {
@@ -63,14 +73,6 @@ public class RecommendationServiceImpl extends RecommendationService
             }
         } catch (IOException | XmlPullParserException e) {
             throw new RuntimeException("Could not parse vendorconfig", e);
-        }
-
-        try {
-            mPlugins.add(new RemotePrintServicePlugin(new CloudPrintPlugin(this), this,
-                    true));
-        } catch (Exception e) {
-            Log.e(LOG_TAG, "Could not initiate "
-                            + getString(R.string.plugin_vendor_google_cloud_print) + " plugin", e);
         }
 
         try {
@@ -124,6 +126,11 @@ public class RecommendationServiceImpl extends RecommendationService
             } catch (RemotePrintServicePlugin.PluginException e) {
                 Log.e(LOG_TAG, "Could not stop plugin", e);
             }
+        }
+        mPlugins.clear();
+
+        if (mMultiCastLock != null) {
+            mMultiCastLock.release();
         }
     }
 

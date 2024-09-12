@@ -16,13 +16,13 @@
 
 package android.app;
 
+import android.content.pm.InstantAppRequestInfo;
 import android.os.IRemoteCallback;
 
 /** @hide */
 oneway interface IInstantAppResolver {
-    void getInstantAppResolveInfoList(in int[] digestPrefix,
-            String token, int sequence, IRemoteCallback callback);
+    void getInstantAppResolveInfoList(in InstantAppRequestInfo request, int sequence,
+            IRemoteCallback callback);
 
-    void getInstantAppIntentFilterList(in int[] digestPrefix,
-            String token, String hostName, IRemoteCallback callback);
+    void getInstantAppIntentFilterList(in InstantAppRequestInfo request, IRemoteCallback callback);
 }

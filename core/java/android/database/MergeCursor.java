@@ -17,11 +17,12 @@
 package android.database;
 
 /**
- * A convience class that lets you present an array of Cursors as a single linear Cursor.
+ * A convenience class that lets you present an array of Cursors as a single linear Cursor.
  * The schema of the cursors presented is entirely up to the creator of the MergeCursor, and
  * may be different if that is desired. Calls to getColumns, getColumnIndex, etc will return the
  * value for the row that the MergeCursor is currently pointing at.
  */
+@android.ravenwood.annotation.RavenwoodKeepWholeClass
 public class MergeCursor extends AbstractCursor
 {
     private DataSetObserver mObserver = new DataSetObserver() {

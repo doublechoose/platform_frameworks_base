@@ -15,10 +15,13 @@
  */
 package android.hardware.location;
 
+import android.annotation.NonNull;
 import android.annotation.SystemApi;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.util.Log;
+
+import java.util.Objects;
 
 /** A class describing nano apps.
  * A nano app is a piece of executable code that can be
@@ -28,10 +31,15 @@ import android.util.Log;
  * Nano apps are expected to be used only by bundled apps only
  * at this time.
  *
+ * @deprecated Use {@link android.hardware.location.NanoAppBinary} instead to load a nanoapp with
+ *             {@link android.hardware.location.ContextHubManager#loadNanoApp(
+ *             ContextHubInfo, NanoAppBinary)}.
+ *
  * @hide
  */
 @SystemApi
-public class NanoApp {
+@Deprecated
+public class NanoApp implements Parcelable {
     private final String TAG = "NanoApp";
 
     private final String UNKNOWN = "Unknown";
@@ -56,10 +64,10 @@ public class NanoApp {
      * {@link #setAppBinary(byte[])} and {@link #setAppId(long)} must be called
      * prior to passing this object to any managers.
      *
-     * @see #NanoApp(int, byte[])
+     * @see #NanoApp(long, byte[])
      */
     public NanoApp() {
-        this(0, null);
+        this(0L, null);
         mAppIdSet = false;
     }
 
@@ -190,10 +198,12 @@ public class NanoApp {
      *               needed Sensors
      */
     public void setNeededSensors(int[] neededSensors) {
+        Objects.requireNonNull(neededSensors, "neededSensors must not be null");
         mNeededSensors = neededSensors;
     }
 
     public void setOutputEvents(int[] outputEvents) {
+        Objects.requireNonNull(outputEvents, "outputEvents must not be null");
         mOutputEvents = outputEvents;
     }
 
@@ -203,9 +213,9 @@ public class NanoApp {
      * @param appBinary generated events
      */
     public void setAppBinary(byte[] appBinary) {
+        Objects.requireNonNull(appBinary, "appBinary must not be null");
         mAppBinary = appBinary;
     }
-
 
     /**
      * get the publisher name
@@ -350,7 +360,7 @@ public class NanoApp {
         out.writeByteArray(mAppBinary);
     }
 
-    public static final Parcelable.Creator<NanoApp> CREATOR
+    public static final @android.annotation.NonNull Parcelable.Creator<NanoApp> CREATOR
             = new Parcelable.Creator<NanoApp>() {
         public NanoApp createFromParcel(Parcel in) {
             return new NanoApp(in);
@@ -361,6 +371,7 @@ public class NanoApp {
         }
     };
 
+    @NonNull
     @Override
     public String toString() {
         String retVal = "Id : " + mAppId;

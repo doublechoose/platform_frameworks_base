@@ -16,16 +16,20 @@
 
 #include "VectorDrawable.h"
 
-#include "PathParser.h"
-#include "SkColorFilter.h"
-#include "SkImageInfo.h"
-#include "SkShader.h"
-#include <utils/Log.h>
-#include "utils/Macros.h"
-#include "utils/VectorDrawableUtils.h"
-
+#include <gui/TraceUtils.h>
 #include <math.h>
 #include <string.h>
+#include <utils/Log.h>
+
+#include "PathParser.h"
+#include "SkImage.h"
+#include "SkImageInfo.h"
+#include "SkSamplingOptions.h"
+#include "SkScalar.h"
+#include "hwui/Paint.h"
+#include "renderthread/RenderThread.h"
+#include "utils/Macros.h"
+#include "utils/VectorDrawableUtils.h"
 
 namespace android {
 namespace uirenderer {
@@ -78,7 +82,7 @@ FullPath::FullPath(const FullPath& path) : Path(path) {
 }
 
 static void applyTrim(SkPath* outPath, const SkPath& inPath, float trimPathStart, float trimPathEnd,
-        float trimPathOffset) {
+                      float trimPathOffset) {
     if (trimPathStart == 0.0f && trimPathEnd == 1.0f) {
         *outPath = inPath;
         return;
@@ -108,28 +112,27 @@ const SkPath& FullPath::getUpdatedPath(bool useStagingData, SkPath* tempStagingP
         return mTrimmedSkPath;
     }
     Path::getUpdatedPath(useStagingData, tempStagingPath);
-    SkPath *outPath;
+    SkPath* outPath;
     if (useStagingData) {
         SkPath inPath = *tempStagingPath;
         applyTrim(tempStagingPath, inPath, mStagingProperties.getTrimPathStart(),
-                mStagingProperties.getTrimPathEnd(), mStagingProperties.getTrimPathOffset());
+                  mStagingProperties.getTrimPathEnd(), mStagingProperties.getTrimPathOffset());
         outPath = tempStagingPath;
     } else {
         if (mProperties.getTrimPathStart() != 0.0f || mProperties.getTrimPathEnd() != 1.0f) {
             mProperties.mTrimDirty = false;
             applyTrim(&mTrimmedSkPath, mSkPath, mProperties.getTrimPathStart(),
-                    mProperties.getTrimPathEnd(), mProperties.getTrimPathOffset());
+                      mProperties.getTrimPathEnd(), mProperties.getTrimPathOffset());
             outPath = &mTrimmedSkPath;
         } else {
             outPath = &mSkPath;
         }
     }
     const FullPathProperties& properties = useStagingData ? mStagingProperties : mProperties;
-    bool setFillPath = properties.getFillGradient() != nullptr
-            || properties.getFillColor() != SK_ColorTRANSPARENT;
+    bool setFillPath = properties.getFillGradient() != nullptr ||
+                       properties.getFillColor() != SK_ColorTRANSPARENT;
     if (setFillPath) {
-        SkPath::FillType ft = static_cast<SkPath::FillType>(properties.getFillType());
-        outPath->setFillType(ft);
+        outPath->setFillType(static_cast<SkPathFillType>(properties.getFillType()));
     }
     return *outPath;
 }
@@ -137,10 +140,9 @@ const SkPath& FullPath::getUpdatedPath(bool useStagingData, SkPath* tempStagingP
 void FullPath::dump() {
     Path::dump();
     ALOGD("stroke width, color, alpha: %f, %d, %f, fill color, alpha: %d, %f",
-            mProperties.getStrokeWidth(), mProperties.getStrokeColor(), mProperties.getStrokeAlpha(),
-            mProperties.getFillColor(), mProperties.getFillAlpha());
+          mProperties.getStrokeWidth(), mProperties.getStrokeColor(), mProperties.getStrokeAlpha(),
+          mProperties.getFillColor(), mProperties.getFillAlpha());
 }
-
 
 inline SkColor applyAlpha(SkColor color, float alpha) {
     int alphaBytes = SkColorGetA(color);
@@ -166,7 +168,7 @@ void FullPath::draw(SkCanvas* outCanvas, bool useStagingData) {
 
     if (needsFill) {
         paint.setStyle(SkPaint::Style::kFill_Style);
-        paint.setAntiAlias(true);
+        paint.setAntiAlias(mAntiAlias);
         outCanvas->drawPath(renderPath, paint);
     }
 
@@ -182,7 +184,7 @@ void FullPath::draw(SkCanvas* outCanvas, bool useStagingData) {
     }
     if (needsStroke) {
         paint.setStyle(SkPaint::Style::kStroke_Style);
-        paint.setAntiAlias(true);
+        paint.setAntiAlias(mAntiAlias);
         paint.setStrokeJoin(SkPaint::Join(properties.getStrokeLineJoin()));
         paint.setStrokeCap(SkPaint::Cap(properties.getStrokeLineCap()));
         paint.setStrokeMiter(properties.getStrokeMiterLimit());
@@ -212,7 +214,7 @@ bool FullPath::FullPathProperties::copyProperties(int8_t* outProperties, int len
     int propertyDataSize = sizeof(FullPathProperties::PrimitiveFields);
     if (length != propertyDataSize) {
         LOG_ALWAYS_FATAL("Properties needs exactly %d bytes, a byte array of size %d is provided",
-                propertyDataSize, length);
+                         propertyDataSize, length);
         return false;
     }
 
@@ -228,41 +230,43 @@ void FullPath::FullPathProperties::setColorPropertyValue(int propertyId, int32_t
     } else if (currentProperty == Property::fillColor) {
         setFillColor(value);
     } else {
-        LOG_ALWAYS_FATAL("Error setting color property on FullPath: No valid property"
-                " with id: %d", propertyId);
+        LOG_ALWAYS_FATAL(
+                "Error setting color property on FullPath: No valid property"
+                " with id: %d",
+                propertyId);
     }
 }
 
 void FullPath::FullPathProperties::setPropertyValue(int propertyId, float value) {
     Property property = static_cast<Property>(propertyId);
     switch (property) {
-    case Property::strokeWidth:
-        setStrokeWidth(value);
-        break;
-    case Property::strokeAlpha:
-        setStrokeAlpha(value);
-        break;
-    case Property::fillAlpha:
-        setFillAlpha(value);
-        break;
-    case Property::trimPathStart:
-        setTrimPathStart(value);
-        break;
-    case Property::trimPathEnd:
-        setTrimPathEnd(value);
-        break;
-    case Property::trimPathOffset:
-        setTrimPathOffset(value);
-        break;
-    default:
-        LOG_ALWAYS_FATAL("Invalid property id: %d for animation", propertyId);
-        break;
+        case Property::strokeWidth:
+            setStrokeWidth(value);
+            break;
+        case Property::strokeAlpha:
+            setStrokeAlpha(value);
+            break;
+        case Property::fillAlpha:
+            setFillAlpha(value);
+            break;
+        case Property::trimPathStart:
+            setTrimPathStart(value);
+            break;
+        case Property::trimPathEnd:
+            setTrimPathEnd(value);
+            break;
+        case Property::trimPathOffset:
+            setTrimPathOffset(value);
+            break;
+        default:
+            LOG_ALWAYS_FATAL("Invalid property id: %d for animation", propertyId);
+            break;
     }
 }
 
 void ClipPath::draw(SkCanvas* outCanvas, bool useStagingData) {
     SkPath tempStagingPath;
-    outCanvas->clipPath(getUpdatedPath(useStagingData, &tempStagingPath));
+    outCanvas->clipPath(getUpdatedPath(useStagingData, &tempStagingPath), true);
 }
 
 Group::Group(const Group& group) : Node(group) {
@@ -287,7 +291,7 @@ void Group::draw(SkCanvas* outCanvas, bool useStagingData) {
 void Group::dump() {
     ALOGD("Group %s has %zu children: ", mName.c_str(), mChildren.size());
     ALOGD("Group translateX, Y : %f, %f, scaleX, Y: %f, %f", mProperties.getTranslateX(),
-            mProperties.getTranslateY(), mProperties.getScaleX(), mProperties.getScaleY());
+          mProperties.getTranslateY(), mProperties.getScaleX(), mProperties.getScaleY());
     for (size_t i = 0; i < mChildren.size(); i++) {
         mChildren[i]->dump();
     }
@@ -314,7 +318,7 @@ void Group::getLocalMatrix(SkMatrix* outMatrix, const GroupProperties& propertie
     outMatrix->postScale(properties.getScaleX(), properties.getScaleY());
     outMatrix->postRotate(properties.getRotation(), 0, 0);
     outMatrix->postTranslate(properties.getTranslateX() + properties.getPivotX(),
-            properties.getTranslateY() + properties.getPivotY());
+                             properties.getTranslateY() + properties.getPivotY());
 }
 
 void Group::addChild(Node* child) {
@@ -328,7 +332,7 @@ bool Group::GroupProperties::copyProperties(float* outProperties, int length) co
     int propertyCount = static_cast<int>(Property::count);
     if (length != propertyCount) {
         LOG_ALWAYS_FATAL("Properties needs exactly %d bytes, a byte array of size %d is provided",
-                propertyCount, length);
+                         propertyCount, length);
         return false;
     }
 
@@ -342,23 +346,23 @@ bool Group::GroupProperties::copyProperties(float* outProperties, int length) co
 float Group::GroupProperties::getPropertyValue(int propertyId) const {
     Property currentProperty = static_cast<Property>(propertyId);
     switch (currentProperty) {
-    case Property::rotate:
-        return getRotation();
-    case Property::pivotX:
-        return getPivotX();
-    case Property::pivotY:
-        return getPivotY();
-    case Property::scaleX:
-        return getScaleX();
-    case Property::scaleY:
-        return getScaleY();
-    case Property::translateX:
-        return getTranslateX();
-    case Property::translateY:
-        return getTranslateY();
-    default:
-        LOG_ALWAYS_FATAL("Invalid property index: %d", propertyId);
-        return 0;
+        case Property::rotate:
+            return getRotation();
+        case Property::pivotX:
+            return getPivotX();
+        case Property::pivotY:
+            return getPivotY();
+        case Property::scaleX:
+            return getScaleX();
+        case Property::scaleY:
+            return getScaleY();
+        case Property::translateX:
+            return getTranslateX();
+        case Property::translateY:
+            return getTranslateY();
+        default:
+            LOG_ALWAYS_FATAL("Invalid property index: %d", propertyId);
+            return 0;
     }
 }
 
@@ -366,29 +370,29 @@ float Group::GroupProperties::getPropertyValue(int propertyId) const {
 void Group::GroupProperties::setPropertyValue(int propertyId, float value) {
     Property currentProperty = static_cast<Property>(propertyId);
     switch (currentProperty) {
-    case Property::rotate:
-        setRotation(value);
-        break;
-    case Property::pivotX:
-        setPivotX(value);
-        break;
-    case Property::pivotY:
-        setPivotY(value);
-        break;
-    case Property::scaleX:
-        setScaleX(value);
-        break;
-    case Property::scaleY:
-        setScaleY(value);
-        break;
-    case Property::translateX:
-        setTranslateX(value);
-        break;
-    case Property::translateY:
-        setTranslateY(value);
-        break;
-    default:
-        LOG_ALWAYS_FATAL("Invalid property index: %d", propertyId);
+        case Property::rotate:
+            setRotation(value);
+            break;
+        case Property::pivotX:
+            setPivotX(value);
+            break;
+        case Property::pivotY:
+            setPivotY(value);
+            break;
+        case Property::scaleX:
+            setScaleX(value);
+            break;
+        case Property::scaleY:
+            setScaleY(value);
+            break;
+        case Property::translateX:
+            setTranslateX(value);
+            break;
+        case Property::translateY:
+            setTranslateY(value);
+            break;
+        default:
+            LOG_ALWAYS_FATAL("Invalid property index: %d", propertyId);
     }
 }
 
@@ -400,8 +404,8 @@ bool Group::GroupProperties::isValidProperty(int propertyId) {
     return propertyId >= 0 && propertyId < static_cast<int>(Property::count);
 }
 
-int Tree::draw(Canvas* outCanvas, SkColorFilter* colorFilter,
-        const SkRect& bounds, bool needsMirroring, bool canReuseCache) {
+int Tree::draw(Canvas* outCanvas, SkColorFilter* colorFilter, const SkRect& bounds,
+               bool needsMirroring, bool canReuseCache) {
     // The imageView can scale the canvas in different ways, in order to
     // avoid blurry scaling, we have to draw into a bitmap with exact pixel
     // size first. This bitmap size is determined by the bounds and the
@@ -416,8 +420,8 @@ int Tree::draw(Canvas* outCanvas, SkColorFilter* colorFilter,
         canvasScaleX = fabs(canvasMatrix.getScaleX());
         canvasScaleY = fabs(canvasMatrix.getScaleY());
     }
-    int scaledWidth = (int) (bounds.width() * canvasScaleX);
-    int scaledHeight = (int) (bounds.height() * canvasScaleY);
+    int scaledWidth = (int)(bounds.width() * canvasScaleX);
+    int scaledHeight = (int)(bounds.height() * canvasScaleY);
     scaledWidth = std::min(Tree::MAX_CACHED_BITMAP_SIZE, scaledWidth);
     scaledHeight = std::min(Tree::MAX_CACHED_BITMAP_SIZE, scaledHeight);
 
@@ -448,42 +452,39 @@ int Tree::draw(Canvas* outCanvas, SkColorFilter* colorFilter,
 }
 
 void Tree::drawStaging(Canvas* outCanvas) {
-    bool redrawNeeded = allocateBitmapIfNeeded(mStagingCache,
-            mStagingProperties.getScaledWidth(), mStagingProperties.getScaledHeight());
+    bool redrawNeeded = allocateBitmapIfNeeded(mStagingCache, mStagingProperties.getScaledWidth(),
+                                               mStagingProperties.getScaledHeight());
     // draw bitmap cache
     if (redrawNeeded || mStagingCache.dirty) {
         updateBitmapCache(*mStagingCache.bitmap, true);
         mStagingCache.dirty = false;
     }
 
-    SkPaint tmpPaint;
-    SkPaint* paint = updatePaint(&tmpPaint, &mStagingProperties);
-    outCanvas->drawBitmap(*mStagingCache.bitmap, 0, 0,
-            mStagingCache.bitmap->width(), mStagingCache.bitmap->height(),
-            mStagingProperties.getBounds().left(), mStagingProperties.getBounds().top(),
-            mStagingProperties.getBounds().right(), mStagingProperties.getBounds().bottom(), paint);
+    Paint skp;
+    getPaintFor(&skp, mStagingProperties);
+    Paint paint;
+    paint.setFilterBitmap(skp.isFilterBitmap());
+    paint.setColorFilter(skp.refColorFilter());
+    paint.setAlpha(skp.getAlpha());
+    outCanvas->drawBitmap(*mStagingCache.bitmap, 0, 0, mStagingCache.bitmap->width(),
+                          mStagingCache.bitmap->height(), mStagingProperties.getBounds().left(),
+                          mStagingProperties.getBounds().top(),
+                          mStagingProperties.getBounds().right(),
+                          mStagingProperties.getBounds().bottom(), &paint);
 }
 
-SkPaint* Tree::getPaint() {
-    return updatePaint(&mPaint, &mProperties);
-}
-
-// Update the given paint with alpha and color filter. Return nullptr if no color filter is
-// specified and root alpha is 1. Otherwise, return updated paint.
-SkPaint* Tree::updatePaint(SkPaint* outPaint, TreeProperties* prop) {
-    if (prop->getRootAlpha() == 1.0f && prop->getColorFilter() == nullptr) {
-        return nullptr;
-    } else {
-        outPaint->setColorFilter(sk_ref_sp(prop->getColorFilter()));
-        outPaint->setFilterQuality(kLow_SkFilterQuality);
-        outPaint->setAlpha(prop->getRootAlpha() * 255);
-        return outPaint;
+void Tree::getPaintFor(Paint* outPaint, const TreeProperties& prop) const {
+    // HWUI always draws VD with bilinear filtering.
+    outPaint->setFilterBitmap(true);
+    if (prop.getColorFilter() != nullptr) {
+        outPaint->setColorFilter(sk_ref_sp(prop.getColorFilter()));
     }
+    outPaint->setAlpha(prop.getRootAlpha() * 255);
 }
 
 Bitmap& Tree::getBitmapUpdateIfDirty() {
     bool redrawNeeded = allocateBitmapIfNeeded(mCache, mProperties.getScaledWidth(),
-            mProperties.getScaledHeight());
+                                               mProperties.getScaledHeight());
     if (redrawNeeded || mCache.dirty) {
         updateBitmapCache(*mCache.bitmap, false);
         mCache.dirty = false;
@@ -491,29 +492,47 @@ Bitmap& Tree::getBitmapUpdateIfDirty() {
     return *mCache.bitmap;
 }
 
+void Tree::draw(SkCanvas* canvas, const SkRect& bounds, const SkPaint& inPaint) {
+    if (canvas->quickReject(bounds)) {
+        // The RenderNode is on screen, but the AVD is not.
+        return;
+    }
+
+    // Update the paint for any animatable properties
+    SkPaint paint = inPaint;
+    paint.setAlpha(mProperties.getRootAlpha() * 255);
+
+    sk_sp<SkImage> cachedBitmap = getBitmapUpdateIfDirty().makeImage();
+
+    // HWUI always draws VD with bilinear filtering.
+    auto sampling = SkSamplingOptions(SkFilterMode::kLinear);
+    int scaledWidth = SkScalarCeilToInt(mProperties.getScaledWidth());
+    int scaledHeight = SkScalarCeilToInt(mProperties.getScaledHeight());
+    canvas->drawImageRect(cachedBitmap, SkRect::MakeWH(scaledWidth, scaledHeight), bounds,
+                          sampling, &paint, SkCanvas::kFast_SrcRectConstraint);
+}
+
 void Tree::updateBitmapCache(Bitmap& bitmap, bool useStagingData) {
     SkBitmap outCache;
     bitmap.getSkBitmap(&outCache);
+    int cacheWidth = outCache.width();
+    int cacheHeight = outCache.height();
+    ATRACE_FORMAT("VectorDrawable repaint %dx%d", cacheWidth, cacheHeight);
     outCache.eraseColor(SK_ColorTRANSPARENT);
     SkCanvas outCanvas(outCache);
-    float viewportWidth = useStagingData ?
-            mStagingProperties.getViewportWidth() : mProperties.getViewportWidth();
-    float viewportHeight = useStagingData ?
-            mStagingProperties.getViewportHeight() : mProperties.getViewportHeight();
-    float scaleX = outCache.width() / viewportWidth;
-    float scaleY = outCache.height() / viewportHeight;
+    float viewportWidth =
+            useStagingData ? mStagingProperties.getViewportWidth() : mProperties.getViewportWidth();
+    float viewportHeight = useStagingData ? mStagingProperties.getViewportHeight()
+                                          : mProperties.getViewportHeight();
+    float scaleX = cacheWidth / viewportWidth;
+    float scaleY = cacheHeight / viewportHeight;
     outCanvas.scale(scaleX, scaleY);
     mRootNode->draw(&outCanvas, useStagingData);
 }
 
 bool Tree::allocateBitmapIfNeeded(Cache& cache, int width, int height) {
     if (!canReuseBitmap(cache.bitmap.get(), width, height)) {
-#ifndef ANDROID_ENABLE_LINEAR_BLENDING
-        sk_sp<SkColorSpace> colorSpace = nullptr;
-#else
-        sk_sp<SkColorSpace> colorSpace = SkColorSpace::MakeSRGB();
-#endif
-        SkImageInfo info = SkImageInfo::MakeN32(width, height, kPremul_SkAlphaType, colorSpace);
+        SkImageInfo info = SkImageInfo::MakeN32(width, height, kPremul_SkAlphaType);
         cache.bitmap = Bitmap::allocateHeapBitmap(info);
         return true;
     }
@@ -521,7 +540,7 @@ bool Tree::allocateBitmapIfNeeded(Cache& cache, int width, int height) {
 }
 
 bool Tree::canReuseBitmap(Bitmap* bitmap, int width, int height) {
-    return bitmap && width <= bitmap->width() && height <= bitmap->height();
+    return bitmap && width == bitmap->width() && height == bitmap->height();
 }
 
 void Tree::onPropertyChanged(TreeProperties* prop) {
@@ -532,7 +551,81 @@ void Tree::onPropertyChanged(TreeProperties* prop) {
     }
 }
 
-}; // namespace VectorDrawable
+class MinMaxAverage {
+public:
+    void add(float sample) {
+        if (mCount == 0) {
+            mMin = sample;
+            mMax = sample;
+        } else {
+            mMin = std::min(mMin, sample);
+            mMax = std::max(mMax, sample);
+        }
+        mTotal += sample;
+        mCount++;
+    }
 
-}; // namespace uirenderer
-}; // namespace android
+    float average() { return mTotal / mCount; }
+
+    float min() { return mMin; }
+
+    float max() { return mMax; }
+
+    float delta() { return mMax - mMin; }
+
+private:
+    float mMin = 0.0f;
+    float mMax = 0.0f;
+    float mTotal = 0.0f;
+    int mCount = 0;
+};
+
+BitmapPalette Tree::computePalette() {
+    // TODO Cache this and share the code with Bitmap.cpp
+
+    ATRACE_CALL();
+
+    // TODO: This calculation of converting to HSV & tracking min/max is probably overkill
+    // Experiment with something simpler since we just want to figure out if it's "color-ful"
+    // and then the average perceptual lightness.
+
+    MinMaxAverage hue, saturation, value;
+    int sampledCount = 0;
+
+    // Sample a grid of 100 pixels to get an overall estimation of the colors in play
+    mRootNode->forEachFillColor([&](SkColor color) {
+        if (SkColorGetA(color) < 75) {
+            return;
+        }
+        sampledCount++;
+        float hsv[3];
+        SkColorToHSV(color, hsv);
+        hue.add(hsv[0]);
+        saturation.add(hsv[1]);
+        value.add(hsv[2]);
+    });
+
+    if (sampledCount == 0) {
+        ALOGV("VectorDrawable is mostly translucent");
+        return BitmapPalette::Unknown;
+    }
+
+    ALOGV("samples = %d, hue [min = %f, max = %f, avg = %f]; saturation [min = %f, max = %f, avg = "
+          "%f]; value [min = %f, max = %f, avg = %f]",
+          sampledCount, hue.min(), hue.max(), hue.average(), saturation.min(), saturation.max(),
+          saturation.average(), value.min(), value.max(), value.average());
+
+    if (hue.delta() <= 20 && saturation.delta() <= .1f) {
+        if (value.average() >= .5f) {
+            return BitmapPalette::Light;
+        } else {
+            return BitmapPalette::Dark;
+        }
+    }
+    return BitmapPalette::Unknown;
+}
+
+}  // namespace VectorDrawable
+
+}  // namespace uirenderer
+}  // namespace android

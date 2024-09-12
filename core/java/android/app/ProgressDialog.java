@@ -16,11 +16,11 @@
 
 package android.app;
 
-import com.android.internal.R;
-
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.res.TypedArray;
 import android.graphics.drawable.Drawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
@@ -32,6 +32,8 @@ import android.view.View;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
+import com.android.internal.R;
+
 import java.text.NumberFormat;
 
 /**
@@ -42,8 +44,12 @@ import java.text.NumberFormat;
  *
  * <p>The progress range is 0 to {@link #getMax() max}.</p>
  *
- * @deprecated Use a progress indicator such as ProgressBar inline inside of
- * an activity rather than using this modal dialog.
+ * @deprecated <code>ProgressDialog</code> is a modal dialog, which prevents the
+ * user from interacting with the app. Instead of using this class, you should
+ * use a progress indicator like {@link android.widget.ProgressBar}, which can
+ * be embedded in your app's UI. Alternatively, you can use a
+ * <a href="/guide/topics/ui/notifiers/notifications.html">notification</a>
+ * to inform the user of the task's progress.
  */
 @Deprecated
 public class ProgressDialog extends AlertDialog {
@@ -59,10 +65,13 @@ public class ProgressDialog extends AlertDialog {
      */
     public static final int STYLE_HORIZONTAL = 1;
     
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private ProgressBar mProgress;
+    @UnsupportedAppUsage
     private TextView mMessageView;
     
     private int mProgressStyle = STYLE_SPINNER;
+    @UnsupportedAppUsage
     private TextView mProgressNumber;
     private String mProgressNumberFormat;
     private TextView mProgressPercent;

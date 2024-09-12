@@ -16,6 +16,8 @@
 
 package android.os;
 
+import android.compat.annotation.UnsupportedAppUsage;
+
 import libcore.util.NativeAllocationRegistry;
 
 /** @hide */
@@ -24,6 +26,7 @@ public class HwRemoteBinder implements IHwBinder {
 
     private static final NativeAllocationRegistry sNativeRegistry;
 
+    @UnsupportedAppUsage
     public HwRemoteBinder() {
         native_setup_empty();
 
@@ -63,4 +66,9 @@ public class HwRemoteBinder implements IHwBinder {
     }
 
     private long mNativeContext;
+
+    @Override
+    public final native boolean equals(Object other);
+    @Override
+    public final native int hashCode();
 }

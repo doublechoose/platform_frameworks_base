@@ -41,6 +41,9 @@ public class HttpAuthHandler extends Handler {
      * are suitable for use. Credentials are not suitable if they have
      * previously been rejected by the server for the current request.
      *
+     * <p class="note"><b>Note:</b> The host application must call this method
+     * on the host application's UI Thread.
+     *
      * @return whether the credentials are suitable for use
      * @see WebView#getHttpAuthUsernamePassword
      */
@@ -50,6 +53,9 @@ public class HttpAuthHandler extends Handler {
 
     /**
      * Instructs the WebView to cancel the authentication request.
+     *
+     * <p class="note"><b>Note:</b> The host application must call this method
+     * on the host application's UI Thread.
      */
     public void cancel() {
     }
@@ -58,17 +64,10 @@ public class HttpAuthHandler extends Handler {
      * Instructs the WebView to proceed with the authentication with the given
      * credentials. Credentials for use with this method can be retrieved from
      * the WebView's store using {@link WebView#getHttpAuthUsernamePassword}.
+     *
+     * <p class="note"><b>Note:</b> The host application must call this method
+     * on the host application's UI Thread.
      */
     public void proceed(String username, String password) {
-    }
-
-    /**
-     * Gets whether the prompt dialog should be suppressed.
-     *
-     * @return whether the prompt dialog should be suppressed
-     * @hide
-     */
-    public boolean suppressDialog() {
-        return false;
     }
 }

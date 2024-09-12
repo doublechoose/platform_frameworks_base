@@ -16,20 +16,28 @@
 
 package android.text;
 
+import static java.lang.annotation.RetentionPolicy.SOURCE;
+
 import android.annotation.FloatRange;
+import android.annotation.IntDef;
+import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.PluralsRes;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.res.Resources;
+import android.graphics.Typeface;
 import android.icu.lang.UCharacter;
+import android.icu.text.CaseMap;
+import android.icu.text.Edits;
 import android.icu.util.ULocale;
 import android.os.Parcel;
 import android.os.Parcelable;
-import android.os.SystemProperties;
-import android.provider.Settings;
+import android.sysprop.DisplayProperties;
 import android.text.style.AbsoluteSizeSpan;
 import android.text.style.AccessibilityClickableSpan;
+import android.text.style.AccessibilityReplacementSpan;
 import android.text.style.AccessibilityURLSpan;
 import android.text.style.AlignmentSpan;
 import android.text.style.BackgroundColorSpan;
@@ -38,8 +46,10 @@ import android.text.style.CharacterStyle;
 import android.text.style.EasyEditSpan;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.LeadingMarginSpan;
+import android.text.style.LineBackgroundSpan;
+import android.text.style.LineBreakConfigSpan;
+import android.text.style.LineHeightSpan;
 import android.text.style.LocaleSpan;
-import android.text.style.MetricAffectingSpan;
 import android.text.style.ParagraphStyle;
 import android.text.style.QuoteSpan;
 import android.text.style.RelativeSizeSpan;
@@ -58,15 +68,17 @@ import android.text.style.TypefaceSpan;
 import android.text.style.URLSpan;
 import android.text.style.UnderlineSpan;
 import android.text.style.UpdateAppearance;
+import android.util.EmptyArray;
 import android.util.Log;
 import android.util.Printer;
 import android.view.View;
 
-import com.android.internal.R;
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.Preconditions;
 
+import java.lang.annotation.Retention;
 import java.lang.reflect.Array;
+import java.util.BitSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -75,15 +87,64 @@ import java.util.regex.Pattern;
 public class TextUtils {
     private static final String TAG = "TextUtils";
 
-    /* package */ static final char[] ELLIPSIS_NORMAL = { '\u2026' }; // this is "..."
-    /** {@hide} */
-    public static final String ELLIPSIS_STRING = new String(ELLIPSIS_NORMAL);
+    // Zero-width character used to fill ellipsized strings when codepoint length must be preserved.
+    /* package */ static final char ELLIPSIS_FILLER = '\uFEFF'; // ZERO WIDTH NO-BREAK SPACE
 
-    /* package */ static final char[] ELLIPSIS_TWO_DOTS = { '\u2025' }; // this is ".."
-    private static final String ELLIPSIS_TWO_DOTS_STRING = new String(ELLIPSIS_TWO_DOTS);
+    // TODO: Based on CLDR data, these need to be localized for Dzongkha (dz) and perhaps
+    // Hong Kong Traditional Chinese (zh-Hant-HK), but that may need to depend on the actual word
+    // being ellipsized and not the locale.
+    private static final String ELLIPSIS_NORMAL = "\u2026"; // HORIZONTAL ELLIPSIS (…)
+    private static final String ELLIPSIS_TWO_DOTS = "\u2025"; // TWO DOT LEADER (‥)
+
+    /** @hide */
+    public static final int LINE_FEED_CODE_POINT = 10;
+
+    private static final int NBSP_CODE_POINT = 160;
+
+    /**
+     * Flags for {@link #makeSafeForPresentation(String, int, float, int)}
+     *
+     * @hide
+     */
+    @Retention(SOURCE)
+    @IntDef(flag = true, prefix = "CLEAN_STRING_FLAG_",
+            value = {SAFE_STRING_FLAG_TRIM, SAFE_STRING_FLAG_SINGLE_LINE,
+                    SAFE_STRING_FLAG_FIRST_LINE})
+    public @interface SafeStringFlags {}
+
+    /**
+     * Remove {@link Character#isWhitespace(int) whitespace} and non-breaking spaces from the edges
+     * of the label.
+     *
+     * @see #makeSafeForPresentation(String, int, float, int)
+     */
+    public static final int SAFE_STRING_FLAG_TRIM = 0x1;
+
+    /**
+     * Force entire string into single line of text (no newlines). Cannot be set at the same time as
+     * {@link #SAFE_STRING_FLAG_FIRST_LINE}.
+     *
+     * @see #makeSafeForPresentation(String, int, float, int)
+     */
+    public static final int SAFE_STRING_FLAG_SINGLE_LINE = 0x2;
+
+    /**
+     * Return only first line of text (truncate at first newline). Cannot be set at the same time as
+     * {@link #SAFE_STRING_FLAG_SINGLE_LINE}.
+     *
+     * @see #makeSafeForPresentation(String, int, float, int)
+     */
+    public static final int SAFE_STRING_FLAG_FIRST_LINE = 0x4;
+
+    /** {@hide} */
+    @NonNull
+    public static String getEllipsisString(@NonNull TextUtils.TruncateAt method) {
+        return (method == TextUtils.TruncateAt.END_SMALL) ? ELLIPSIS_TWO_DOTS : ELLIPSIS_NORMAL;
+    }
 
     private TextUtils() { /* cannot be instantiated */ }
 
+    @android.ravenwood.annotation.RavenwoodKeep
     public static void getChars(CharSequence s, int start, int end,
                                 char[] dest, int destoff) {
         Class<? extends CharSequence> c = s.getClass();
@@ -102,10 +163,12 @@ public class TextUtils {
         }
     }
 
+    @android.ravenwood.annotation.RavenwoodKeep
     public static int indexOf(CharSequence s, char ch) {
         return indexOf(s, ch, 0);
     }
 
+    @android.ravenwood.annotation.RavenwoodKeep
     public static int indexOf(CharSequence s, char ch, int start) {
         Class<? extends CharSequence> c = s.getClass();
 
@@ -115,6 +178,7 @@ public class TextUtils {
         return indexOf(s, ch, start, s.length());
     }
 
+    @android.ravenwood.annotation.RavenwoodKeep
     public static int indexOf(CharSequence s, char ch, int start, int end) {
         Class<? extends CharSequence> c = s.getClass();
 
@@ -152,10 +216,12 @@ public class TextUtils {
         return -1;
     }
 
+    @android.ravenwood.annotation.RavenwoodKeep
     public static int lastIndexOf(CharSequence s, char ch) {
         return lastIndexOf(s, ch, s.length() - 1);
     }
 
+    @android.ravenwood.annotation.RavenwoodKeep
     public static int lastIndexOf(CharSequence s, char ch, int last) {
         Class<? extends CharSequence> c = s.getClass();
 
@@ -165,6 +231,7 @@ public class TextUtils {
         return lastIndexOf(s, ch, 0, last);
     }
 
+    @android.ravenwood.annotation.RavenwoodKeep
     public static int lastIndexOf(CharSequence s, char ch,
                                   int start, int last) {
         if (last < 0)
@@ -210,14 +277,17 @@ public class TextUtils {
         return -1;
     }
 
+    @android.ravenwood.annotation.RavenwoodKeep
     public static int indexOf(CharSequence s, CharSequence needle) {
         return indexOf(s, needle, 0, s.length());
     }
 
+    @android.ravenwood.annotation.RavenwoodKeep
     public static int indexOf(CharSequence s, CharSequence needle, int start) {
         return indexOf(s, needle, start, s.length());
     }
 
+    @android.ravenwood.annotation.RavenwoodKeep
     public static int indexOf(CharSequence s, CharSequence needle,
                               int start, int end) {
         int nlen = needle.length();
@@ -245,6 +315,7 @@ public class TextUtils {
         return -1;
     }
 
+    @android.ravenwood.annotation.RavenwoodKeep
     public static boolean regionMatches(CharSequence one, int toffset,
                                         CharSequence two, int ooffset,
                                         int len) {
@@ -277,6 +348,7 @@ public class TextUtils {
      * in that it does not preserve any style runs in the source sequence,
      * allowing a more efficient implementation.
      */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static String substring(CharSequence source, int start, int end) {
         if (source instanceof String)
             return ((String) source).substring(start, end);
@@ -293,46 +365,112 @@ public class TextUtils {
         return ret;
     }
 
+
     /**
-     * Returns a string containing the tokens joined by delimiters.
-     * @param tokens an array objects to be joined. Strings will be formed from
-     *     the objects by calling object.toString().
+     * Returns the longest prefix of a string for which the UTF-8 encoding fits into the given
+     * number of bytes, with the additional guarantee that the string is not truncated in the middle
+     * of a valid surrogate pair.
+     *
+     * <p>Unpaired surrogates are counted as taking 3 bytes of storage. However, a subsequent
+     * attempt to actually encode a string containing unpaired surrogates is likely to be rejected
+     * by the UTF-8 implementation.
+     *
+     * (copied from google/thirdparty)
+     *
+     * @param str a string
+     * @param maxbytes the maximum number of UTF-8 encoded bytes
+     * @return the beginning of the string, so that it uses at most maxbytes bytes in UTF-8
+     * @throws IndexOutOfBoundsException if maxbytes is negative
+     *
+     * @hide
      */
-    public static String join(CharSequence delimiter, Object[] tokens) {
-        StringBuilder sb = new StringBuilder();
-        boolean firstTime = true;
-        for (Object token: tokens) {
-            if (firstTime) {
-                firstTime = false;
+    public static String truncateStringForUtf8Storage(String str, int maxbytes) {
+        if (maxbytes < 0) {
+            throw new IndexOutOfBoundsException();
+        }
+
+        int bytes = 0;
+        for (int i = 0, len = str.length(); i < len; i++) {
+            char c = str.charAt(i);
+            if (c < 0x80) {
+                bytes += 1;
+            } else if (c < 0x800) {
+                bytes += 2;
+            } else if (c < Character.MIN_SURROGATE
+                    || c > Character.MAX_SURROGATE
+                    || str.codePointAt(i) < Character.MIN_SUPPLEMENTARY_CODE_POINT) {
+                bytes += 3;
             } else {
-                sb.append(delimiter);
+                bytes += 4;
+                i += (bytes > maxbytes) ? 0 : 1;
             }
-            sb.append(token);
+            if (bytes > maxbytes) {
+                return str.substring(0, i);
+            }
+        }
+        return str;
+    }
+
+
+    /**
+     * Returns a string containing the tokens joined by delimiters.
+     *
+     * @param delimiter a CharSequence that will be inserted between the tokens. If null, the string
+     *     "null" will be used as the delimiter.
+     * @param tokens an array objects to be joined. Strings will be formed from the objects by
+     *     calling object.toString(). If tokens is null, a NullPointerException will be thrown. If
+     *     tokens is an empty array, an empty string will be returned.
+     */
+    @android.ravenwood.annotation.RavenwoodKeep
+    public static String join(@NonNull CharSequence delimiter, @NonNull Object[] tokens) {
+        final int length = tokens.length;
+        if (length == 0) {
+            return "";
+        }
+        final StringBuilder sb = new StringBuilder();
+        sb.append(tokens[0]);
+        for (int i = 1; i < length; i++) {
+            sb.append(delimiter);
+            sb.append(tokens[i]);
         }
         return sb.toString();
     }
 
     /**
      * Returns a string containing the tokens joined by delimiters.
-     * @param tokens an array objects to be joined. Strings will be formed from
-     *     the objects by calling object.toString().
+     *
+     * @param delimiter a CharSequence that will be inserted between the tokens. If null, the string
+     *     "null" will be used as the delimiter.
+     * @param tokens an array objects to be joined. Strings will be formed from the objects by
+     *     calling object.toString(). If tokens is null, a NullPointerException will be thrown. If
+     *     tokens is empty, an empty string will be returned.
      */
-    public static String join(CharSequence delimiter, Iterable tokens) {
-        StringBuilder sb = new StringBuilder();
-        Iterator<?> it = tokens.iterator();
-        if (it.hasNext()) {
+    @android.ravenwood.annotation.RavenwoodKeep
+    public static String join(@NonNull CharSequence delimiter, @NonNull Iterable tokens) {
+        final Iterator<?> it = tokens.iterator();
+        if (!it.hasNext()) {
+            return "";
+        }
+        final StringBuilder sb = new StringBuilder();
+        sb.append(it.next());
+        while (it.hasNext()) {
+            sb.append(delimiter);
             sb.append(it.next());
-            while (it.hasNext()) {
-                sb.append(delimiter);
-                sb.append(it.next());
-            }
         }
         return sb.toString();
     }
 
     /**
-     * String.split() returns [''] when the string to be split is empty. This returns []. This does
-     * not remove any empty strings from the result. For example split("a,", ","  ) returns {"a", ""}.
+     *
+     * This method yields the same result as {@code text.split(expression, -1)} except that if
+     * {@code text.isEmpty()} then this method returns an empty array whereas
+     * {@code "".split(expression, -1)} would have returned an array with a single {@code ""}.
+     *
+     * The {@code -1} means that trailing empty Strings are not removed from the result; for
+     * example split("a,", ","  ) returns {"a", ""}. Note that whether a leading zero-width match
+     * can result in a leading {@code ""} depends on whether your app
+     * {@link android.content.pm.ApplicationInfo#targetSdkVersion targets an SDK version}
+     * {@code <= 28}; see {@link Pattern#split(CharSequence, int)}.
      *
      * @param text the string to split
      * @param expression the regular expression to match
@@ -340,26 +478,36 @@ public class TextUtils {
      *
      * @throws NullPointerException if expression or text is null
      */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static String[] split(String text, String expression) {
         if (text.length() == 0) {
-            return EMPTY_STRING_ARRAY;
+            return EmptyArray.STRING;
         } else {
             return text.split(expression, -1);
         }
     }
 
     /**
-     * Splits a string on a pattern. String.split() returns [''] when the string to be
-     * split is empty. This returns []. This does not remove any empty strings from the result.
+     * Splits a string on a pattern. This method yields the same result as
+     * {@code pattern.split(text, -1)} except that if {@code text.isEmpty()} then this method
+     * returns an empty array whereas {@code pattern.split("", -1)} would have returned an array
+     * with a single {@code ""}.
+     *
+     * The {@code -1} means that trailing empty Strings are not removed from the result;
+     * Note that whether a leading zero-width match can result in a leading {@code ""} depends
+     * on whether your app {@link android.content.pm.ApplicationInfo#targetSdkVersion targets
+     * an SDK version} {@code <= 28}; see {@link Pattern#split(CharSequence, int)}.
+     *
      * @param text the string to split
      * @param pattern the regular expression to match
      * @return an array of strings. The array will be empty if text is empty
      *
      * @throws NullPointerException if expression or text is null
      */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static String[] split(String text, Pattern pattern) {
         if (text.length() == 0) {
-            return EMPTY_STRING_ARRAY;
+            return EmptyArray.STRING;
         } else {
             return pattern.split(text, -1);
         }
@@ -394,6 +542,7 @@ public class TextUtils {
      * be returned for the empty string after that delimeter. That is, splitting <tt>"a,b,"</tt> on
      * comma will return <tt>"a", "b"</tt>, not <tt>"a", "b", ""</tt>.
      */
+    @android.ravenwood.annotation.RavenwoodKeepWholeClass
     public static class SimpleStringSplitter implements StringSplitter, Iterator<String> {
         private String mString;
         private char mDelimiter;
@@ -457,28 +606,42 @@ public class TextUtils {
      * @param str the string to be examined
      * @return true if str is null or zero length
      */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static boolean isEmpty(@Nullable CharSequence str) {
         return str == null || str.length() == 0;
     }
 
     /** {@hide} */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static String nullIfEmpty(@Nullable String str) {
         return isEmpty(str) ? null : str;
     }
 
     /** {@hide} */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static String emptyIfNull(@Nullable String str) {
         return str == null ? "" : str;
     }
 
     /** {@hide} */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static String firstNotEmpty(@Nullable String a, @NonNull String b) {
         return !isEmpty(a) ? a : Preconditions.checkStringNotEmpty(b);
     }
 
     /** {@hide} */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static int length(@Nullable String s) {
-        return isEmpty(s) ? 0 : s.length();
+        return s != null ? s.length() : 0;
+    }
+
+    /**
+     * @return interned string if it's null.
+     * @hide
+     */
+    @android.ravenwood.annotation.RavenwoodKeep
+    public static String safeIntern(String s) {
+        return (s != null) ? s.intern() : null;
     }
 
     /**
@@ -486,6 +649,7 @@ public class TextUtils {
      * spaces and ASCII control characters were trimmed from the start and end,
      * as by {@link String#trim}.
      */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static int getTrimmedLength(CharSequence s) {
         int len = s.length();
 
@@ -510,6 +674,7 @@ public class TextUtils {
      * @param b second CharSequence to check
      * @return true if a and b are equal
      */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static boolean equals(CharSequence a, CharSequence b) {
         if (a == b) return true;
         int length;
@@ -642,16 +807,25 @@ public class TextUtils {
     /** @hide */
     public static final int ACCESSIBILITY_URL_SPAN = 26;
     /** @hide */
-    public static final int LAST_SPAN = ACCESSIBILITY_URL_SPAN;
+    public static final int LINE_BACKGROUND_SPAN = 27;
+    /** @hide */
+    public static final int LINE_HEIGHT_SPAN = 28;
+    /** @hide */
+    public static final int ACCESSIBILITY_REPLACEMENT_SPAN = 29;
+    /** @hide */
+    public static final int LINE_BREAK_CONFIG_SPAN = 30;
+    /** @hide */
+    public static final int LAST_SPAN = LINE_BREAK_CONFIG_SPAN;
 
     /**
      * Flatten a CharSequence and whatever styles can be copied across processes
      * into the parcel.
      */
-    public static void writeToParcel(CharSequence cs, Parcel p, int parcelableFlags) {
+    public static void writeToParcel(@Nullable CharSequence cs, @NonNull Parcel p,
+            int parcelableFlags) {
         if (cs instanceof Spanned) {
             p.writeInt(0);
-            p.writeString(cs.toString());
+            p.writeString8(cs.toString());
 
             Spanned sp = (Spanned) cs;
             Object[] os = sp.getSpans(0, cs.length(), Object.class);
@@ -688,9 +862,9 @@ public class TextUtils {
         } else {
             p.writeInt(1);
             if (cs != null) {
-                p.writeString(cs.toString());
+                p.writeString8(cs.toString());
             } else {
-                p.writeString(null);
+                p.writeString8(null);
             }
         }
     }
@@ -710,7 +884,7 @@ public class TextUtils {
         public CharSequence createFromParcel(Parcel p) {
             int kind = p.readInt();
 
-            String string = p.readString();
+            String string = p.readString8();
             if (string == null) {
                 return null;
             }
@@ -727,114 +901,132 @@ public class TextUtils {
                 if (kind == 0)
                     break;
 
+                final Object span;
                 switch (kind) {
                 case ALIGNMENT_SPAN:
-                    readSpan(p, sp, new AlignmentSpan.Standard(p));
+                    span = new AlignmentSpan.Standard(p);
                     break;
 
                 case FOREGROUND_COLOR_SPAN:
-                    readSpan(p, sp, new ForegroundColorSpan(p));
+                    span = new ForegroundColorSpan(p);
                     break;
 
                 case RELATIVE_SIZE_SPAN:
-                    readSpan(p, sp, new RelativeSizeSpan(p));
+                    span = new RelativeSizeSpan(p);
                     break;
 
                 case SCALE_X_SPAN:
-                    readSpan(p, sp, new ScaleXSpan(p));
+                    span = new ScaleXSpan(p);
                     break;
 
                 case STRIKETHROUGH_SPAN:
-                    readSpan(p, sp, new StrikethroughSpan(p));
+                    span = new StrikethroughSpan(p);
                     break;
 
                 case UNDERLINE_SPAN:
-                    readSpan(p, sp, new UnderlineSpan(p));
+                    span = new UnderlineSpan(p);
                     break;
 
                 case STYLE_SPAN:
-                    readSpan(p, sp, new StyleSpan(p));
+                    span = new StyleSpan(p);
                     break;
 
                 case BULLET_SPAN:
-                    readSpan(p, sp, new BulletSpan(p));
+                    span = new BulletSpan(p);
                     break;
 
                 case QUOTE_SPAN:
-                    readSpan(p, sp, new QuoteSpan(p));
+                    span = new QuoteSpan(p);
                     break;
 
                 case LEADING_MARGIN_SPAN:
-                    readSpan(p, sp, new LeadingMarginSpan.Standard(p));
-                break;
+                    span = new LeadingMarginSpan.Standard(p);
+                    break;
 
                 case URL_SPAN:
-                    readSpan(p, sp, new URLSpan(p));
+                    span = new URLSpan(p);
                     break;
 
                 case BACKGROUND_COLOR_SPAN:
-                    readSpan(p, sp, new BackgroundColorSpan(p));
+                    span = new BackgroundColorSpan(p);
                     break;
 
                 case TYPEFACE_SPAN:
-                    readSpan(p, sp, new TypefaceSpan(p));
+                    span = new TypefaceSpan(p);
                     break;
 
                 case SUPERSCRIPT_SPAN:
-                    readSpan(p, sp, new SuperscriptSpan(p));
+                    span = new SuperscriptSpan(p);
                     break;
 
                 case SUBSCRIPT_SPAN:
-                    readSpan(p, sp, new SubscriptSpan(p));
+                    span = new SubscriptSpan(p);
                     break;
 
                 case ABSOLUTE_SIZE_SPAN:
-                    readSpan(p, sp, new AbsoluteSizeSpan(p));
+                    span = new AbsoluteSizeSpan(p);
                     break;
 
                 case TEXT_APPEARANCE_SPAN:
-                    readSpan(p, sp, new TextAppearanceSpan(p));
+                    span = new TextAppearanceSpan(p);
                     break;
 
                 case ANNOTATION:
-                    readSpan(p, sp, new Annotation(p));
+                    span = new Annotation(p);
                     break;
 
                 case SUGGESTION_SPAN:
-                    readSpan(p, sp, new SuggestionSpan(p));
+                    span = new SuggestionSpan(p);
                     break;
 
                 case SPELL_CHECK_SPAN:
-                    readSpan(p, sp, new SpellCheckSpan(p));
+                    span = new SpellCheckSpan(p);
                     break;
 
                 case SUGGESTION_RANGE_SPAN:
-                    readSpan(p, sp, new SuggestionRangeSpan(p));
+                    span = new SuggestionRangeSpan(p);
                     break;
 
                 case EASY_EDIT_SPAN:
-                    readSpan(p, sp, new EasyEditSpan(p));
+                    span = new EasyEditSpan(p);
                     break;
 
                 case LOCALE_SPAN:
-                    readSpan(p, sp, new LocaleSpan(p));
+                    span = new LocaleSpan(p);
                     break;
 
                 case TTS_SPAN:
-                    readSpan(p, sp, new TtsSpan(p));
+                    span = new TtsSpan(p);
                     break;
 
                 case ACCESSIBILITY_CLICKABLE_SPAN:
-                    readSpan(p, sp, new AccessibilityClickableSpan(p));
+                    span = new AccessibilityClickableSpan(p);
                     break;
 
                 case ACCESSIBILITY_URL_SPAN:
-                    readSpan(p, sp, new AccessibilityURLSpan(p));
+                    span = new AccessibilityURLSpan(p);
+                    break;
+
+                case LINE_BACKGROUND_SPAN:
+                    span = new LineBackgroundSpan.Standard(p);
+                    break;
+
+                case LINE_HEIGHT_SPAN:
+                    span = new LineHeightSpan.Standard(p);
+                    break;
+
+                case ACCESSIBILITY_REPLACEMENT_SPAN:
+                    span = new AccessibilityReplacementSpan(p);
+                    break;
+
+                case LINE_BREAK_CONFIG_SPAN:
+                    span = LineBreakConfigSpan.CREATOR.createFromParcel(p);
                     break;
 
                 default:
                     throw new RuntimeException("bogus span encoding " + kind);
                 }
+                readSpan(p, sp, span);
             }
 
             return sp;
@@ -1072,6 +1264,75 @@ public class TextUtils {
         }
     }
 
+    /**
+     * Transforms a CharSequences to uppercase, copying the sources spans and keeping them spans as
+     * much as possible close to their relative original places. If uppercase string is identical
+     * to the sources, the source itself is returned instead of being copied.
+     *
+     * If copySpans is set, source must be an instance of Spanned.
+     *
+     * {@hide}
+     */
+    @NonNull
+    public static CharSequence toUpperCase(@Nullable Locale locale, @NonNull CharSequence source,
+            boolean copySpans) {
+        final Edits edits = new Edits();
+        if (!copySpans) { // No spans. Just uppercase the characters.
+            final StringBuilder result = CaseMap.toUpper().apply(
+                    locale, source, new StringBuilder(), edits);
+            return edits.hasChanges() ? result : source;
+        }
+
+        final SpannableStringBuilder result = CaseMap.toUpper().apply(
+                locale, source, new SpannableStringBuilder(), edits);
+        if (!edits.hasChanges()) {
+            // No changes happened while capitalizing. We can return the source as it was.
+            return source;
+        }
+
+        final Edits.Iterator iterator = edits.getFineIterator();
+        final int sourceLength = source.length();
+        final Spanned spanned = (Spanned) source;
+        final Object[] spans = spanned.getSpans(0, sourceLength, Object.class);
+        for (Object span : spans) {
+            final int sourceStart = spanned.getSpanStart(span);
+            final int sourceEnd = spanned.getSpanEnd(span);
+            final int flags = spanned.getSpanFlags(span);
+            // Make sure the indices are not at the end of the string, since in that case
+            // iterator.findSourceIndex() would fail.
+            final int destStart = sourceStart == sourceLength ? result.length() :
+                    toUpperMapToDest(iterator, sourceStart);
+            final int destEnd = sourceEnd == sourceLength ? result.length() :
+                    toUpperMapToDest(iterator, sourceEnd);
+            result.setSpan(span, destStart, destEnd, flags);
+        }
+        return result;
+    }
+
+    // helper method for toUpperCase()
+    private static int toUpperMapToDest(Edits.Iterator iterator, int sourceIndex) {
+        // Guaranteed to succeed if sourceIndex < source.length().
+        iterator.findSourceIndex(sourceIndex);
+        if (sourceIndex == iterator.sourceIndex()) {
+            return iterator.destinationIndex();
+        }
+        // We handle the situation differently depending on if we are in the changed slice or an
+        // unchanged one: In an unchanged slice, we can find the exact location the span
+        // boundary was before and map there.
+        //
+        // But in a changed slice, we need to treat the whole destination slice as an atomic unit.
+        // We adjust the span boundary to the end of that slice to reduce of the chance of adjacent
+        // spans in the source overlapping in the result. (The choice for the end vs the beginning
+        // is somewhat arbitrary, but was taken because we except to see slightly more spans only
+        // affecting a base character compared to spans only affecting a combining character.)
+        if (iterator.hasChange()) {
+            return iterator.destinationIndex() + iterator.newLength();
+        } else {
+            // Move the index 1:1 along with this unchanged piece of text.
+            return iterator.destinationIndex() + (sourceIndex - iterator.sourceIndex());
+        }
+    }
+
     public enum TruncateAt {
         START,
         MIDDLE,
@@ -1080,6 +1341,7 @@ public class TextUtils {
         /**
          * @hide
          */
+        @UnsupportedAppUsage
         END_SMALL
     }
 
@@ -1119,10 +1381,10 @@ public class TextUtils {
                                          TextPaint paint,
                                          float avail, TruncateAt where,
                                          boolean preserveLength,
-                                         EllipsizeCallback callback) {
+                                         @Nullable EllipsizeCallback callback) {
         return ellipsize(text, paint, avail, where, preserveLength, callback,
                 TextDirectionHeuristics.FIRSTSTRONG_LTR,
-                (where == TruncateAt.END_SMALL) ? ELLIPSIS_TWO_DOTS_STRING : ELLIPSIS_STRING);
+                getEllipsisString(where));
     }
 
     /**
@@ -1142,14 +1404,15 @@ public class TextUtils {
             TextPaint paint,
             float avail, TruncateAt where,
             boolean preserveLength,
-            EllipsizeCallback callback,
+            @Nullable EllipsizeCallback callback,
             TextDirectionHeuristic textDir, String ellipsis) {
 
         int len = text.length();
 
-        MeasuredText mt = MeasuredText.obtain();
+        MeasuredParagraph mt = null;
         try {
-            float width = setPara(mt, paint, text, 0, text.length(), textDir);
+            mt = MeasuredParagraph.buildForMeasurement(paint, text, 0, text.length(), textDir, mt);
+            float width = mt.getWholeWidth();
 
             if (width <= avail) {
                 if (callback != null) {
@@ -1182,16 +1445,18 @@ public class TextUtils {
                 callback.ellipsized(left, right);
             }
 
-            char[] buf = mt.mChars;
+            final char[] buf = mt.getChars();
             Spanned sp = text instanceof Spanned ? (Spanned) text : null;
 
-            int remaining = len - (right - left);
+            final int removed = right - left;
+            final int remaining = len - removed;
             if (preserveLength) {
-                if (remaining > 0) { // else eliminate the ellipsis too
-                    buf[left++] = ellipsis.charAt(0);
-                }
+                if (remaining > 0 && removed >= ellipsis.length()) {
+                    ellipsis.getChars(0, ellipsis.length(), buf, left);
+                    left += ellipsis.length();
+                } // else skip the ellipsis
                 for (int i = left; i < right; i++) {
-                    buf[i] = ZWNBS_CHAR;
+                    buf[i] = ELLIPSIS_FILLER;
                 }
                 String s = new String(buf, 0, len);
                 if (sp == null) {
@@ -1220,7 +1485,9 @@ public class TextUtils {
             ssb.append(text, right, len);
             return ssb;
         } finally {
-            MeasuredText.recycle(mt);
+            if (mt != null) {
+                mt.recycle();
+            }
         }
     }
 
@@ -1291,7 +1558,7 @@ public class TextUtils {
             final int remainingElements = totalLen - i - 1;
             if (remainingElements > 0) {
                 CharSequence morePiece = (res == null) ?
-                        ELLIPSIS_STRING :
+                        ELLIPSIS_NORMAL :
                         res.getQuantityString(moreId, remainingElements, remainingElements);
                 morePiece = bidiFormatter.unicodeWrap(morePiece);
                 output.append(morePiece);
@@ -1337,15 +1604,17 @@ public class TextUtils {
     public static CharSequence commaEllipsize(CharSequence text, TextPaint p,
          float avail, String oneMore, String more, TextDirectionHeuristic textDir) {
 
-        MeasuredText mt = MeasuredText.obtain();
+        MeasuredParagraph mt = null;
+        MeasuredParagraph tempMt = null;
         try {
             int len = text.length();
-            float width = setPara(mt, p, text, 0, len, textDir);
+            mt = MeasuredParagraph.buildForMeasurement(p, text, 0, len, textDir, mt);
+            final float width = mt.getWholeWidth();
             if (width <= avail) {
                 return text;
             }
 
-            char[] buf = mt.mChars;
+            char[] buf = mt.getChars();
 
             int commaCount = 0;
             for (int i = 0; i < len; i++) {
@@ -1361,9 +1630,8 @@ public class TextUtils {
 
             int w = 0;
             int count = 0;
-            float[] widths = mt.mWidths;
+            float[] widths = mt.getWidths().getRawArray();
 
-            MeasuredText tempMt = MeasuredText.obtain();
             for (int i = 0; i < len; i++) {
                 w += widths[i];
 
@@ -1380,8 +1648,9 @@ public class TextUtils {
                     }
 
                     // XXX this is probably ok, but need to look at it more
-                    tempMt.setPara(format, 0, format.length(), textDir, null);
-                    float moreWid = tempMt.addStyleRun(p, tempMt.mLen, null);
+                    tempMt = MeasuredParagraph.buildForMeasurement(
+                            p, format, 0, format.length(), textDir, tempMt);
+                    float moreWid = tempMt.getWholeWidth();
 
                     if (w + moreWid <= avail) {
                         ok = i + 1;
@@ -1389,40 +1658,18 @@ public class TextUtils {
                     }
                 }
             }
-            MeasuredText.recycle(tempMt);
 
             SpannableStringBuilder out = new SpannableStringBuilder(okFormat);
             out.insert(0, text, 0, ok);
             return out;
         } finally {
-            MeasuredText.recycle(mt);
-        }
-    }
-
-    private static float setPara(MeasuredText mt, TextPaint paint,
-            CharSequence text, int start, int end, TextDirectionHeuristic textDir) {
-
-        mt.setPara(text, start, end, textDir, null);
-
-        float width;
-        Spanned sp = text instanceof Spanned ? (Spanned) text : null;
-        int len = end - start;
-        if (sp == null) {
-            width = mt.addStyleRun(paint, len, null);
-        } else {
-            width = 0;
-            int spanEnd;
-            for (int spanStart = 0; spanStart < len; spanStart = spanEnd) {
-                spanEnd = sp.nextSpanTransition(spanStart, len,
-                        MetricAffectingSpan.class);
-                MetricAffectingSpan[] spans = sp.getSpans(
-                        spanStart, spanEnd, MetricAffectingSpan.class);
-                spans = TextUtils.removeEmptySpans(spans, sp, MetricAffectingSpan.class);
-                width += mt.addStyleRun(paint, spans, spanEnd - spanStart, null);
+            if (mt != null) {
+                mt.recycle();
+            }
+            if (tempMt != null) {
+                tempMt.recycle();
             }
         }
-
-        return width;
     }
 
     // Returns true if the character's presence could affect RTL layout.
@@ -1457,6 +1704,7 @@ public class TextUtils {
         return true;
     }
 
+    @android.ravenwood.annotation.RavenwoodReplace
     /* package */ static char[] obtain(int len) {
         char[] buf;
 
@@ -1471,6 +1719,11 @@ public class TextUtils {
         return buf;
     }
 
+    /* package */ static char[] obtain$ravenwood(int len) {
+        return new char[len];
+    }
+
+    @android.ravenwood.annotation.RavenwoodReplace
     /* package */ static void recycle(char[] temp) {
         if (temp.length > 1000)
             return;
@@ -1480,11 +1733,16 @@ public class TextUtils {
         }
     }
 
+    /* package */ static void recycle$ravenwood(char[] temp) {
+        // Handled by typical GC
+    }
+
     /**
      * Html-encode the string.
      * @param s the string to be encoded
      * @return the encoded string
      */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static String htmlEncode(String s) {
         StringBuilder sb = new StringBuilder();
         char c;
@@ -1571,6 +1829,7 @@ public class TextUtils {
     /**
      * Returns whether the given CharSequence contains any printable characters.
      */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static boolean isGraphic(CharSequence str) {
         final int len = str.length();
         for (int cp, i=0; i<len; i+=Character.charCount(cp)) {
@@ -1597,6 +1856,7 @@ public class TextUtils {
      * @deprecated Use {@link #isGraphic(CharSequence)} instead.
      */
     @Deprecated
+    @android.ravenwood.annotation.RavenwoodKeep
     public static boolean isGraphic(char c) {
         int gc = Character.getType(c);
         return     gc != Character.CONTROL
@@ -1611,6 +1871,7 @@ public class TextUtils {
     /**
      * Returns whether the given CharSequence contains only digits.
      */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static boolean isDigitsOnly(CharSequence str) {
         final int len = str.length();
         for (int cp, i = 0; i < len; i += Character.charCount(cp)) {
@@ -1625,6 +1886,7 @@ public class TextUtils {
     /**
      * @hide
      */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static boolean isPrintableAscii(final char c) {
         final int asciiFirst = 0x20;
         final int asciiLast = 0x7E;  // included
@@ -1634,6 +1896,8 @@ public class TextUtils {
     /**
      * @hide
      */
+    @UnsupportedAppUsage
+    @android.ravenwood.annotation.RavenwoodKeep
     public static boolean isPrintableAsciiOnly(final CharSequence str) {
         final int len = str.length();
         for (int i = 0; i < len; i++) {
@@ -1685,6 +1949,7 @@ public class TextUtils {
      * {@link #CAP_MODE_CHARACTERS}, {@link #CAP_MODE_WORDS}, and
      * {@link #CAP_MODE_SENTENCES}.
      */
+    @android.ravenwood.annotation.RavenwoodKeep
     public static int getCapsMode(CharSequence cs, int off, int reqModes) {
         if (off < 0) {
             return 0;
@@ -1859,6 +2124,7 @@ public class TextUtils {
      * @see #unpackRangeEndFromLong(long)
      * @hide
      */
+    @UnsupportedAppUsage
     public static long packRangeInLong(int start, int end) {
         return (((long) start) << 32) | end;
     }
@@ -1869,6 +2135,7 @@ public class TextUtils {
      * @see #packRangeInLong(int, int)
      * @hide
      */
+    @UnsupportedAppUsage
     public static int unpackRangeStartFromLong(long range) {
         return (int) (range >>> 32);
     }
@@ -1879,6 +2146,7 @@ public class TextUtils {
      * @see #packRangeInLong(int, int)
      * @hide
      */
+    @UnsupportedAppUsage
     public static int unpackRangeEndFromLong(long range) {
         return (int) (range & 0x00000000FFFFFFFFL);
     }
@@ -1897,18 +2165,123 @@ public class TextUtils {
         return ((locale != null && !locale.equals(Locale.ROOT)
                         && ULocale.forLocale(locale).isRightToLeft())
                 // If forcing into RTL layout mode, return RTL as default
-                || SystemProperties.getBoolean(Settings.Global.DEVELOPMENT_FORCE_RTL, false))
+                || DisplayProperties.debug_force_rtl().orElse(false))
             ? View.LAYOUT_DIRECTION_RTL
             : View.LAYOUT_DIRECTION_LTR;
     }
 
     /**
-     * Return localized string representing the given number of selected items.
+     * Simple alternative to {@link String#format} which purposefully supports
+     * only a small handful of substitutions to improve execution speed.
+     * Benchmarking reveals this optimized alternative performs 6.5x faster for
+     * a typical format string.
+     * <p>
+     * Below is a summary of the limited grammar supported by this method; if
+     * you need advanced features, please continue using {@link String#format}.
+     * <ul>
+     * <li>{@code %b} for {@code boolean}
+     * <li>{@code %c} for {@code char}
+     * <li>{@code %d} for {@code int} or {@code long}
+     * <li>{@code %f} for {@code float} or {@code double}
+     * <li>{@code %s} for {@code String}
+     * <li>{@code %x} for hex representation of {@code int} or {@code long}
+     * <li>{@code %%} for literal {@code %}
+     * <li>{@code %04d} style grammar to specify the argument width, such as
+     * {@code %04d} to prefix an {@code int} with zeros or {@code %10b} to
+     * prefix a {@code boolean} with spaces
+     * </ul>
      *
+     * @throws IllegalArgumentException if the format string or arguments don't
+     *             match the supported grammar described above.
      * @hide
      */
-    public static CharSequence formatSelectedCount(int count) {
-        return Resources.getSystem().getQuantityString(R.plurals.selected_count, count, count);
+    @android.ravenwood.annotation.RavenwoodKeep
+    public static @NonNull String formatSimple(@NonNull String format, Object... args) {
+        final StringBuilder sb = new StringBuilder(format);
+        int j = 0;
+        for (int i = 0; i < sb.length(); ) {
+            if (sb.charAt(i) == '%') {
+                char code = sb.charAt(i + 1);
+
+                // Decode any argument width request
+                char prefixChar = '\0';
+                int prefixLen = 0;
+                int consume = 2;
+                while ('0' <= code && code <= '9') {
+                    if (prefixChar == '\0') {
+                        prefixChar = (code == '0') ? '0' : ' ';
+                    }
+                    prefixLen *= 10;
+                    prefixLen += Character.digit(code, 10);
+                    consume += 1;
+                    code = sb.charAt(i + consume - 1);
+                }
+
+                final String repl;
+                switch (code) {
+                    case 'b': {
+                        if (j == args.length) {
+                            throw new IllegalArgumentException("Too few arguments");
+                        }
+                        final Object arg = args[j++];
+                        if (arg instanceof Boolean) {
+                            repl = Boolean.toString((boolean) arg);
+                        } else {
+                            repl = Boolean.toString(arg != null);
+                        }
+                        break;
+                    }
+                    case 'c':
+                    case 'd':
+                    case 'f':
+                    case 's': {
+                        if (j == args.length) {
+                            throw new IllegalArgumentException("Too few arguments");
+                        }
+                        final Object arg = args[j++];
+                        repl = String.valueOf(arg);
+                        break;
+                    }
+                    case 'x': {
+                        if (j == args.length) {
+                            throw new IllegalArgumentException("Too few arguments");
+                        }
+                        final Object arg = args[j++];
+                        if (arg instanceof Integer) {
+                            repl = Integer.toHexString((int) arg);
+                        } else if (arg instanceof Long) {
+                            repl = Long.toHexString((long) arg);
+                        } else {
+                            throw new IllegalArgumentException(
+                                    "Unsupported hex type " + arg.getClass());
+                        }
+                        break;
+                    }
+                    case '%': {
+                        repl = "%";
+                        break;
+                    }
+                    default: {
+                        throw new IllegalArgumentException("Unsupported format code " + code);
+                    }
+                }
+
+                sb.replace(i, i + consume, repl);
+
+                // Apply any argument width request
+                final int prefixInsert = (prefixChar == '0' && repl.charAt(0) == '-') ? 1 : 0;
+                for (int k = repl.length(); k < prefixLen; k++) {
+                    sb.insert(i + prefixInsert, prefixChar);
+                }
+                i += Math.max(repl.length(), prefixLen);
+            } else {
+                i++;
+            }
+        }
+        if (j != args.length) {
+            throw new IllegalArgumentException("Too many arguments");
+        }
+        return sb.toString();
     }
 
     /**
@@ -1943,11 +2316,343 @@ public class TextUtils {
         return charSequence;
     }
 
+    /**
+     * Prepends {@code start} and appends {@code end} to a given {@link StringBuilder}
+     *
+     * @hide
+     */
+    public static void wrap(StringBuilder builder, String start, String end) {
+        builder.insert(0, start);
+        builder.append(end);
+    }
+
+    /**
+     * Intent size limitations prevent sending over a megabyte of data. Limit
+     * text length to 100K characters - 200KB.
+     */
+    private static final int PARCEL_SAFE_TEXT_LENGTH = 100000;
+
+    /**
+     * Trims the text to {@link #PARCEL_SAFE_TEXT_LENGTH} length. Returns the string as it is if
+     * the length() is smaller than {@link #PARCEL_SAFE_TEXT_LENGTH}. Used for text that is parceled
+     * into a {@link Parcelable}.
+     *
+     * @hide
+     */
+    @Nullable
+    public static <T extends CharSequence> T trimToParcelableSize(@Nullable T text) {
+        return trimToSize(text, PARCEL_SAFE_TEXT_LENGTH);
+    }
+
+    /**
+     * Trims the text to {@code size} length. Returns the string as it is if the length() is
+     * smaller than {@code size}. If chars at {@code size-1} and {@code size} is a surrogate
+     * pair, returns a CharSequence of length {@code size-1}.
+     *
+     * @param size length of the result, should be greater than 0
+     *
+     * @hide
+     */
+    @Nullable
+    public static <T extends CharSequence> T trimToSize(@Nullable T text,
+            @IntRange(from = 1) int size) {
+        Preconditions.checkArgument(size > 0);
+        if (TextUtils.isEmpty(text) || text.length() <= size) return text;
+        if (Character.isHighSurrogate(text.charAt(size - 1))
+                && Character.isLowSurrogate(text.charAt(size))) {
+            size = size - 1;
+        }
+        return (T) text.subSequence(0, size);
+    }
+
+    /**
+     * Trims the {@code text} to the first {@code size} characters and adds an ellipsis if the
+     * resulting string is shorter than the input. This will result in an output string which is
+     * longer than {@code size} for most inputs.
+     *
+     * @param size length of the result, should be greater than 0
+     *
+     * @hide
+     */
+    @Nullable
+    public static <T extends CharSequence> T trimToLengthWithEllipsis(@Nullable T text,
+            @IntRange(from = 1) int size) {
+        T trimmed = trimToSize(text, size);
+        if (text != null && trimmed.length() < text.length()) {
+            trimmed = (T) (trimmed.toString() + "...");
+        }
+        return trimmed;
+    }
+
+    /** @hide */
+    @android.ravenwood.annotation.RavenwoodKeep
+    public static boolean isNewline(int codePoint) {
+        int type = Character.getType(codePoint);
+        return type == Character.PARAGRAPH_SEPARATOR || type == Character.LINE_SEPARATOR
+                || codePoint == LINE_FEED_CODE_POINT;
+    }
+
+    /** @hide */
+    @android.ravenwood.annotation.RavenwoodKeep
+    public static boolean isWhitespace(int codePoint) {
+        return Character.isWhitespace(codePoint) || codePoint == NBSP_CODE_POINT;
+    }
+
+    /** @hide */
+    @android.ravenwood.annotation.RavenwoodKeep
+    public static boolean isWhitespaceExceptNewline(int codePoint) {
+        return isWhitespace(codePoint) && !isNewline(codePoint);
+    }
+
+    /** @hide */
+    @android.ravenwood.annotation.RavenwoodKeep
+    public static boolean isPunctuation(int codePoint) {
+        int type = Character.getType(codePoint);
+        return type == Character.CONNECTOR_PUNCTUATION
+                || type == Character.DASH_PUNCTUATION
+                || type == Character.END_PUNCTUATION
+                || type == Character.FINAL_QUOTE_PUNCTUATION
+                || type == Character.INITIAL_QUOTE_PUNCTUATION
+                || type == Character.OTHER_PUNCTUATION
+                || type == Character.START_PUNCTUATION;
+    }
+
+    /** @hide */
+    @Nullable
+    public static String withoutPrefix(@Nullable String prefix, @Nullable String str) {
+        if (prefix == null || str == null) return str;
+        return str.startsWith(prefix) ? str.substring(prefix.length()) : str;
+    }
+
+    /**
+     * Remove html, remove bad characters, and truncate string.
+     *
+     * <p>This method is meant to remove common mistakes and nefarious formatting from strings that
+     * were loaded from untrusted sources (such as other packages).
+     *
+     * <p>This method first {@link Html#fromHtml treats the string like HTML} and then ...
+     * <ul>
+     * <li>Removes new lines or truncates at first new line
+     * <li>Trims the white-space off the end
+     * <li>Truncates the string
+     * </ul>
+     * ... if specified.
+     *
+     * @param unclean The input string
+     * @param maxCharactersToConsider The maximum number of characters of {@code unclean} to
+     *                                consider from the input string. {@code 0} disables this
+     *                                feature.
+     * @param ellipsizeDip Assuming maximum length of the string (in dip), assuming font size 42.
+     *                     This is roughly 50 characters for {@code ellipsizeDip == 1000}.<br />
+     *                     Usually ellipsizing should be left to the view showing the string. If a
+     *                     string is used as an input to another string, it might be useful to
+     *                     control the length of the input string though. {@code 0} disables this
+     *                     feature.
+     * @param flags Flags controlling cleaning behavior (Can be {@link #SAFE_STRING_FLAG_TRIM},
+     *              {@link #SAFE_STRING_FLAG_SINGLE_LINE},
+     *              and {@link #SAFE_STRING_FLAG_FIRST_LINE})
+     *
+     * @return The cleaned string
+     */
+    public static @NonNull CharSequence makeSafeForPresentation(@NonNull String unclean,
+            @IntRange(from = 0) int maxCharactersToConsider,
+            @FloatRange(from = 0) float ellipsizeDip, @SafeStringFlags int flags) {
+        boolean onlyKeepFirstLine = ((flags & SAFE_STRING_FLAG_FIRST_LINE) != 0);
+        boolean forceSingleLine = ((flags & SAFE_STRING_FLAG_SINGLE_LINE) != 0);
+        boolean trim = ((flags & SAFE_STRING_FLAG_TRIM) != 0);
+
+        Preconditions.checkNotNull(unclean);
+        Preconditions.checkArgumentNonnegative(maxCharactersToConsider);
+        Preconditions.checkArgumentNonNegative(ellipsizeDip, "ellipsizeDip");
+        Preconditions.checkFlagsArgument(flags, SAFE_STRING_FLAG_TRIM
+                | SAFE_STRING_FLAG_SINGLE_LINE | SAFE_STRING_FLAG_FIRST_LINE);
+        Preconditions.checkArgument(!(onlyKeepFirstLine && forceSingleLine),
+                "Cannot set SAFE_STRING_FLAG_SINGLE_LINE and SAFE_STRING_FLAG_FIRST_LINE at the"
+                        + "same time");
+
+        String shortString;
+        if (maxCharactersToConsider > 0) {
+            shortString = unclean.substring(0, Math.min(unclean.length(), maxCharactersToConsider));
+        } else {
+            shortString = unclean;
+        }
+
+        // Treat string as HTML. This
+        // - converts HTML symbols: e.g. &szlig; -> ß
+        // - applies some HTML tags: e.g. <br> -> \n
+        // - removes invalid characters such as \b
+        // - removes html styling, such as <b>
+        // - applies html formatting: e.g. a<p>b</p>c -> a\n\nb\n\nc
+        // - replaces some html tags by "object replacement" markers: <img> -> \ufffc
+        // - Removes leading white space
+        // - Removes all trailing white space beside a single space
+        // - Collapses double white space
+        StringWithRemovedChars gettingCleaned = new StringWithRemovedChars(
+                Html.fromHtml(shortString).toString());
+
+        int firstNonWhiteSpace = -1;
+        int firstTrailingWhiteSpace = -1;
+
+        // Remove new lines (if requested) and control characters.
+        int uncleanLength = gettingCleaned.length();
+        for (int offset = 0; offset < uncleanLength; ) {
+            int codePoint = gettingCleaned.codePointAt(offset);
+            int type = Character.getType(codePoint);
+            int codePointLen = Character.charCount(codePoint);
+            boolean isNewline = isNewline(codePoint);
+
+            if (onlyKeepFirstLine && isNewline) {
+                gettingCleaned.removeAllCharAfter(offset);
+                break;
+            } else if (forceSingleLine && isNewline) {
+                gettingCleaned.removeRange(offset, offset + codePointLen);
+            } else if (type == Character.CONTROL && !isNewline) {
+                gettingCleaned.removeRange(offset, offset + codePointLen);
+            } else if (trim && !isWhitespace(codePoint)) {
+                // This is only executed if the code point is not removed
+                if (firstNonWhiteSpace == -1) {
+                    firstNonWhiteSpace = offset;
+                }
+                firstTrailingWhiteSpace = offset + codePointLen;
+            }
+
+            offset += codePointLen;
+        }
+
+        if (trim) {
+            // Remove leading and trailing white space
+            if (firstNonWhiteSpace == -1) {
+                // No non whitespace found, remove all
+                gettingCleaned.removeAllCharAfter(0);
+            } else {
+                if (firstNonWhiteSpace > 0) {
+                    gettingCleaned.removeAllCharBefore(firstNonWhiteSpace);
+                }
+                if (firstTrailingWhiteSpace < uncleanLength) {
+                    gettingCleaned.removeAllCharAfter(firstTrailingWhiteSpace);
+                }
+            }
+        }
+
+        if (ellipsizeDip == 0) {
+            return gettingCleaned.toString();
+        } else {
+            final float assumedFontSizePx = 42;
+            if (Typeface.getSystemFontMap().isEmpty()) {
+                // In the system server, the font files may not be loaded, so unable to perform
+                // ellipsize, so use the estimated char count for the ellipsize.
+
+                // The median of glyph widths of the Roboto is 0.57em, so use it as a reference
+                // of the glyph width.
+                final float assumedCharWidthInEm = 0.57f;
+                final float assumedCharWidthInPx = assumedFontSizePx * assumedCharWidthInEm;
+
+                // Even if the argument name is `ellipsizeDip`, the unit of this argument is pixels.
+                final int charCount = (int) ((ellipsizeDip + 0.5f) / assumedCharWidthInPx);
+
+                final String text = gettingCleaned.toString();
+                if (TextUtils.isEmpty(text) || text.length() <= charCount) {
+                    return text;
+                } else {
+                    return TextUtils.trimToSize(text, charCount)
+                            + getEllipsisString(TruncateAt.END);
+                }
+            } else {
+                // Truncate
+                final TextPaint paint = new TextPaint();
+                paint.setTextSize(assumedFontSizePx);
+
+                return TextUtils.ellipsize(gettingCleaned.toString(), paint, ellipsizeDip,
+                        TextUtils.TruncateAt.END);
+            }
+        }
+    }
+
+    /**
+     * A special string manipulation class. Just records removals and executes the when onString()
+     * is called.
+     */
+    private static class StringWithRemovedChars {
+        /** The original string */
+        private final String mOriginal;
+
+        /**
+         * One bit per char in string. If bit is set, character needs to be removed. If whole
+         * bit field is not initialized nothing needs to be removed.
+         */
+        private BitSet mRemovedChars;
+
+        StringWithRemovedChars(@NonNull String original) {
+            mOriginal = original;
+        }
+
+        /**
+         * Mark all chars in a range {@code [firstRemoved - firstNonRemoved[} (not including
+         * firstNonRemoved) as removed.
+         */
+        void removeRange(int firstRemoved, int firstNonRemoved) {
+            if (mRemovedChars == null) {
+                mRemovedChars = new BitSet(mOriginal.length());
+            }
+
+            mRemovedChars.set(firstRemoved, firstNonRemoved);
+        }
+
+        /**
+         * Remove all characters before {@code firstNonRemoved}.
+         */
+        void removeAllCharBefore(int firstNonRemoved) {
+            if (mRemovedChars == null) {
+                mRemovedChars = new BitSet(mOriginal.length());
+            }
+
+            mRemovedChars.set(0, firstNonRemoved);
+        }
+
+        /**
+         * Remove all characters after and including {@code firstRemoved}.
+         */
+        void removeAllCharAfter(int firstRemoved) {
+            if (mRemovedChars == null) {
+                mRemovedChars = new BitSet(mOriginal.length());
+            }
+
+            mRemovedChars.set(firstRemoved, mOriginal.length());
+        }
+
+        @Override
+        public String toString() {
+            // Common case, no chars removed
+            if (mRemovedChars == null) {
+                return mOriginal;
+            }
+
+            StringBuilder sb = new StringBuilder(mOriginal.length());
+            for (int i = 0; i < mOriginal.length(); i++) {
+                if (!mRemovedChars.get(i)) {
+                    sb.append(mOriginal.charAt(i));
+                }
+            }
+
+            return sb.toString();
+        }
+
+        /**
+         * Return length or the original string
+         */
+        int length() {
+            return mOriginal.length();
+        }
+
+        /**
+         * Return codePoint of original string at a certain {@code offset}
+         */
+        int codePointAt(int offset) {
+            return mOriginal.codePointAt(offset);
+        }
+    }
+
     private static Object sLock = new Object();
 
     private static char[] sTemp = null;
-
-    private static String[] EMPTY_STRING_ARRAY = new String[]{};
-
-    private static final char ZWNBS_CHAR = '\uFEFF';
 }

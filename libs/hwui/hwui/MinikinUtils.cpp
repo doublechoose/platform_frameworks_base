@@ -16,64 +16,114 @@
 
 #include "MinikinUtils.h"
 
+#include <log/log.h>
+#include <minikin/FamilyVariant.h>
+#include <minikin/MeasuredText.h>
+#include <minikin/Measurement.h>
+
+#include <optional>
 #include <string>
 
-#include <log/log.h>
-
+#include "FeatureFlags.h"
 #include "Paint.h"
 #include "SkPathMeasure.h"
 #include "Typeface.h"
 
 namespace android {
 
-minikin::FontStyle MinikinUtils::prepareMinikinPaint(minikin::MinikinPaint* minikinPaint,
-        const Paint* paint, Typeface* typeface) {
+minikin::MinikinPaint MinikinUtils::prepareMinikinPaint(const Paint* paint,
+                                                        const Typeface* typeface) {
     const Typeface* resolvedFace = Typeface::resolveDefault(typeface);
-    minikin::FontStyle resolved = resolvedFace->fStyle;
+    const SkFont& font = paint->getSkFont();
 
-    /* Prepare minikin FontStyle */
-    minikin::FontVariant minikinVariant = (paint->getFontVariant() == minikin::VARIANT_ELEGANT) ?
-            minikin::VARIANT_ELEGANT : minikin::VARIANT_COMPACT;
-    const uint32_t langListId = paint->getMinikinLangListId();
-    minikin::FontStyle minikinStyle(langListId, minikinVariant, resolved.getWeight(),
-            resolved.getItalic());
-
+    minikin::MinikinPaint minikinPaint(resolvedFace->fFontCollection);
     /* Prepare minikin Paint */
-    // Note: it would be nice to handle fractional size values (it would improve smooth zoom
-    // behavior), but historically size has been treated as an int.
-    // TODO: explore whether to enable fractional sizes, possibly when linear text flag is set.
-    minikinPaint->size = (int)paint->getTextSize();
-    minikinPaint->scaleX = paint->getTextScaleX();
-    minikinPaint->skewX = paint->getTextSkewX();
-    minikinPaint->letterSpacing = paint->getLetterSpacing();
-    minikinPaint->wordSpacing = paint->getWordSpacing();
-    minikinPaint->paintFlags = MinikinFontSkia::packPaintFlags(paint);
-    minikinPaint->fontFeatureSettings = paint->getFontFeatureSettings();
-    minikinPaint->hyphenEdit = minikin::HyphenEdit(paint->getHyphenEdit());
-    return minikinStyle;
+    minikinPaint.size =
+            font.isLinearMetrics() ? font.getSize() : static_cast<int>(font.getSize());
+    minikinPaint.scaleX = font.getScaleX();
+    minikinPaint.skewX = font.getSkewX();
+    minikinPaint.letterSpacing = paint->getLetterSpacing();
+    minikinPaint.wordSpacing = paint->getWordSpacing();
+    minikinPaint.fontFlags = MinikinFontSkia::packFontFlags(font);
+    minikinPaint.localeListId = paint->getMinikinLocaleListId();
+    minikinPaint.fontStyle = resolvedFace->fStyle;
+    minikinPaint.fontFeatureSettings = paint->getFontFeatureSettings();
+
+    const std::optional<minikin::FamilyVariant>& familyVariant = paint->getFamilyVariant();
+    if (familyVariant.has_value()) {
+        minikinPaint.familyVariant = familyVariant.value();
+    } else {
+        minikinPaint.familyVariant = text_feature::deprecate_ui_fonts()
+                                             ? minikin::FamilyVariant::ELEGANT
+                                             : minikin::FamilyVariant::DEFAULT;
+    }
+    return minikinPaint;
 }
 
-minikin::Layout MinikinUtils::doLayout(const Paint* paint, int bidiFlags,
-        Typeface* typeface, const uint16_t* buf, size_t start, size_t count,
-        size_t bufSize) {
-    minikin::MinikinPaint minikinPaint;
-    minikin::FontStyle minikinStyle = prepareMinikinPaint(&minikinPaint, paint, typeface);
-    minikin::Layout layout;
-    layout.doLayout(buf, start, count, bufSize, bidiFlags, minikinStyle, minikinPaint,
-            Typeface::resolveDefault(typeface)->fFontCollection);
-    return layout;
+minikin::Layout MinikinUtils::doLayout(const Paint* paint, minikin::Bidi bidiFlags,
+                                       const Typeface* typeface, const uint16_t* buf,
+                                       size_t bufSize, size_t start, size_t count,
+                                       size_t contextStart, size_t contextCount,
+                                       minikin::MeasuredText* mt) {
+    minikin::MinikinPaint minikinPaint = prepareMinikinPaint(paint, typeface);
+
+    const minikin::U16StringPiece textBuf(buf, bufSize);
+    const minikin::Range range(start, start + count);
+    const minikin::Range contextRange(contextStart, contextStart + contextCount);
+    const minikin::StartHyphenEdit startHyphen = paint->getStartHyphenEdit();
+    const minikin::EndHyphenEdit endHyphen = paint->getEndHyphenEdit();
+    const minikin::RunFlag minikinRunFlag = text_feature::letter_spacing_justification()
+                                                    ? paint->getRunFlag()
+                                                    : minikin::RunFlag::NONE;
+
+    if (mt == nullptr) {
+        return minikin::Layout(textBuf.substr(contextRange), range - contextStart, bidiFlags,
+                               minikinPaint, startHyphen, endHyphen, minikinRunFlag);
+    } else {
+        return mt->buildLayout(textBuf, range, contextRange, minikinPaint, startHyphen, endHyphen);
+    }
 }
 
-float MinikinUtils::measureText(const Paint* paint, int bidiFlags, Typeface* typeface,
-        const uint16_t* buf, size_t start, size_t count, size_t bufSize, float *advances) {
-    minikin::MinikinPaint minikinPaint;
-    minikin::FontStyle minikinStyle = prepareMinikinPaint(&minikinPaint, paint, typeface);
-    Typeface* resolvedTypeface = Typeface::resolveDefault(typeface);
-    return minikin::Layout::measureText(buf, start, count, bufSize, bidiFlags, minikinStyle,
-            minikinPaint, resolvedTypeface->fFontCollection, advances);
+void MinikinUtils::getBounds(const Paint* paint, minikin::Bidi bidiFlags, const Typeface* typeface,
+                             const uint16_t* buf, size_t bufSize, minikin::MinikinRect* out) {
+    minikin::MinikinPaint minikinPaint = prepareMinikinPaint(paint, typeface);
+
+    const minikin::U16StringPiece textBuf(buf, bufSize);
+    const minikin::StartHyphenEdit startHyphen = paint->getStartHyphenEdit();
+    const minikin::EndHyphenEdit endHyphen = paint->getEndHyphenEdit();
+
+    minikin::getBounds(textBuf, minikin::Range(0, textBuf.size()), bidiFlags, minikinPaint,
+        startHyphen, endHyphen, out);
 }
 
-bool MinikinUtils::hasVariationSelector(Typeface* typeface, uint32_t codepoint, uint32_t vs) {
+float MinikinUtils::measureText(const Paint* paint, minikin::Bidi bidiFlags,
+                                const Typeface* typeface, const uint16_t* buf, size_t start,
+                                size_t count, size_t bufSize, float* advances,
+                                minikin::MinikinRect* bounds, uint32_t* clusterCount) {
+    minikin::MinikinPaint minikinPaint = prepareMinikinPaint(paint, typeface);
+    const minikin::U16StringPiece textBuf(buf, bufSize);
+    const minikin::Range range(start, start + count);
+    const minikin::StartHyphenEdit startHyphen = paint->getStartHyphenEdit();
+    const minikin::EndHyphenEdit endHyphen = paint->getEndHyphenEdit();
+    const minikin::RunFlag minikinRunFlag = text_feature::letter_spacing_justification()
+                                                    ? paint->getRunFlag()
+                                                    : minikin::RunFlag::NONE;
+
+    return minikin::Layout::measureText(textBuf, range, bidiFlags, minikinPaint, startHyphen,
+                                        endHyphen, advances, bounds, clusterCount, minikinRunFlag);
+}
+
+minikin::MinikinExtent MinikinUtils::getFontExtent(const Paint* paint, minikin::Bidi bidiFlags,
+                                                   const Typeface* typeface, const uint16_t* buf,
+                                                   size_t start, size_t count, size_t bufSize) {
+    minikin::MinikinPaint minikinPaint = prepareMinikinPaint(paint, typeface);
+    const minikin::U16StringPiece textBuf(buf, bufSize);
+    const minikin::Range range(start, start + count);
+
+    return minikin::getFontExtent(textBuf, range, bidiFlags, minikinPaint);
+}
+
+bool MinikinUtils::hasVariationSelector(const Typeface* typeface, uint32_t codepoint, uint32_t vs) {
     const Typeface* resolvedFace = Typeface::resolveDefault(typeface);
     return resolvedFace->fFontCollection->hasVariationSelector(codepoint, vs);
 }
@@ -93,7 +143,7 @@ float MinikinUtils::xOffsetForTextAlign(Paint* paint, const minikin::Layout& lay
 }
 
 float MinikinUtils::hOffsetForTextAlign(Paint* paint, const minikin::Layout& layout,
-        const SkPath& path) {
+                                        const SkPath& path) {
     float align = 0;
     switch (paint->getTextAlign()) {
         case Paint::kCenter_Align:
@@ -108,5 +158,4 @@ float MinikinUtils::hOffsetForTextAlign(Paint* paint, const minikin::Layout& lay
     SkPathMeasure measure(path, false);
     return align * (layout.getAdvance() - measure.getLength());
 }
-
-}
+}  // namespace android

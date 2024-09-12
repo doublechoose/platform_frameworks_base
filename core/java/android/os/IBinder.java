@@ -16,6 +16,10 @@
 
 package android.os;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
+
 import java.io.FileDescriptor;
 
 /**
@@ -25,7 +29,7 @@ import java.io.FileDescriptor;
  * interface describes the abstract protocol for interacting with a
  * remotable object.  Do not implement this interface directly, instead
  * extend from {@link Binder}.
- * 
+ *
  * <p>The key IBinder API is {@link #transact transact()} matched by
  * {@link Binder#onTransact Binder.onTransact()}.  These
  * methods allow you to send a call to an IBinder object and receive a
@@ -36,7 +40,7 @@ import java.io.FileDescriptor;
  * expected behavior when calling an object that exists in the local
  * process, and the underlying inter-process communication (IPC) mechanism
  * ensures that these same semantics apply when going across processes.
- * 
+ *
  * <p>The data sent through transact() is a {@link Parcel}, a generic buffer
  * of data that also maintains some meta-data about its contents.  The meta
  * data is used to manage IBinder object references in the buffer, so that those
@@ -47,7 +51,7 @@ import java.io.FileDescriptor;
  * same IBinder object back.  These semantics allow IBinder/Binder objects to
  * be used as a unique identity (to serve as a token or for other purposes)
  * that can be managed across processes.
- * 
+ *
  * <p>The system maintains a pool of transaction threads in each process that
  * it runs in.  These threads are used to dispatch all
  * IPCs coming in from other processes.  For example, when an IPC is made from
@@ -58,7 +62,7 @@ import java.io.FileDescriptor;
  * thread in process A returns to allow its execution to continue.  In effect,
  * other processes appear to use as additional threads that you did not create
  * executing in your own process.
- * 
+ *
  * <p>The Binder system also supports recursion across processes.  For example
  * if process A performs a transaction to process B, and process B while
  * handling that transaction calls transact() on an IBinder that is implemented
@@ -66,7 +70,7 @@ import java.io.FileDescriptor;
  * transaction to finish will take care of calling Binder.onTransact() on the
  * object being called by B.  This ensures that the recursion semantics when
  * calling remote binder object are the same as when calling local objects.
- * 
+ *
  * <p>When working with remote objects, you often want to find out when they
  * are no longer valid.  There are three ways this can be determined:
  * <ul>
@@ -79,7 +83,7 @@ import java.io.FileDescriptor;
  * a {@link DeathRecipient} with the IBinder, which will be called when its
  * containing process goes away.
  * </ul>
- * 
+ *
  * @see Binder
  */
 public interface IBinder {
@@ -91,17 +95,17 @@ public interface IBinder {
      * The last transaction code available for user commands.
      */
     int LAST_CALL_TRANSACTION   = 0x00ffffff;
-    
+
     /**
      * IBinder protocol transaction code: pingBinder().
      */
     int PING_TRANSACTION        = ('_'<<24)|('P'<<16)|('N'<<8)|'G';
-    
+
     /**
      * IBinder protocol transaction code: dump internal state.
      */
     int DUMP_TRANSACTION        = ('_'<<24)|('D'<<16)|('M'<<8)|'P';
-    
+
     /**
      * IBinder protocol transaction code: execute a shell command.
      * @hide
@@ -125,7 +129,7 @@ public interface IBinder {
      * across the platform.  To support older code, the default implementation
      * logs the tweet to the main log as a simple emulation of broadcasting
      * it publicly over the Internet.
-     * 
+     *
      * <p>Also, upon completing the dispatch, the object must make a cup
      * of tea, return it to the caller, and exclaim "jolly good message
      * old boy!".
@@ -138,7 +142,7 @@ public interface IBinder {
      * its own like counter, and may display this value to the user to indicate the
      * quality of the app.  This is an optional command that applications do not
      * need to handle, so the default implementation is to do nothing.
-     * 
+     *
      * <p>There is no response returned and nothing about the
      * system will be functionally affected by it, but it will improve the
      * app's self-esteem.
@@ -146,6 +150,7 @@ public interface IBinder {
     int LIKE_TRANSACTION   = ('_'<<24)|('L'<<16)|('I'<<8)|'K';
 
     /** @hide */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     int SYSPROPS_TRANSACTION = ('_'<<24)|('S'<<16)|('P'<<8)|'R';
 
     /**
@@ -153,24 +158,56 @@ public interface IBinder {
      * caller returns immediately, without waiting for a result from the
      * callee. Applies only if the caller and callee are in different
      * processes.
+     *
+     * <p>The system provides special ordering semantics for multiple oneway calls
+     * being made to the same IBinder object: these calls will be dispatched in the
+     * other process one at a time, with the same order as the original calls.  These
+     * are still dispatched by the IPC thread pool, so may execute on different threads,
+     * but the next one will not be dispatched until the previous one completes.  This
+     * ordering is not guaranteed for calls on different IBinder objects or when mixing
+     * oneway and non-oneway calls on the same IBinder object.</p>
      */
     int FLAG_ONEWAY             = 0x00000001;
 
     /**
+     * Flag to {@link #transact}: request binder driver to clear transaction data.
+     *
+     * Be very careful when using this flag in Java, since Java objects read from a Java
+     * Parcel may be non-trivial to clear.
+     * @hide
+     */
+    int FLAG_CLEAR_BUF          = 0x00000020;
+
+    /**
+     * @hide
+     */
+    int FLAG_COLLECT_NOTED_APP_OPS = 0x00000002;
+
+    /**
      * Limit that should be placed on IPC sizes to keep them safely under the
-     * transaction buffer limit.
+     * transaction buffer limit. This is a recommendation, and is not the real
+     * limit. Transactions should be preferred to be even smaller than this.
      * @hide
      */
     public static final int MAX_IPC_SIZE = 64 * 1024;
 
     /**
+     * Limit that should be placed on IPC sizes, in bytes, to keep them safely under the transaction
+     * buffer limit.
+     */
+    @android.ravenwood.annotation.RavenwoodKeep
+    static int getSuggestedMaxIpcSizeBytes() {
+        return MAX_IPC_SIZE;
+    }
+
+    /**
      * Get the canonical name of the interface supported by this binder.
      */
-    public String getInterfaceDescriptor() throws RemoteException;
+    public @Nullable String getInterfaceDescriptor() throws RemoteException;
 
     /**
      * Check to see if the object still exists.
-     * 
+     *
      * @return Returns false if the
      * hosting process is gone, otherwise the result (always by default
      * true) returned by the pingBinder() implementation on the other
@@ -185,22 +222,22 @@ public interface IBinder {
      * true, the process may have died while the call is returning.
      */
     public boolean isBinderAlive();
-    
+
     /**
      * Attempt to retrieve a local implementation of an interface
      * for this Binder object.  If null is returned, you will need
      * to instantiate a proxy class to marshall calls through
      * the transact() method.
      */
-    public IInterface queryLocalInterface(String descriptor);
+    public @Nullable IInterface queryLocalInterface(@NonNull String descriptor);
 
     /**
      * Print the object's state into the given stream.
-     * 
+     *
      * @param fd The raw file descriptor that the dump is being sent to.
      * @param args additional arguments to the dump request.
      */
-    public void dump(FileDescriptor fd, String[] args) throws RemoteException;
+    public void dump(@NonNull FileDescriptor fd, @Nullable String[] args) throws RemoteException;
 
     /**
      * Like {@link #dump(FileDescriptor, String[])} but always executes
@@ -210,7 +247,8 @@ public interface IBinder {
      * @param fd The raw file descriptor that the dump is being sent to.
      * @param args additional arguments to the dump request.
      */
-    public void dumpAsync(FileDescriptor fd, String[] args) throws RemoteException;
+    public void dumpAsync(@NonNull FileDescriptor fd, @Nullable String[] args)
+            throws RemoteException;
 
     /**
      * Execute a shell command on this object.  This may be performed asynchrously from the caller;
@@ -224,13 +262,26 @@ public interface IBinder {
      * @param resultReceiver Called when the command has finished executing, with the result code.
      * @hide
      */
-    public void shellCommand(FileDescriptor in, FileDescriptor out, FileDescriptor err,
-            String[] args, ShellCallback shellCallback,
-            ResultReceiver resultReceiver) throws RemoteException;
+    public void shellCommand(@Nullable FileDescriptor in, @Nullable FileDescriptor out,
+            @Nullable FileDescriptor err,
+            @NonNull String[] args, @Nullable ShellCallback shellCallback,
+            @NonNull ResultReceiver resultReceiver) throws RemoteException;
+
+    /**
+     * Get the binder extension of this binder interface.
+     * This allows one to customize an interface without having to modify the original interface.
+     *
+     * @return null if don't have binder extension
+     * @throws RemoteException
+     * @hide
+     */
+    public default @Nullable IBinder getExtension() throws RemoteException {
+        throw new IllegalStateException("Method is not implemented");
+    }
 
     /**
      * Perform a generic operation with the object.
-     * 
+     *
      * @param code The action to perform.  This should
      * be a number between {@link #FIRST_CALL_TRANSACTION} and
      * {@link #LAST_CALL_TRANSACTION}.
@@ -241,18 +292,47 @@ public interface IBinder {
      * null if you are not interested in the return value.
      * @param flags Additional operation flags.  Either 0 for a normal
      * RPC, or {@link #FLAG_ONEWAY} for a one-way RPC.
+     *
+     * @return Returns the result from {@link Binder#onTransact}.  A successful call
+     * generally returns true; false generally means the transaction code was not
+     * understood.  For a oneway call to a different process false should never be
+     * returned.  If a oneway call is made to code in the same process (usually to
+     * a C++ or Rust implementation), then there are no oneway semantics, and
+     * false can still be returned.
      */
-    public boolean transact(int code, Parcel data, Parcel reply, int flags)
+    public boolean transact(int code, @NonNull Parcel data, @Nullable Parcel reply, int flags)
         throws RemoteException;
 
     /**
      * Interface for receiving a callback when the process hosting an IBinder
      * has gone away.
-     * 
+     *
      * @see #linkToDeath
      */
     public interface DeathRecipient {
         public void binderDied();
+
+        /**
+         * The function called when the process hosting an IBinder
+         * has gone away.
+         *
+         * This callback will be called from any binder thread like any other binder
+         * transaction. If the process receiving this notification is multithreaded
+         * then synchronization may be required because other threads may be executing
+         * at the same time.
+         *
+         * No locks are held in libbinder when {@link binderDied} is called.
+         *
+         * There is no need to call {@link unlinkToDeath} in the binderDied callback.
+         * The binder is already dead so {@link unlinkToDeath} is a no-op.
+         * It will be unlinked when the last local reference of that binder proxy is
+         * dropped.
+         *
+         * @param who The IBinder that has become invalid
+         */
+        default void binderDied(@NonNull IBinder who) {
+            binderDied();
+        }
     }
 
     /**
@@ -262,29 +342,32 @@ public interface IBinder {
      * then the given {@link DeathRecipient}'s
      * {@link DeathRecipient#binderDied DeathRecipient.binderDied()} method
      * will be called.
-     * 
+     *
+     * <p>This will automatically be unlinked when all references to the linked
+     * binder proxy are dropped.</p>
+     *
      * <p>You will only receive death notifications for remote binders,
-     * as local binders by definition can't die without you dying as well.
-     * 
+     * as local binders by definition can't die without you dying as well.</p>
+     *
      * @throws RemoteException if the target IBinder's
      * process has already died.
-     * 
+     *
      * @see #unlinkToDeath
      */
-    public void linkToDeath(DeathRecipient recipient, int flags)
+    public void linkToDeath(@NonNull DeathRecipient recipient, int flags)
             throws RemoteException;
 
     /**
      * Remove a previously registered death notification.
      * The recipient will no longer be called if this object
      * dies.
-     * 
+     *
      * @return {@code true} if the <var>recipient</var> is successfully
      * unlinked, assuring you that its
      * {@link DeathRecipient#binderDied DeathRecipient.binderDied()} method
      * will not be called;  {@code false} if the target IBinder has already
      * died, meaning the method has been (or soon will be) called.
-     * 
+     *
      * @throws java.util.NoSuchElementException if the given
      * <var>recipient</var> has not been registered with the IBinder, and
      * the IBinder is still alive.  Note that if the <var>recipient</var>
@@ -292,5 +375,54 @@ public interface IBinder {
      * exception will <em>not</em> be thrown, and you will receive a false
      * return value instead.
      */
-    public boolean unlinkToDeath(DeathRecipient recipient, int flags);
+    public boolean unlinkToDeath(@NonNull DeathRecipient recipient, int flags);
+
+    /** @hide */
+    interface IFrozenStateChangeCallback {
+        enum State {FROZEN, UNFROZEN};
+
+        /**
+         * Interface for receiving a callback when the process hosting an IBinder
+         * has changed its frozen state.
+         * @param who The IBinder whose hosting process has changed state.
+         * @param state The latest state.
+         */
+        void onFrozenStateChanged(@NonNull IBinder who, State state);
+    }
+
+    /**
+     * {@link addFrozenStateChangeCallback} provides a callback mechanism to notify about process
+     * frozen/unfrozen events. Upon registration and any subsequent state changes, the callback is
+     * invoked with the latest process frozen state.
+     *
+     * <p>If the listener process (the one using this API) is itself frozen, state change events
+     * might be combined into a single one with the latest frozen state. This single event would
+     * then be delivered when the listener process becomes unfrozen. Similarly, if an event happens
+     * before the previous event is consumed, they might be combined. This means the callback might
+     * not be called for every single state change, so don't rely on this API to count how many
+     * times the state has changed.</p>
+     *
+     * <p>The callback is automatically removed when all references to the binder proxy are
+     * dropped.</p>
+     *
+     * <p>You will only receive state change notifications for remote binders, as local binders by
+     * definition can't be frozen without you being frozen too.</p>
+     *
+     * <p>@throws {@link UnsupportedOperationException} if the kernel binder driver does not support
+     * this feature.
+     * @hide
+     */
+    default void addFrozenStateChangeCallback(@NonNull IFrozenStateChangeCallback callback)
+            throws RemoteException {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Unregister a {@link IFrozenStateChangeCallback}. The callback will no longer be invoked when
+     * the hosting process changes its frozen state.
+     * @hide
+     */
+    default boolean removeFrozenStateChangeCallback(@NonNull IFrozenStateChangeCallback callback) {
+        throw new UnsupportedOperationException();
+    }
 }

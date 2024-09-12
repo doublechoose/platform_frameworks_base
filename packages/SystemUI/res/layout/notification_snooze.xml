@@ -15,17 +15,20 @@
     limitations under the License.
 -->
 
-<com.android.systemui.statusbar.NotificationSnooze
+<com.android.systemui.statusbar.notification.row.NotificationSnooze
     xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:androidprv="http://schemas.android.com/apk/prv/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:background="@color/notification_guts_bg_color"
-    android:theme="@*android:style/Theme.DeviceDefault.Light">
+    android:paddingTop="2dp"
+    android:paddingBottom="2dp"
+    android:background="?androidprv:attr/materialColorSurfaceContainerHigh"
+    android:theme="@style/Theme.SystemUI">
 
     <RelativeLayout
-        android:layout_width="match_parent"
         android:id="@+id/notification_snooze"
+        android:layout_width="match_parent"
         android:layout_height="@dimen/snooze_snackbar_min_height">
 
         <TextView
@@ -34,8 +37,8 @@
             android:layout_height="wrap_content"
             android:layout_alignParentStart="true"
             android:layout_centerVertical="true"
-            android:paddingStart="16dp"
-            android:textColor="#DD000000"
+            android:paddingStart="@*android:dimen/notification_content_margin_end"
+            android:textColor="?androidprv:attr/materialColorOnSurface"
             android:paddingEnd="4dp"/>
 
         <ImageView
@@ -45,17 +48,20 @@
             android:layout_toEndOf="@+id/snooze_option_default"
             android:layout_centerVertical="true"
             android:paddingTop="1dp"
-            android:tint="#9E9E9E" />
+            android:importantForAccessibility="yes"
+            android:tint="?android:attr/textColorPrimary"/>
 
         <TextView
             android:id="@+id/undo"
-            style="@style/TextAppearance.NotificationInfo.Button"
             android:layout_width="wrap_content"
-            android:layout_height="36dp"
-            android:layout_marginEnd="8dp"
+            android:layout_height="48dp"
+            android:layout_marginEnd="@dimen/notification_guts_button_side_margin"
             android:layout_alignParentEnd="true"
             android:layout_centerVertical="true"
-            android:text="@string/snooze_undo" />
+            android:minWidth="@dimen/min_clickable_item_size"
+            android:minHeight="@dimen/min_clickable_item_size"
+            android:text="@string/snooze_undo"
+            style="@style/TextAppearance.NotificationInfo.Button" />
     </RelativeLayout>
 
     <View
@@ -71,4 +77,4 @@
         android:paddingBottom="8dp"
         android:orientation="vertical" />
 
-</com.android.systemui.statusbar.NotificationSnooze>
+</com.android.systemui.statusbar.notification.row.NotificationSnooze>

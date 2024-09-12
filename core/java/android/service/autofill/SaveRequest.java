@@ -19,13 +19,12 @@ package android.service.autofill;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.os.Bundle;
-import android.os.CancellationSignal;
 import android.os.Parcel;
 import android.os.Parcelable;
-import com.android.internal.util.Preconditions;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * This class represents a request to an {@link AutofillService
@@ -36,19 +35,28 @@ import java.util.List;
 public final class SaveRequest implements Parcelable {
     private final @NonNull ArrayList<FillContext> mFillContexts;
     private final @Nullable Bundle mClientState;
+    private final @Nullable ArrayList<String> mDatasetIds;
 
     /** @hide */
     public SaveRequest(@NonNull ArrayList<FillContext> fillContexts,
-            @Nullable Bundle clientState) {
-        mFillContexts = Preconditions.checkNotNull(fillContexts, "fillContexts");
+            @Nullable Bundle clientState, @Nullable ArrayList<String> datasetIds) {
+        mFillContexts = Objects.requireNonNull(fillContexts, "fillContexts");
         mClientState = clientState;
+        mDatasetIds = datasetIds;
     }
 
     private SaveRequest(@NonNull Parcel parcel) {
-        this(parcel.readTypedArrayList(null), parcel.readBundle());
+        this(parcel.createTypedArrayList(FillContext.CREATOR),
+                parcel.readBundle(), parcel.createStringArrayList());
     }
 
     /**
+     * Gets the contexts associated with each previous fill request.
+     *
+     * <p><b>Note:</b> Starting on Android {@link android.os.Build.VERSION_CODES#Q}, it could also
+     * include contexts from requests whose {@link SaveInfo} had the
+     * {@link SaveInfo#FLAG_DELAY_SAVE} flag.
+     *
      * @return The contexts associated with each previous fill request.
      */
     public @NonNull List<FillContext> getFillContexts() {
@@ -56,14 +64,28 @@ public final class SaveRequest implements Parcelable {
     }
 
     /**
-     * Gets the extra client state returned from the last {@link
-     * AutofillService#onFillRequest(FillRequest, CancellationSignal, FillCallback)}
-     * fill request}.
+     * Gets the latest client state bundle set by the service in a
+     * {@link FillResponse.Builder#setClientState(Bundle) fill response}.
+     *
+     * <p><b>Note:</b> Prior to Android {@link android.os.Build.VERSION_CODES#P}, only client state
+     * bundles set by {@link FillResponse.Builder#setClientState(Bundle)} were considered. On
+     * Android {@link android.os.Build.VERSION_CODES#P} and higher, bundles set in the result of
+     * an authenticated request through the
+     * {@link android.view.autofill.AutofillManager#EXTRA_CLIENT_STATE} extra are
+     * also considered (and take precedence when set).
      *
      * @return The client state.
      */
     public @Nullable Bundle getClientState() {
         return mClientState;
+    }
+
+    /**
+     * Gets the ids of the datasets selected by the user, in the order in which they were selected.
+     */
+    @Nullable
+    public List<String> getDatasetIds() {
+        return mDatasetIds;
     }
 
     @Override
@@ -73,11 +95,12 @@ public final class SaveRequest implements Parcelable {
 
     @Override
     public void writeToParcel(Parcel parcel, int flags) {
-        parcel.writeTypedArrayList(mFillContexts, flags);
+        parcel.writeTypedList(mFillContexts, flags);
         parcel.writeBundle(mClientState);
+        parcel.writeStringList(mDatasetIds);
     }
 
-    public static final Creator<SaveRequest> CREATOR =
+    public static final @android.annotation.NonNull Creator<SaveRequest> CREATOR =
             new Creator<SaveRequest>() {
         @Override
         public SaveRequest createFromParcel(Parcel parcel) {

@@ -16,11 +16,17 @@
 
 package android.net;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import android.os.Bundle;
 import android.os.Parcel;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.ext.junit.runners.AndroidJUnit4;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -47,6 +53,55 @@ public class ScoredNetworkTest {
 
     private static final NetworkKey KEY
         = new NetworkKey(new WifiKey("\"ssid\"", "00:00:00:00:00:00"));
+
+    @Test
+    public void scoredNetworksWithBothNullAttributeBundle_equal() {
+        ScoredNetwork scoredNetwork1 =
+                new ScoredNetwork(KEY, CURVE, false /* meteredHint */, null /* attributes */);
+        ScoredNetwork scoredNetwork2 =
+                new ScoredNetwork(KEY, CURVE, false /* meteredHint */, null /* attributes */);
+        assertTrue(scoredNetwork1.equals(scoredNetwork2));
+    }
+
+    @Test
+    public void scoredNetworksWithOneNullAttributeBundle_notEqual() {
+        ScoredNetwork scoredNetwork1 =
+                new ScoredNetwork(KEY, CURVE, false /* meteredHint */, ATTRIBUTES);
+        ScoredNetwork scoredNetwork2 =
+                new ScoredNetwork(KEY, CURVE, false /* meteredHint */, null /* attributes */);
+        assertFalse(scoredNetwork1.equals(scoredNetwork2));
+    }
+
+    @Test
+    public void scoredNetworksWithDifferentSizedAttributeBundle_notEqual() {
+        ScoredNetwork scoredNetwork1 =
+                new ScoredNetwork(KEY, CURVE, false /* meteredHint */, ATTRIBUTES);
+        Bundle attr = new Bundle(ATTRIBUTES);
+        attr.putBoolean(ScoredNetwork.ATTRIBUTES_KEY_HAS_CAPTIVE_PORTAL, true);
+        ScoredNetwork scoredNetwork2 =
+                new ScoredNetwork(KEY, CURVE, false /* meteredHint */, attr);
+        assertFalse(scoredNetwork1.equals(scoredNetwork2));
+    }
+
+    @Test
+    public void scoredNetworksWithDifferentAttributeValues_notEqual() {
+        ScoredNetwork scoredNetwork1 =
+                new ScoredNetwork(KEY, CURVE, false /* meteredHint */, ATTRIBUTES);
+        Bundle attr = new Bundle();
+        attr.putInt(ScoredNetwork.ATTRIBUTES_KEY_RANKING_SCORE_OFFSET, Integer.MIN_VALUE);
+        ScoredNetwork scoredNetwork2 =
+                new ScoredNetwork(KEY, CURVE, false /* meteredHint */, attr);
+        assertFalse(scoredNetwork1.equals(scoredNetwork2));
+    }
+
+    @Test
+    public void scoredNetworksWithSameAttributeValuesAndSize_equal() {
+        ScoredNetwork scoredNetwork1 =
+                new ScoredNetwork(KEY, CURVE, false /* meteredHint */, ATTRIBUTES);
+        ScoredNetwork scoredNetwork2 =
+                new ScoredNetwork(KEY, CURVE, false /* meteredHint */, ATTRIBUTES);
+        assertTrue(scoredNetwork1.equals(scoredNetwork2));
+    }
 
     @Test
     public void calculateRankingOffsetShouldThrowUnsupportedOperationException() {

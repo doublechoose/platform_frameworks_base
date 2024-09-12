@@ -17,6 +17,7 @@
 package android.service.vr;
 
 import android.app.Vr2dDisplayProperties;
+import android.content.ComponentName;
 import android.service.vr.IVrStateCallbacks;
 import android.service.vr.IPersistentVrStateCallbacks;
 
@@ -56,7 +57,15 @@ interface IVrManager {
      *
      * @return {@code true} if VR mode is enabled.
      */
+    @UnsupportedAppUsage
     boolean getVrModeState();
+
+    /**
+     * Returns the current Persistent VR mode state.
+     *
+     * @return {@code true} if Persistent VR mode is enabled.
+     */
+    boolean getPersistentVrModeEnabled();
 
     /**
      * Sets the persistent VR mode state of a device. When a device is in persistent VR mode it will
@@ -85,6 +94,23 @@ interface IVrManager {
      * @return {@link android.view.Display.INVALID_DISPLAY} if there is no virtual display
      * currently, else return the display id of the virtual display
      */
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     int getVr2dDisplayId();
+
+    /**
+     * Set the component name of the compositor service to bind.
+     *
+     * @param componentName flattened string representing a ComponentName of a Service in the
+     * application's compositor process to bind to, or null to clear the current binding.
+     */
+    void setAndBindCompositor(in String componentName);
+
+    /**
+     * Sets the current standby status of the VR device. Standby mode is only used on standalone vr
+     * devices. Standby mode is a deep sleep state where it's appropriate to turn off vr mode.
+     *
+     * @param standy True if the device is entering standby, false if it's exiting standby.
+     */
+    void setStandbyEnabled(boolean standby);
 }
 

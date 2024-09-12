@@ -21,6 +21,8 @@ import android.net.Uri;
 import android.os.Parcel;
 import android.os.Parcelable;
 
+import java.util.Objects;
+
 /**
  * Describes a single file that is available over MBMS.
  */
@@ -30,7 +32,7 @@ public final class FileInfo implements Parcelable {
 
     private final String mimeType;
 
-    public static final Parcelable.Creator<FileInfo> CREATOR =
+    public static final @android.annotation.NonNull Parcelable.Creator<FileInfo> CREATOR =
             new Parcelable.Creator<FileInfo>() {
         @Override
         public FileInfo createFromParcel(Parcel source) {
@@ -53,7 +55,7 @@ public final class FileInfo implements Parcelable {
     }
 
     private FileInfo(Parcel in) {
-        uri = in.readParcelable(null);
+        uri = in.readParcelable(null, android.net.Uri.class);
         mimeType = in.readString();
     }
 
@@ -81,5 +83,24 @@ public final class FileInfo implements Parcelable {
      */
     public String getMimeType() {
         return mimeType;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+
+        FileInfo fileInfo = (FileInfo) o;
+        return Objects.equals(uri, fileInfo.uri) &&
+                Objects.equals(mimeType, fileInfo.mimeType);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(uri, mimeType);
     }
 }

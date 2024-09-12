@@ -14,24 +14,32 @@
  * limitations under the License.
  */
 
-syntax = "proto3";
-
+syntax = "proto2";
 package android.os;
 
+import "frameworks/base/core/proto/android/privacy.proto";
 option java_multiple_files = true;
 
 message MessageProto {
-    int64 when = 1;
+    option (.android.msg_privacy).dest = DEST_AUTOMATIC;
+
+    // Targeted delivery time of the message.
+    optional int64 when = 1;
     // Name of callback class.
-    string callback = 2;
-    // User-defined message code so that the recipient can identify what this
+    optional string callback = 2;
+    // App-defined message code so that the recipient can identify what this
     // message is about.
-    int32 what = 3;
-    int32 arg1 = 4;
-    int32 arg2 = 5;
-    // String representation of an arbitrary object to send to the recipient.
-    string obj = 6;
+    optional int32 what = 3;
+    // Lower-cost alternative to using setData() if the app only needs to store a few integer values.
+    optional int32 arg1 = 4;
+    // Lower-cost alternative to using setData() if the app only needs to store a few integer values.
+    optional int32 arg2 = 5;
+    // String representation of an arbitrary object to send to the Handler.  When
+    // using android.os.Messenger to send the message across processes, this will
+    // only be populated if it contains a Parcelable of a framework class (not one
+    // implemented by the application).
+    optional string obj = 6 [ (.android.privacy).dest = DEST_EXPLICIT ];
     // Name of target class.
-    string target = 7;
-    int32 barrier = 8;
+    optional string target = 7;
+    optional int32 barrier = 8;
 }

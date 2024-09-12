@@ -16,13 +16,17 @@
 
 package com.android.systemui.statusbar.notification;
 
+import android.annotation.Nullable;
+import android.content.Context;
 import android.graphics.Color;
 import android.view.View;
 import android.widget.ImageView;
 
-import com.android.internal.util.NotificationColorUtil;
-import com.android.systemui.R;
-import com.android.systemui.statusbar.stack.NotificationChildrenContainer;
+import com.android.internal.util.ContrastColorUtil;
+import com.android.systemui.res.R;
+import com.android.systemui.statusbar.notification.collection.ListEntry;
+import com.android.systemui.statusbar.notification.row.ExpandableNotificationRow;
+import com.android.systemui.util.Compile;
 
 /**
  * A util class for various reusable functions
@@ -30,7 +34,10 @@ import com.android.systemui.statusbar.stack.NotificationChildrenContainer;
 public class NotificationUtils {
     private static final int[] sLocationBase = new int[2];
     private static final int[] sLocationOffset = new int[2];
-    public static boolean isGrayscale(ImageView v, NotificationColorUtil colorUtil) {
+
+    @Nullable private static Boolean sUseNewInterruptionModel = null;
+
+    public static boolean isGrayscale(ImageView v, ContrastColorUtil colorUtil) {
         Object isGrayscale = v.getTag(R.id.icon_is_grayscale);
         if (isGrayscale != null) {
             return Boolean.TRUE.equals(isGrayscale);
@@ -57,4 +64,43 @@ public class NotificationUtils {
         offsetView.getLocationOnScreen(sLocationOffset);
         return sLocationOffset[1] - sLocationBase[1];
     }
+
+    /**
+     * @param dimenId the dimen to look up
+     * @return the font scaled dimen as if it were in sp but doesn't shrink sizes below dp
+     */
+    public static int getFontScaledHeight(Context context, int dimenId) {
+        int dimensionPixelSize = context.getResources().getDimensionPixelSize(dimenId);
+        float factor = Math.max(1.0f, context.getResources().getDisplayMetrics().scaledDensity /
+                context.getResources().getDisplayMetrics().density);
+        return (int) (dimensionPixelSize * factor);
+    }
+
+    private static final boolean INCLUDE_HASH_CODE_IN_LIST_ENTRY_LOG_KEY = false;
+
+    /** Get the notification key, reformatted for logging, for the (optional) entry */
+    public static String logKey(ListEntry entry) {
+        if (entry == null) {
+            return "null";
+        }
+        if (Compile.IS_DEBUG && INCLUDE_HASH_CODE_IN_LIST_ENTRY_LOG_KEY) {
+            return logKey(entry.getKey()) + "@" + Integer.toHexString(entry.hashCode());
+        } else {
+            return logKey(entry.getKey());
+        }
+    }
+
+    /** Get the notification key, reformatted for logging, for the (optional) row */
+    public static String logKey(ExpandableNotificationRow row) {
+        return row == null ? "null" : logKey(row.getEntry());
+    }
+
+    /** Removes newlines from the notification key to prettify apps that have these in the tag */
+    public static String logKey(String key) {
+        if (key == null) {
+            return "null";
+        }
+        return key.replace("\n", "");
+    }
+
 }

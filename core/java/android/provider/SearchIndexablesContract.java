@@ -16,6 +16,7 @@
 
 package android.provider;
 
+import android.annotation.NonNull;
 import android.annotation.SystemApi;
 import android.content.ContentResolver;
 
@@ -62,9 +63,52 @@ public class SearchIndexablesContract {
     public static final String NON_INDEXABLES_KEYS = "non_indexables_key";
 
     /**
+     * Site map pairs data key
+     *
+     * @hide
+     */
+    public static final String SITE_MAP_PAIRS_KEYS = "site_map_pairs";
+
+    /**
      * ContentProvider path for non indexable data keys.
      */
     public static final String NON_INDEXABLES_KEYS_PATH = SETTINGS + "/" + NON_INDEXABLES_KEYS;
+
+    /**
+     * ContentProvider path for sitemap keys.
+     *
+     * @hide
+     */
+    public static final String SITE_MAP_PAIRS_PATH = SETTINGS + "/" + SITE_MAP_PAIRS_KEYS;
+
+    /**
+     * Last path segment for Preference Key, Slice Uri pair.
+     * <p>
+     * The (Key, Slice Uri) pairs are a mapping between the primary key of the search result and
+     * a Uri for a Slice that represents the same data. Thus, an app can specify a list of Uris
+     * for Slices that replace regular intent-based search results with inline content.
+     * </p>
+     */
+    public static final String SLICE_URI_PAIRS = "slice_uri_pairs";
+
+    /**
+     * ContentProvider path for Slice Uri pairs.
+     */
+    public static final String SLICE_URI_PAIRS_PATH = SETTINGS + "/" + SLICE_URI_PAIRS;
+
+
+    /**
+     * The raw data name of dynamic index. This is used to compose the index path of provider
+     * for dynamic index.
+     */
+    public static final String DYNAMIC_INDEXABLES_RAW = "dynamic_indexables_raw";
+
+    /**
+     * ContentProvider path for dynamic index. This is used to get the raw data of dynamic index
+     * from provider.
+     */
+    public static final String DYNAMIC_INDEXABLES_RAW_PATH =
+            SETTINGS + "/" + DYNAMIC_INDEXABLES_RAW;
 
     /**
      * Indexable xml resources columns.
@@ -113,6 +157,18 @@ public class SearchIndexablesContract {
     };
 
     /**
+     * Columns for site map queries.
+     *
+     * @hide
+     */
+    public static final String[] SITE_MAP_COLUMNS = new String[] {
+            SiteMapColumns.PARENT_CLASS,
+            SiteMapColumns.PARENT_TITLE,
+            SiteMapColumns.CHILD_CLASS,
+            SiteMapColumns.CHILD_TITLE,
+    };
+
+    /**
      * Indexable raw data columns indices.
      */
     public static final int COLUMN_INDEX_RAW_RANK = 0;
@@ -151,6 +207,31 @@ public class SearchIndexablesContract {
     public static final int COLUMN_INDEX_NON_INDEXABLE_KEYS_KEY_VALUE = 0;
 
     /**
+     * Columns for the SliceUri and Preference Key pairs.
+     */
+    public static final class SliceUriPairColumns {
+        private SliceUriPairColumns() {}
+
+        /**
+         * The preference key for the Setting.
+         */
+        public static final String KEY = "key";
+        /**
+         * The Slice Uri corresponding to the Setting key.
+         */
+        public static final String SLICE_URI = "slice_uri";
+    }
+
+    /**
+     * Cursor schema for SliceUriPairs.
+     */
+    @NonNull
+    public static final String[] SLICE_URI_PAIRS_COLUMNS = new String[] {
+            SliceUriPairColumns.KEY,
+            SliceUriPairColumns.SLICE_URI
+    };
+
+    /**
      * Constants related to a {@link SearchIndexableResource}.
      *
      * This is a description of
@@ -169,13 +250,22 @@ public class SearchIndexablesContract {
     }
 
     /**
+     * @hide
+     */
+    public static final class SiteMapColumns {
+        public static final String PARENT_CLASS = "parent_class";
+        public static final String CHILD_CLASS = "child_class";
+        public static final String PARENT_TITLE = "parent_title";
+        public static final String CHILD_TITLE = "child_title";
+    }
+
+    /**
      * Constants related to a {@link SearchIndexableData}.
      *
      * This is the raw data that is stored into an Index. This is related to
      * {@link android.preference.Preference} and its attributes like
      * {@link android.preference.Preference#getTitle()},
      * {@link android.preference.Preference#getSummary()}, etc.
-     *
      */
     public static final class RawData extends BaseColumns {
         private RawData() {
@@ -226,12 +316,14 @@ public class SearchIndexablesContract {
 
         /**
          * Identifier for the Payload object type.
+         *
          * @hide
          */
         public static final String PAYLOAD_TYPE = "payload_type";
 
         /**
          * Generic payload for improving Search result expressiveness.
+         *
          * @hide
          */
         public static final String PAYLOAD = "payload";

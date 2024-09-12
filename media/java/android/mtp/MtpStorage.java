@@ -16,8 +16,10 @@
 
 package android.mtp;
 
-import android.content.Context;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.os.storage.StorageVolume;
+
+import java.util.function.Supplier;
 
 /**
  * This class represents a storage unit on an MTP device.
@@ -27,21 +29,22 @@ import android.os.storage.StorageVolume;
  * @hide
  */
 public class MtpStorage {
-
     private final int mStorageId;
     private final String mPath;
     private final String mDescription;
-    private final long mReserveSpace;
     private final boolean mRemovable;
     private final long mMaxFileSize;
+    private final String mVolumeName;
+    private final Supplier<Boolean> mIsHostWindows;
 
-    public MtpStorage(StorageVolume volume, Context context) {
-        mStorageId = volume.getStorageId();
+    public MtpStorage(StorageVolume volume, int storageId, Supplier<Boolean> isHostWindows) {
+        mStorageId = storageId;
         mPath = volume.getPath();
-        mDescription = volume.getDescription(context);
-        mReserveSpace = volume.getMtpReserveSpace() * 1024L * 1024L;
+        mDescription = volume.getDescription(null);
         mRemovable = volume.isRemovable();
         mMaxFileSize = volume.getMaxFileSize();
+        mVolumeName = volume.getMediaStoreVolumeName();
+        mIsHostWindows = isHostWindows;
     }
 
     /**
@@ -49,6 +52,7 @@ public class MtpStorage {
      *
      * @return the storage ID
      */
+    @UnsupportedAppUsage
     public final int getStorageId() {
         return mStorageId;
     }
@@ -58,6 +62,7 @@ public class MtpStorage {
      *
      * @return the storage file path
      */
+    @UnsupportedAppUsage
     public final String getPath() {
         return mPath;
     }
@@ -69,16 +74,6 @@ public class MtpStorage {
      */
     public final String getDescription() {
         return mDescription;
-    }
-
-   /**
-     * Returns the amount of space to reserve on the storage file system.
-     * This can be set to a non-zero value to prevent MTP from filling up the entire storage.
-     *
-     * @return reserved space in bytes.
-     */
-    public final long getReserveSpace() {
-        return mReserveSpace;
     }
 
    /**
@@ -97,5 +92,18 @@ public class MtpStorage {
      */
     public long getMaxFileSize() {
         return mMaxFileSize;
+    }
+
+    public String getVolumeName() {
+        return mVolumeName;
+    }
+
+    /**
+     * Returns true if the mtp host of this storage is Windows.
+     *
+     * @return is host Windows
+     */
+    public boolean isHostWindows() {
+        return mIsHostWindows.get();
     }
 }

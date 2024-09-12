@@ -16,9 +16,8 @@
 
 package com.android.server.search;
 
-import android.app.ActivityManager;
-import android.app.AppGlobals;
-import android.app.IActivityManager;
+import android.annotation.NonNull;
+import android.annotation.UserIdInt;
 import android.app.ISearchManager;
 import android.app.SearchManager;
 import android.app.SearchableInfo;
@@ -26,17 +25,16 @@ import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.IPackageManager;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.database.ContentObserver;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Settings;
+import android.util.ArraySet;
 import android.util.Log;
 import android.util.SparseArray;
 
@@ -47,10 +45,12 @@ import com.android.internal.util.DumpUtils;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.server.LocalServices;
 import com.android.server.SystemService;
+import com.android.server.SystemService.TargetUser;
 import com.android.server.statusbar.StatusBarManagerInternal;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -60,6 +60,8 @@ import java.util.List;
 public class SearchManagerService extends ISearchManager.Stub {
     private static final String TAG = "SearchManagerService";
     final Handler mHandler;
+
+    private final MyPackageMonitor mMyPackageMonitor;
 
     public static class Lifecycle extends SystemService {
         private SearchManagerService mService;
@@ -75,18 +77,8 @@ public class SearchManagerService extends ISearchManager.Stub {
         }
 
         @Override
-        public void onUnlockUser(final int userId) {
-            mService.mHandler.post(new Runnable() {
-                @Override
-                public void run() {
-                    mService.onUnlockUser(userId);
-                }
-            });
-        }
-
-        @Override
-        public void onCleanupUser(int userHandle) {
-            mService.onCleanupUser(userHandle);
+        public void onUserStopped(@NonNull TargetUser user) {
+            mService.onCleanupUser(user.getUserIdentifier());
         }
     }
 
@@ -105,16 +97,13 @@ public class SearchManagerService extends ISearchManager.Stub {
      */
     public SearchManagerService(Context context)  {
         mContext = context;
-        new MyPackageMonitor().register(context, null, UserHandle.ALL, true);
+        mMyPackageMonitor = new MyPackageMonitor();
+        mMyPackageMonitor.register(context, null, UserHandle.ALL, true);
         new GlobalSearchProviderObserver(context.getContentResolver());
         mHandler = BackgroundThread.getHandler();
     }
 
     private Searchables getSearchables(int userId) {
-        return getSearchables(userId, false);
-    }
-
-    private Searchables getSearchables(int userId, boolean forceUpdate) {
         final long token = Binder.clearCallingIdentity();
         try {
             final UserManager um = mContext.getSystemService(UserManager.class);
@@ -131,21 +120,11 @@ public class SearchManagerService extends ISearchManager.Stub {
             Searchables searchables = mSearchables.get(userId);
             if (searchables == null) {
                 searchables = new Searchables(mContext, userId);
-                searchables.updateSearchableList();
-                mSearchables.append(userId, searchables);
-            } else if (forceUpdate) {
-                searchables.updateSearchableList();
+                mSearchables.put(userId, searchables);
             }
-            return searchables;
-        }
-    }
 
-    private void onUnlockUser(int userId) {
-        try {
-            getSearchables(userId, true);
-        } catch (IllegalStateException ignored) {
-            // We're just trying to warm a cache, so we don't mind if the user
-            // was stopped or destroyed before we got here.
+            searchables.updateSearchableListIfNeeded();
+            return searchables;
         }
     }
 
@@ -159,28 +138,109 @@ public class SearchManagerService extends ISearchManager.Stub {
      * Refreshes the "searchables" list when packages are added/removed.
      */
     class MyPackageMonitor extends PackageMonitor {
+        /**
+         * Packages that are appeared, disappeared, or modified for whatever reason.
+         */
+        private final ArrayList<String> mChangedPackages = new ArrayList<>();
+
+        /**
+         * {@code true} if one or more packages that contain {@link SearchableInfo} appeared.
+         */
+        private boolean mSearchablePackageAppeared = false;
 
         @Override
-        public void onSomePackagesChanged() {
-            updateSearchables();
+        public void onBeginPackageChanges() {
+            clearPackageChangeState();
         }
 
         @Override
-        public void onPackageModified(String pkg) {
-            updateSearchables();
+        public void onPackageAppeared(String packageName, int reason) {
+            if (!mSearchablePackageAppeared) {
+                // Check if the new appeared package contains SearchableInfo.
+                mSearchablePackageAppeared =
+                        hasSearchableForPackage(packageName, getChangingUserId());
+            }
+            mChangedPackages.add(packageName);
         }
 
-        private void updateSearchables() {
-            final int changingUserId = getChangingUserId();
+        @Override
+        public void onPackageDisappeared(String packageName, int reason) {
+            mChangedPackages.add(packageName);
+        }
+
+        @Override
+        public void onPackageModified(String packageName) {
+            mChangedPackages.add(packageName);
+        }
+
+        @Override
+        public void onFinishPackageChanges() {
+            onFinishPackageChangesInternal();
+            clearPackageChangeState();
+        }
+
+        private void clearPackageChangeState() {
+            mChangedPackages.clear();
+            mSearchablePackageAppeared = false;
+        }
+
+        private boolean hasSearchableForPackage(String packageName, int userId) {
+            final List<ResolveInfo> searchList = querySearchableActivities(mContext,
+                    new Intent(Intent.ACTION_SEARCH).setPackage(packageName), userId);
+            if (!searchList.isEmpty()) {
+                return true;
+            }
+
+            final List<ResolveInfo> webSearchList = querySearchableActivities(mContext,
+                    new Intent(Intent.ACTION_WEB_SEARCH).setPackage(packageName), userId);
+            if (!webSearchList.isEmpty()) {
+                return true;
+            }
+
+            final List<ResolveInfo> globalSearchList = querySearchableActivities(mContext,
+                    new Intent(SearchManager.INTENT_ACTION_GLOBAL_SEARCH).setPackage(packageName),
+                    userId);
+            return !globalSearchList.isEmpty();
+        }
+
+        private boolean shouldRebuildSearchableList(@UserIdInt int changingUserId) {
+            // This method is guaranteed to be called only on getRegisteredHandler()
+            if (mSearchablePackageAppeared) {
+                return true;
+            }
+
+            ArraySet<String> knownSearchablePackageNames = new ArraySet<>();
             synchronized (mSearchables) {
-                // Update list of searchable activities
-                for (int i = 0; i < mSearchables.size(); i++) {
-                    if (changingUserId == mSearchables.keyAt(i)) {
-                        mSearchables.valueAt(i).updateSearchableList();
-                        break;
-                    }
+                Searchables searchables = mSearchables.get(changingUserId);
+                if (searchables != null) {
+                    knownSearchablePackageNames = searchables.getKnownSearchablePackageNames();
                 }
             }
+
+            final int numOfPackages = mChangedPackages.size();
+            for (int i = 0; i < numOfPackages; i++) {
+                final String packageName = mChangedPackages.get(i);
+                if (knownSearchablePackageNames.contains(packageName)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void onFinishPackageChangesInternal() {
+            final int changingUserId = getChangingUserId();
+            if (!shouldRebuildSearchableList(changingUserId)) {
+                return;
+            }
+            synchronized (mSearchables) {
+                // Invalidate the searchable list.
+                Searchables searchables = mSearchables.get(changingUserId);
+                if (searchables != null) {
+                    searchables.invalidateSearchableList();
+                }
+            }
+
             // Inform all listeners that the list of searchables has been updated.
             Intent intent = new Intent(SearchManager.INTENT_ACTION_SEARCHABLES_CHANGED);
             intent.addFlags(Intent.FLAG_RECEIVER_REPLACE_PENDING
@@ -188,6 +248,17 @@ public class SearchManagerService extends ISearchManager.Stub {
             mContext.sendBroadcastAsUser(intent, new UserHandle(changingUserId));
         }
     }
+
+    @NonNull
+    static List<ResolveInfo> querySearchableActivities(Context context, Intent searchIntent,
+            @UserIdInt int userId) {
+        final List<ResolveInfo> activities = context.getPackageManager()
+                .queryIntentActivitiesAsUser(searchIntent, PackageManager.GET_META_DATA
+                        | PackageManager.MATCH_INSTANT
+                        | PackageManager.MATCH_DEBUG_TRIAGED_MISSING, userId);
+        return activities;
+    }
+
 
     class GlobalSearchProviderObserver extends ContentObserver {
         private final ContentResolver mResolver;
@@ -205,7 +276,7 @@ public class SearchManagerService extends ISearchManager.Stub {
         public void onChange(boolean selfChange) {
             synchronized (mSearchables) {
                 for (int i = 0; i < mSearchables.size(); i++) {
-                    mSearchables.valueAt(i).updateSearchableList();
+                    mSearchables.valueAt(i).invalidateSearchableList();
                 }
             }
             Intent intent = new Intent(SearchManager.INTENT_GLOBAL_SEARCH_ACTIVITY_CHANGED);
@@ -264,56 +335,12 @@ public class SearchManagerService extends ISearchManager.Stub {
     }
 
     @Override
-    public void launchAssist(Bundle args) {
+    public void launchAssist(int userHandle, Bundle args) {
         StatusBarManagerInternal statusBarManager =
                 LocalServices.getService(StatusBarManagerInternal.class);
         if (statusBarManager != null) {
             statusBarManager.startAssist(args);
         }
-    }
-
-    private ComponentName getLegacyAssistComponent(int userHandle) {
-        try {
-            userHandle = ActivityManager.handleIncomingUser(Binder.getCallingPid(),
-                    Binder.getCallingUid(), userHandle, true, false, "getLegacyAssistComponent", null);
-            IPackageManager pm = AppGlobals.getPackageManager();
-            Intent assistIntent = new Intent(Intent.ACTION_ASSIST);
-            ResolveInfo info =
-                    pm.resolveIntent(assistIntent,
-                            assistIntent.resolveTypeIfNeeded(mContext.getContentResolver()),
-                            PackageManager.MATCH_DEFAULT_ONLY, userHandle);
-            if (info != null) {
-                return new ComponentName(
-                        info.activityInfo.applicationInfo.packageName,
-                        info.activityInfo.name);
-            }
-        } catch (RemoteException re) {
-            // Local call
-            Log.e(TAG, "RemoteException in getLegacyAssistComponent: " + re);
-        } catch (Exception e) {
-            Log.e(TAG, "Exception in getLegacyAssistComponent: " + e);
-        }
-        return null;
-    }
-
-    @Override
-    public boolean launchLegacyAssist(String hint, int userHandle, Bundle args) {
-        ComponentName comp = getLegacyAssistComponent(userHandle);
-        if (comp == null) {
-            return false;
-        }
-        long ident = Binder.clearCallingIdentity();
-        try {
-            Intent intent = new Intent(Intent.ACTION_ASSIST);
-            intent.setComponent(comp);
-            IActivityManager am = ActivityManager.getService();
-            return am.launchAssistIntent(intent, ActivityManager.ASSIST_CONTEXT_BASIC, hint,
-                    userHandle, args);
-        } catch (RemoteException e) {
-        } finally {
-            Binder.restoreCallingIdentity(ident);
-        }
-        return true;
     }
 
     @Override

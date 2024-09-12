@@ -23,9 +23,10 @@ import android.net.Uri;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.os.StatFs;
-import android.test.suitebuilder.annotation.LargeTest;
-import android.test.suitebuilder.annotation.Suppress;
 import android.util.Log;
+
+import androidx.test.filters.LargeTest;
+import androidx.test.filters.Suppress;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -195,7 +196,7 @@ public class DownloadManagerStressTest extends DownloadManagerBaseTest {
 
             // try to download 1MB file into /cache - and it should succeed
             byte[] blobData = generateData(DOWNLOAD_FILE_SIZE, DataType.TEXT);
-            long dlRequest = doBasicDownload(blobData, DOWNLOAD_TO_SYSTEM_CACHE);
+            long dlRequest = doBasicDownload(blobData);
             verifyAndCleanupSingleFileDownload(dlRequest, blobData);
         } finally {
             if (outFile != null) {

@@ -16,11 +16,17 @@
 
 package com.android.mediaframeworktest.stress;
 
-import com.android.ex.camera2.blocking.BlockingSessionCallback;
-import com.android.mediaframeworktest.Camera2SurfaceViewTestCase;
-import com.android.mediaframeworktest.helpers.CameraTestUtils;
-
-import junit.framework.AssertionFailedError;
+import static com.android.ex.camera2.blocking.BlockingSessionCallback.SESSION_CLOSED;
+import static com.android.mediaframeworktest.helpers.CameraTestUtils.CAPTURE_IMAGE_TIMEOUT_MS;
+import static com.android.mediaframeworktest.helpers.CameraTestUtils.SESSION_CLOSE_TIMEOUT_MS;
+import static com.android.mediaframeworktest.helpers.CameraTestUtils.SIZE_BOUND_1080P;
+import static com.android.mediaframeworktest.helpers.CameraTestUtils.SIZE_BOUND_2160P;
+import static com.android.mediaframeworktest.helpers.CameraTestUtils.SimpleCaptureCallback;
+import static com.android.mediaframeworktest.helpers.CameraTestUtils.SimpleImageReaderListener;
+import static com.android.mediaframeworktest.helpers.CameraTestUtils.configureCameraSession;
+import static com.android.mediaframeworktest.helpers.CameraTestUtils.configureCameraSessionWithParameters;
+import static com.android.mediaframeworktest.helpers.CameraTestUtils.getSupportedVideoSizes;
+import static com.android.mediaframeworktest.helpers.CameraTestUtils.getValueNotNull;
 
 import android.graphics.ImageFormat;
 import android.hardware.camera2.CameraCaptureSession;
@@ -36,30 +42,26 @@ import android.media.ImageReader;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.media.MediaRecorder;
-import android.os.Environment;
 import android.os.SystemClock;
-import android.test.suitebuilder.annotation.LargeTest;
 import android.util.Log;
 import android.util.Range;
 import android.util.Size;
 import android.view.Surface;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.LargeTest;
+
+import com.android.ex.camera2.blocking.BlockingSessionCallback;
+import com.android.mediaframeworktest.Camera2SurfaceViewTestCase;
+import com.android.mediaframeworktest.helpers.CameraTestUtils;
+
+import junit.framework.AssertionFailedError;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
-
-import static com.android.ex.camera2.blocking.BlockingSessionCallback.SESSION_CLOSED;
-import static com.android.mediaframeworktest.helpers.CameraTestUtils.CAPTURE_IMAGE_TIMEOUT_MS;
-import static com.android.mediaframeworktest.helpers.CameraTestUtils.SESSION_CLOSE_TIMEOUT_MS;
-import static com.android.mediaframeworktest.helpers.CameraTestUtils.SIZE_BOUND_1080P;
-import static com.android.mediaframeworktest.helpers.CameraTestUtils.SIZE_BOUND_2160P;
-import static com.android.mediaframeworktest.helpers.CameraTestUtils.SimpleCaptureCallback;
-import static com.android.mediaframeworktest.helpers.CameraTestUtils.SimpleImageReaderListener;
-import static com.android.mediaframeworktest.helpers.CameraTestUtils.configureCameraSession;
-import static com.android.mediaframeworktest.helpers.CameraTestUtils.getSupportedVideoSizes;
-import static com.android.mediaframeworktest.helpers.CameraTestUtils.getValueNotNull;
 
 /**
  * CameraDevice video recording use case tests by using MediaRecorder and
@@ -70,7 +72,7 @@ import static com.android.mediaframeworktest.helpers.CameraTestUtils.getValueNot
  *    -e iterations 10 \
  *    -e waitIntervalMs 1000 \
  *    -e resultToFile false \
- *    -r -w com.android.mediaframeworktest/.Camera2InstrumentationTestRunner
+ *    -r -w com.android.mediaframeworktest/androidx.test.runner.AndroidJUnitRunner
  */
 @LargeTest
 public class Camera2RecordingTest extends Camera2SurfaceViewTestCase {
@@ -84,7 +86,9 @@ public class Camera2RecordingTest extends Camera2SurfaceViewTestCase {
     private static final int BIT_RATE_MIN = 64000;
     private static final int BIT_RATE_MAX = 40000000;
     private static final int VIDEO_FRAME_RATE = 30;
-    private final String VIDEO_FILE_PATH = Environment.getExternalStorageDirectory().getPath();
+    private static final String VIDEO_FILE_PATH = InstrumentationRegistry
+            .getInstrumentation().getTargetContext()
+            .getExternalFilesDir(null).getPath();
     private static final int[] mCamcorderProfileList = {
             CamcorderProfile.QUALITY_HIGH,
             CamcorderProfile.QUALITY_2160P,
@@ -659,6 +663,10 @@ public class Camera2RecordingTest extends Camera2SurfaceViewTestCase {
                 updatePreviewSurfaceWithVideo(videoSz, profile.videoFrameRate);
 
                 prepareVideoSnapshot(videoSnapshotRequestBuilder, imageListener);
+                Range<Integer> fpsRange = Range.create(profile.videoFrameRate,
+                        profile.videoFrameRate);
+                videoSnapshotRequestBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                        fpsRange);
                 CaptureRequest request = videoSnapshotRequestBuilder.build();
 
                 // Start recording
@@ -868,7 +876,6 @@ public class Camera2RecordingTest extends Camera2SurfaceViewTestCase {
             outputSurfaces.add(mReaderSurface);
         }
         mSessionListener = new BlockingSessionCallback();
-        mSession = configureCameraSession(mCamera, outputSurfaces, mSessionListener, mHandler);
 
         CaptureRequest.Builder recordingRequestBuilder =
                 mCamera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
@@ -881,7 +888,10 @@ public class Camera2RecordingTest extends Camera2SurfaceViewTestCase {
         }
         recordingRequestBuilder.addTarget(mRecordingSurface);
         recordingRequestBuilder.addTarget(mPreviewSurface);
-        mSession.setRepeatingRequest(recordingRequestBuilder.build(), listener, mHandler);
+        CaptureRequest recordingRequest = recordingRequestBuilder.build();
+        mSession = configureCameraSessionWithParameters(mCamera, outputSurfaces, mSessionListener,
+                mHandler, recordingRequest);
+        mSession.setRepeatingRequest(recordingRequest, listener, mHandler);
 
         if (useMediaRecorder) {
             mMediaRecorder.start();
@@ -975,7 +985,7 @@ public class Camera2RecordingTest extends Camera2SurfaceViewTestCase {
     }
 
     /**
-     * Validate video snapshot capture image object sanity and test.
+     * Validate video snapshot capture image object soundness and test.
      *
      * <p> Check for size, format and jpeg decoding</p>
      *

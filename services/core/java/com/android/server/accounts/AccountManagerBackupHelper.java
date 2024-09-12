@@ -23,23 +23,21 @@ import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
-import android.database.Cursor;
-import android.database.sqlite.SQLiteDatabase;
 import android.os.UserHandle;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.PackageUtils;
 import android.util.Pair;
+import android.util.Slog;
 import android.util.Xml;
+
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.content.PackageMonitor;
-import com.android.internal.util.FastXmlSerializer;
 import com.android.internal.util.XmlUtils;
-import com.android.server.accounts.AccountsDb.DeDatabaseHelper;
+import com.android.modules.utils.TypedXmlPullParser;
+import com.android.modules.utils.TypedXmlSerializer;
 
-import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
-import org.xmlpull.v1.XmlSerializer;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -126,9 +124,18 @@ public final class AccountManagerBackupHelper {
             } catch (PackageManager.NameNotFoundException e) {
                 return false;
             }
-            String currentCertDigest = PackageUtils.computeCertSha256Digest(
-                    packageInfo.signatures[0]);
-            if (!certDigest.equals(currentCertDigest)) {
+
+            // Before we used only the first signature to compute the SHA 256 but some
+            // apps could be singed by multiple certs and the cert order is undefined.
+            // We prefer the modern computation procedure where all certs are taken
+            // into account but also allow the value from the old computation to allow
+            // restoring backed up grants on an older platform version.
+            final String[] signaturesSha256Digests = PackageUtils.computeSignaturesSha256Digests(
+                    packageInfo.signatures);
+            final String signaturesSha256Digest = PackageUtils.computeSignaturesSha256Digest(
+                    signaturesSha256Digests);
+            if (!certDigest.equals(signaturesSha256Digest) && (packageInfo.signatures.length <= 1
+                    || !certDigest.equals(signaturesSha256Digests[0]))) {
                 return false;
             }
             final int uid = packageInfo.applicationInfo.uid;
@@ -152,7 +159,7 @@ public final class AccountManagerBackupHelper {
                 }
                 try {
                     ByteArrayOutputStream dataStream = new ByteArrayOutputStream();
-                    final XmlSerializer serializer = new FastXmlSerializer();
+                    final TypedXmlSerializer serializer = Xml.newFastSerializer();
                     serializer.setOutput(dataStream, StandardCharsets.UTF_8.name());
                     serializer.startDocument(null, true);
                     serializer.startTag(null, TAG_PERMISSIONS);
@@ -169,8 +176,17 @@ public final class AccountManagerBackupHelper {
                         }
 
                         for (String packageName : packageNames) {
-                            String digest = PackageUtils.computePackageCertSha256Digest(
-                                    packageManager, packageName, userId);
+                            final PackageInfo packageInfo;
+                            try {
+                                packageInfo = packageManager.getPackageInfoAsUser(packageName,
+                                        PackageManager.GET_SIGNATURES, userId);
+                            } catch (PackageManager.NameNotFoundException e) {
+                                Slog.i(TAG, "Skipping backup of account access grant for"
+                                        + " non-existing package: " + packageName);
+                                continue;
+                            }
+                            final String digest = PackageUtils.computeSignaturesSha256Digest(
+                                    packageInfo.signatures);
                             if (digest != null) {
                                 serializer.startTag(null, TAG_PERMISSION);
                                 serializer.attribute(null, ATTR_ACCOUNT_SHA_256,
@@ -196,7 +212,7 @@ public final class AccountManagerBackupHelper {
     public void restoreAccountAccessPermissions(byte[] data, int userId) {
         try {
             ByteArrayInputStream dataStream = new ByteArrayInputStream(data);
-            XmlPullParser parser = Xml.newPullParser();
+            TypedXmlPullParser parser = Xml.newFastPullParser();
             parser.setInput(dataStream, StandardCharsets.UTF_8.name());
             PackageManager packageManager = mAccountManagerService.mContext.getPackageManager();
 

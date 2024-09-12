@@ -16,18 +16,18 @@
 
 package android.app;
 
-import org.xmlpull.v1.XmlPullParser;
-import org.xmlpull.v1.XmlPullParserException;
-
+import android.annotation.Nullable;
+import android.annotation.SystemApi;
+import android.app.slice.Slice;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
-import android.content.pm.PackageManager.NameNotFoundException;
-import android.content.res.Resources.NotFoundException;
 import android.content.res.Resources;
+import android.content.res.Resources.NotFoundException;
 import android.content.res.TypedArray;
 import android.content.res.XmlResourceParser;
 import android.graphics.drawable.Drawable;
@@ -38,6 +38,10 @@ import android.service.wallpaper.WallpaperService;
 import android.util.AttributeSet;
 import android.util.Printer;
 import android.util.Xml;
+import android.view.SurfaceHolder;
+
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
 
 import java.io.IOException;
 
@@ -76,6 +80,10 @@ public final class WallpaperInfo implements Parcelable {
     final int mContextUriResource;
     final int mContextDescriptionResource;
     final boolean mShowMetadataInPreview;
+    final boolean mSupportsAmbientMode;
+    final boolean mShouldUseDefaultUnfoldTransition;
+    final String mSettingsSliceUri;
+    final boolean mSupportMultipleDisplays;
 
     /**
      * Constructor.
@@ -88,78 +96,73 @@ public final class WallpaperInfo implements Parcelable {
             throws XmlPullParserException, IOException {
         mService = service;
         ServiceInfo si = service.serviceInfo;
-        
-        PackageManager pm = context.getPackageManager();
-        String settingsActivityComponent = null;
-        int thumbnailRes = -1;
-        int authorRes = -1;
-        int descriptionRes = -1;
-        int contextUriRes = -1;
-        int contextDescriptionRes = -1;
-        boolean showMetadataInPreview = false;
 
-        XmlResourceParser parser = null;
-        try {
-            parser = si.loadXmlMetaData(pm, WallpaperService.SERVICE_META_DATA);
+        final PackageManager pm = context.getPackageManager();
+        try (XmlResourceParser parser = si.loadXmlMetaData(pm,
+                WallpaperService.SERVICE_META_DATA)) {
             if (parser == null) {
                 throw new XmlPullParserException("No "
                         + WallpaperService.SERVICE_META_DATA + " meta-data");
             }
-        
+
             Resources res = pm.getResourcesForApplication(si.applicationInfo);
-            
+
             AttributeSet attrs = Xml.asAttributeSet(parser);
-            
+
             int type;
-            while ((type=parser.next()) != XmlPullParser.END_DOCUMENT
+            while ((type = parser.next()) != XmlPullParser.END_DOCUMENT
                     && type != XmlPullParser.START_TAG) {
             }
-            
+
             String nodeName = parser.getName();
             if (!"wallpaper".equals(nodeName)) {
                 throw new XmlPullParserException(
                         "Meta-data does not start with wallpaper tag");
             }
-            
+
             TypedArray sa = res.obtainAttributes(attrs,
                     com.android.internal.R.styleable.Wallpaper);
-            settingsActivityComponent = sa.getString(
+            mSettingsActivityName = sa.getString(
                     com.android.internal.R.styleable.Wallpaper_settingsActivity);
-            
-            thumbnailRes = sa.getResourceId(
+            mThumbnailResource = sa.getResourceId(
                     com.android.internal.R.styleable.Wallpaper_thumbnail,
                     -1);
-            authorRes = sa.getResourceId(
+            mAuthorResource = sa.getResourceId(
                     com.android.internal.R.styleable.Wallpaper_author,
                     -1);
-            descriptionRes = sa.getResourceId(
+            mDescriptionResource = sa.getResourceId(
                     com.android.internal.R.styleable.Wallpaper_description,
                     -1);
-            contextUriRes = sa.getResourceId(
+            mContextUriResource = sa.getResourceId(
                     com.android.internal.R.styleable.Wallpaper_contextUri,
                     -1);
-            contextDescriptionRes = sa.getResourceId(
+            mContextDescriptionResource = sa.getResourceId(
                     com.android.internal.R.styleable.Wallpaper_contextDescription,
                     -1);
-            showMetadataInPreview = sa.getBoolean(
+            mShowMetadataInPreview = sa.getBoolean(
                     com.android.internal.R.styleable.Wallpaper_showMetadataInPreview,
+                    false);
+
+            // Watch wallpapers support ambient mode by default.
+            final boolean defSupportsAmbientMode =
+                    pm.hasSystemFeature(PackageManager.FEATURE_WATCH);
+            mSupportsAmbientMode = sa.getBoolean(
+                    com.android.internal.R.styleable.Wallpaper_supportsAmbientMode,
+                    defSupportsAmbientMode);
+            mShouldUseDefaultUnfoldTransition = sa.getBoolean(
+                    com.android.internal.R.styleable
+                            .Wallpaper_shouldUseDefaultUnfoldTransition, true);
+            mSettingsSliceUri = sa.getString(
+                    com.android.internal.R.styleable.Wallpaper_settingsSliceUri);
+            mSupportMultipleDisplays = sa.getBoolean(
+                    com.android.internal.R.styleable.Wallpaper_supportsMultipleDisplays,
                     false);
 
             sa.recycle();
         } catch (NameNotFoundException e) {
             throw new XmlPullParserException(
                     "Unable to create context for: " + si.packageName);
-        } finally {
-            if (parser != null) parser.close();
         }
-        
-        mSettingsActivityName = settingsActivityComponent;
-        mThumbnailResource = thumbnailRes;
-        mAuthorResource = authorRes;
-        mDescriptionResource = descriptionRes;
-        mContextUriResource = contextUriRes;
-        mContextDescriptionResource = contextDescriptionRes;
-        mShowMetadataInPreview = showMetadataInPreview;
     }
 
     WallpaperInfo(Parcel source) {
@@ -170,6 +173,10 @@ public final class WallpaperInfo implements Parcelable {
         mContextUriResource = source.readInt();
         mContextDescriptionResource = source.readInt();
         mShowMetadataInPreview = source.readInt() != 0;
+        mSupportsAmbientMode = source.readInt() != 0;
+        mSettingsSliceUri = source.readString();
+        mSupportMultipleDisplays = source.readInt() != 0;
+        mShouldUseDefaultUnfoldTransition = source.readInt() != 0;
         mService = ResolveInfo.CREATOR.createFromParcel(source);
     }
     
@@ -286,12 +293,12 @@ public final class WallpaperInfo implements Parcelable {
             packageName = mService.serviceInfo.packageName;
             applicationInfo = mService.serviceInfo.applicationInfo;
         }
-        String contextUriString = pm.getText(
-                packageName, mContextUriResource, applicationInfo).toString();
-        if (contextUriString == null) {
+        CharSequence contextUriCharSequence = pm.getText(
+                packageName, mContextUriResource, applicationInfo);
+        if (contextUriCharSequence == null) {
             return null;
         }
-        return Uri.parse(contextUriString);
+        return Uri.parse(contextUriCharSequence.toString());
     }
 
     /**
@@ -326,19 +333,94 @@ public final class WallpaperInfo implements Parcelable {
     }
 
     /**
+     * Returns whether a wallpaper was optimized or not for ambient mode and can be drawn in there.
+     *
+     * @see WallpaperService.Engine#onAmbientModeChanged(boolean, boolean)
+     * @see WallpaperService.Engine#isInAmbientMode()
+     * @return {@code true} if wallpaper can draw when in ambient mode.
+     * @hide
+     */
+    @SystemApi
+    public boolean supportsAmbientMode() {
+        return mSupportsAmbientMode;
+    }
+
+    /**
      * Return the class name of an activity that provides a settings UI for
      * the wallpaper.  You can launch this activity be starting it with
      * an {@link android.content.Intent} whose action is MAIN and with an
      * explicit {@link android.content.ComponentName}
      * composed of {@link #getPackageName} and the class name returned here.
      * 
-     * <p>A null will be returned if there is no settings activity associated
+     * <p>{@code null} will be returned if there is no settings activity associated
      * with the wallpaper.
      */
     public String getSettingsActivity() {
         return mSettingsActivityName;
     }
     
+    /**
+     * Returns an URI that provides a settings {@link Slice} for this wallpaper.
+     * The wallpaper should implement a SliceProvider associated with this URI.
+     * The system will display the Slice in the customization section while previewing the live
+     * wallpaper. Because this URI is accessible to other apps, it is recommended to protect it
+     * with the android.permission.BIND_WALLPAPER permission.
+     *
+     * <p>{@code null} will be returned if there is no settings Slice URI associated
+     * with the wallpaper.
+     *
+     * @return The URI.
+     */
+    @Nullable
+    public Uri getSettingsSliceUri() {
+        if (mSettingsSliceUri == null) {
+            return null;
+        }
+        return Uri.parse(mSettingsSliceUri);
+    }
+
+    /**
+     * Returns whether this wallpaper service can support multiple engines to render on each surface
+     * independently. An example use case is a multi-display set-up where the wallpaper service can
+     * render surfaces to each of the connected displays.
+     * <p>
+     * This corresponds to the value {@link android.R.styleable#Wallpaper_supportsMultipleDisplays}
+     * in the XML description of the wallpaper.
+     * <p>
+     * The default value is {@code false}.
+     *
+     * @see WallpaperService#onCreateEngine()
+     * @see WallpaperService.Engine#onCreate(SurfaceHolder)
+     * @return {@code true} if multiple engines can render independently on each surface.
+     *
+     * @attr ref android.R.styleable#Wallpaper_supportsMultipleDisplays
+     */
+    public boolean supportsMultipleDisplays() {
+        return mSupportMultipleDisplays;
+    }
+
+    /**
+     * Returns whether this wallpaper should receive default zooming updates when the device
+     * changes its state (e.g. when folding or unfolding a foldable device).
+     * If set to false the wallpaper will not receive zoom events when changing the device state,
+     * so it can implement its own transition instead.
+     * <p>
+     * This corresponds to the value {@link
+     * android.R.styleable#Wallpaper_shouldUseDefaultUnfoldTransition} in the
+     * XML description of the wallpaper.
+     * <p>
+     * The default value is {@code true}.
+     *
+     * @see android.R.styleable#Wallpaper_shouldUseDefaultUnfoldTransition
+     * @return {@code true} if wallpaper should receive default device state change
+     * transition updates
+     *
+     * @attr ref android.R.styleable#Wallpaper_shouldUseDefaultUnfoldTransition
+     */
+    public boolean shouldUseDefaultUnfoldTransition() {
+        return mShouldUseDefaultUnfoldTransition;
+    }
+
     public void dump(Printer pw, String prefix) {
         pw.println(prefix + "Service:");
         mService.dump(pw, prefix + "  ");
@@ -366,13 +448,17 @@ public final class WallpaperInfo implements Parcelable {
         dest.writeInt(mContextUriResource);
         dest.writeInt(mContextDescriptionResource);
         dest.writeInt(mShowMetadataInPreview ? 1 : 0);
+        dest.writeInt(mSupportsAmbientMode ? 1 : 0);
+        dest.writeString(mSettingsSliceUri);
+        dest.writeInt(mSupportMultipleDisplays ? 1 : 0);
+        dest.writeInt(mShouldUseDefaultUnfoldTransition ? 1 : 0);
         mService.writeToParcel(dest, flags);
     }
 
     /**
      * Used to make this class parcelable.
      */
-    public static final Parcelable.Creator<WallpaperInfo> CREATOR = new Parcelable.Creator<WallpaperInfo>() {
+    public static final @android.annotation.NonNull Parcelable.Creator<WallpaperInfo> CREATOR = new Parcelable.Creator<WallpaperInfo>() {
         public WallpaperInfo createFromParcel(Parcel source) {
             return new WallpaperInfo(source);
         }

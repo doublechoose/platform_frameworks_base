@@ -17,23 +17,22 @@ package com.android.systemui.tuner;
 import android.app.AlertDialog.Builder;
 import android.app.Dialog;
 import android.app.DialogFragment;
-import android.app.Fragment;
 import android.content.Context;
 import android.content.DialogInterface.OnClickListener;
 import android.os.Bundle;
-import android.support.v14.preference.PreferenceFragment;
-import android.support.v7.preference.Preference;
-import android.support.v7.preference.PreferenceScreen;
 import android.util.AttributeSet;
-import android.util.Log;
 import android.view.View;
 import android.widget.Toolbar;
 
-import com.android.settingslib.Utils;
-import com.android.systemui.fragments.FragmentHostManager;
-import com.android.systemui.R;
+import androidx.preference.Preference;
+import androidx.preference.PreferenceScreen;
 
-import libcore.util.Objects;
+import com.android.settingslib.Utils;
+import com.android.systemui.Dependency;
+import com.android.systemui.fragments.FragmentService;
+import com.android.systemui.res.R;
+
+import java.util.Objects;
 
 public class RadioListPreference extends CustomListPreference {
 
@@ -76,7 +75,7 @@ public class RadioListPreference extends CustomListPreference {
 
         RadioFragment f = new RadioFragment();
         f.setPreference(this);
-        FragmentHostManager.get(v).getFragmentManager()
+        Dependency.get(FragmentService.class).getFragmentHostManager(v).getFragmentManager()
                 .beginTransaction()
                 .add(android.R.id.content, f)
                 .commit();
@@ -88,8 +87,10 @@ public class RadioListPreference extends CustomListPreference {
             Bundle savedInstanceState) {
         super.onDialogStateRestored(fragment, dialog, savedInstanceState);
         View view = dialog.findViewById(R.id.content);
-        RadioFragment radioFragment = (RadioFragment) FragmentHostManager.get(view)
-                .getFragmentManager().findFragmentById(R.id.content);
+        RadioFragment radioFragment = (RadioFragment) Dependency.get(FragmentService.class)
+                .getFragmentHostManager(view)
+                .getFragmentManager()
+                .findFragmentById(R.id.content);
         if (radioFragment != null) {
             radioFragment.setPreference(this);
         }
@@ -124,7 +125,7 @@ public class RadioListPreference extends CustomListPreference {
                 SelectablePreference pref = new SelectablePreference(context);
                 getPreferenceScreen().addPreference(pref);
                 pref.setTitle(entry);
-                pref.setChecked(Objects.equal(current, values[i]));
+                pref.setChecked(Objects.equals(current, values[i]));
                 pref.setKey(String.valueOf(i));
             }
         }

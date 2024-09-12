@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 The Android Open Source Project
+ * Copyright (C) 2023 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -11,7 +11,7 @@
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
- * limitations under the License
+ * limitations under the License.
  */
 
 package com.android.keyguard;
@@ -21,40 +21,35 @@ import android.animation.AnimatorListenerAdapter;
 import android.animation.AnimatorSet;
 import android.animation.ValueAnimator;
 import android.content.Context;
+import android.content.res.Configuration;
 import android.content.res.TypedArray;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.os.PowerManager;
 import android.os.SystemClock;
-import android.os.UserHandle;
-import android.provider.Settings;
-import android.text.InputType;
-import android.text.TextUtils;
 import android.util.AttributeSet;
 import android.view.Gravity;
-import android.view.View;
-import android.view.accessibility.AccessibilityEvent;
-import android.view.accessibility.AccessibilityManager;
-import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.LayoutInflater;
 import android.view.animation.AnimationUtils;
 import android.view.animation.Interpolator;
-import android.widget.EditText;
+
+import com.android.settingslib.Utils;
+import com.android.systemui.res.R;
 
 import java.util.ArrayList;
-import java.util.Stack;
 
 /**
  * A View similar to a textView which contains password text and can animate when the text is
  * changed
  */
-public class PasswordTextView extends View {
-
+public class PasswordTextView extends BasePasswordTextView {
+    public static final long APPEAR_DURATION = 160;
+    public static final long DISAPPEAR_DURATION = 160;
     private static final float DOT_OVERSHOOT_FACTOR = 1.5f;
     private static final long DOT_APPEAR_DURATION_OVERSHOOT = 320;
-    private static final long APPEAR_DURATION = 160;
-    private static final long DISAPPEAR_DURATION = 160;
     private static final long RESET_DELAY_PER_ELEMENT = 40;
     private static final long RESET_MAX_DELAY = 200;
 
@@ -82,24 +77,17 @@ public class PasswordTextView extends View {
     /**
      * The raw text size, will be multiplied by the scaled density when drawn
      */
-    private final int mTextHeightRaw;
+    private int mTextHeightRaw;
     private final int mGravity;
     private ArrayList<CharState> mTextChars = new ArrayList<>();
-    private String mText = "";
-    private Stack<CharState> mCharPool = new Stack<>();
     private int mDotSize;
     private PowerManager mPM;
     private int mCharPadding;
     private final Paint mDrawPaint = new Paint();
+    private int mDrawColor;
     private Interpolator mAppearInterpolator;
     private Interpolator mDisappearInterpolator;
     private Interpolator mFastOutSlowInInterpolator;
-    private boolean mShowPassword;
-    private UserActivityListener mUserActivityListener;
-
-    public interface UserActivityListener {
-        void onUserActivity();
-    }
 
     public PasswordTextView(Context context) {
         this(context, null);
@@ -116,9 +104,19 @@ public class PasswordTextView extends View {
     public PasswordTextView(Context context, AttributeSet attrs, int defStyleAttr,
             int defStyleRes) {
         super(context, attrs, defStyleAttr, defStyleRes);
-        setFocusableInTouchMode(true);
-        setFocusable(true);
-        TypedArray a = context.obtainStyledAttributes(attrs, R.styleable.PasswordTextView);
+        TypedArray a = context.obtainStyledAttributes(attrs, android.R.styleable.View);
+        try {
+            // If defined, use the provided values. If not, set them to true by default.
+            boolean isFocusable = a.getBoolean(android.R.styleable.View_focusable,
+                    /* defValue= */ true);
+            boolean isFocusableInTouchMode = a.getBoolean(
+                    android.R.styleable.View_focusableInTouchMode, /* defValue= */ true);
+            setFocusable(isFocusable);
+            setFocusableInTouchMode(isFocusableInTouchMode);
+        } finally {
+            a.recycle();
+        }
+        a = context.obtainStyledAttributes(attrs, R.styleable.PasswordTextView);
         try {
             mTextHeightRaw = a.getInt(R.styleable.PasswordTextView_scaledTextSize, 0);
             mGravity = a.getInt(R.styleable.PasswordTextView_android_gravity, Gravity.CENTER);
@@ -127,15 +125,17 @@ public class PasswordTextView extends View {
             mCharPadding = a.getDimensionPixelSize(R.styleable.PasswordTextView_charPadding,
                     getContext().getResources().getDimensionPixelSize(
                             R.dimen.password_char_padding));
+            mDrawColor = a.getColor(R.styleable.PasswordTextView_android_textColor, Color.WHITE);
+            mDrawPaint.setColor(mDrawColor);
+
         } finally {
             a.recycle();
         }
+
         mDrawPaint.setFlags(Paint.SUBPIXEL_TEXT_FLAG | Paint.ANTI_ALIAS_FLAG);
         mDrawPaint.setTextAlign(Paint.Align.CENTER);
-        mDrawPaint.setColor(0xffffffff);
-        mDrawPaint.setTypeface(Typeface.create("sans-serif-light", 0));
-        mShowPassword = Settings.System.getInt(mContext.getContentResolver(),
-                Settings.System.TEXT_SHOW_PASSWORD, 1) == 1;
+        mDrawPaint.setTypeface(Typeface.create(
+                context.getString(com.android.internal.R.string.config_headlineFontFamily), 0));
         mAppearInterpolator = AnimationUtils.loadInterpolator(mContext,
                 android.R.interpolator.linear_out_slow_in);
         mDisappearInterpolator = AnimationUtils.loadInterpolator(mContext,
@@ -143,10 +143,33 @@ public class PasswordTextView extends View {
         mFastOutSlowInInterpolator = AnimationUtils.loadInterpolator(mContext,
                 android.R.interpolator.fast_out_slow_in);
         mPM = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
+        setWillNotDraw(false);
+    }
+
+    @Override
+    protected PinShapeInput inflatePinShapeInput(boolean isPinHinting) {
+        if (isPinHinting) {
+            return (PinShapeInput) LayoutInflater.from(mContext).inflate(
+                    R.layout.keyguard_pin_shape_hinting_view, null);
+        } else {
+            return (PinShapeInput) LayoutInflater.from(mContext).inflate(
+                    R.layout.keyguard_pin_shape_non_hinting_view, null);
+        }
+    }
+
+    @Override
+    protected boolean shouldSendAccessibilityEvent() {
+        return isFocused() || isSelected() && isShown();
     }
 
     @Override
     protected void onDraw(Canvas canvas) {
+        // Do not use legacy draw animations for pin shapes.
+        if (mUsePinShapes) {
+            super.onDraw(canvas);
+            return;
+        }
+
         float totalDrawingWidth = getDrawingWidth();
         float currentDrawPosition;
         if ((mGravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.LEFT) {
@@ -157,15 +180,17 @@ public class PasswordTextView extends View {
                 currentDrawPosition = getPaddingLeft();
             }
         } else {
-            currentDrawPosition = getWidth() / 2 - totalDrawingWidth / 2;
+            float maxRight = getWidth() - getPaddingRight() - totalDrawingWidth;
+            float center = getWidth() / 2f - totalDrawingWidth / 2f;
+            currentDrawPosition = center > 0 ? center : maxRight;
         }
         int length = mTextChars.size();
         Rect bounds = getCharBounds();
         int charHeight = (bounds.bottom - bounds.top);
         float yPosition =
                 (getHeight() - getPaddingBottom() - getPaddingTop()) / 2 + getPaddingTop();
-        canvas.clipRect(getPaddingLeft(), getPaddingTop(),
-                getWidth() - getPaddingRight(), getHeight() - getPaddingBottom());
+        canvas.clipRect(getPaddingLeft(), getPaddingTop(), getWidth() - getPaddingRight(),
+                getHeight() - getPaddingBottom());
         float charLength = bounds.right - bounds.left;
         for (int i = 0; i < length; i++) {
             CharState charState = mTextChars.get(i);
@@ -176,8 +201,82 @@ public class PasswordTextView extends View {
     }
 
     @Override
-    public boolean hasOverlappingRendering() {
-        return false;
+    protected void onAppend(char c, int newLength) {
+        int visibleChars = mTextChars.size();
+        CharState charState;
+        if (newLength > visibleChars) {
+            charState = obtainCharState(c);
+            mTextChars.add(charState);
+        } else {
+            charState = mTextChars.get(newLength - 1);
+            charState.whichChar = c;
+        }
+        charState.startAppearAnimation();
+
+        // ensure that the previous element is being swapped
+        if (newLength > 1) {
+            CharState previousState = mTextChars.get(newLength - 2);
+            if (previousState.isDotSwapPending) {
+                previousState.swapToDotWhenAppearFinished();
+            }
+        }
+    }
+
+    @Override
+    protected void onDelete(int index) {
+        CharState charState = mTextChars.get(index);
+        charState.startRemoveAnimation(0, 0);
+    }
+
+    @Override
+    protected void onReset(boolean animated) {
+        if (animated) {
+            int length = mTextChars.size();
+            int middleIndex = (length - 1) / 2;
+            long delayPerElement = RESET_DELAY_PER_ELEMENT;
+            for (int i = 0; i < length; i++) {
+                CharState charState = mTextChars.get(i);
+                int delayIndex;
+                if (i <= middleIndex) {
+                    delayIndex = i * 2;
+                } else {
+                    int distToMiddle = i - middleIndex;
+                    delayIndex = (length - 1) - (distToMiddle - 1) * 2;
+                }
+                long startDelay = delayIndex * delayPerElement;
+                startDelay = Math.min(startDelay, RESET_MAX_DELAY);
+                long maxDelay = delayPerElement * (length - 1);
+                maxDelay = Math.min(maxDelay, RESET_MAX_DELAY) + DISAPPEAR_DURATION;
+                charState.startRemoveAnimation(startDelay, maxDelay);
+                charState.removeDotSwapCallbacks();
+            }
+        } else {
+            mTextChars.clear();
+        }
+    }
+
+    @Override
+    protected void onUserActivity() {
+        mPM.userActivity(SystemClock.uptimeMillis(), false);
+        super.onUserActivity();
+    }
+
+    /**
+     * Reload colors from resources.
+     **/
+    public void reloadColors() {
+        mDrawColor = Utils.getColorAttr(getContext(),
+                android.R.attr.textColorPrimary).getDefaultColor();
+        mDrawPaint.setColor(mDrawColor);
+        if (mPinShapeInput != null) {
+            mPinShapeInput.setDrawColor(mDrawColor);
+        }
+    }
+
+    @Override
+    protected void onConfigurationChanged(Configuration newConfig) {
+        mTextHeightRaw = getContext().getResources().getInteger(
+                R.integer.scaled_password_text_size);
     }
 
     private Rect getCharBounds() {
@@ -203,139 +302,26 @@ public class PasswordTextView extends View {
         return width;
     }
 
-
-    public void append(char c) {
-        int visibleChars = mTextChars.size();
-        String textbefore = mText;
-        mText = mText + c;
-        int newLength = mText.length();
-        CharState charState;
-        if (newLength > visibleChars) {
-            charState = obtainCharState(c);
-            mTextChars.add(charState);
-        } else {
-            charState = mTextChars.get(newLength - 1);
-            charState.whichChar = c;
-        }
-        charState.startAppearAnimation();
-
-        // ensure that the previous element is being swapped
-        if (newLength > 1) {
-            CharState previousState = mTextChars.get(newLength - 2);
-            if (previousState.isDotSwapPending) {
-                previousState.swapToDotWhenAppearFinished();
-            }
-        }
-        userActivity();
-        sendAccessibilityEventTypeViewTextChanged(textbefore, textbefore.length(), 0, 1);
-    }
-
-    public void setUserActivityListener(UserActivityListener userActivitiListener) {
-        mUserActivityListener = userActivitiListener;
-    }
-
-    private void userActivity() {
-        mPM.userActivity(SystemClock.uptimeMillis(), false);
-        if (mUserActivityListener != null) {
-            mUserActivityListener.onUserActivity();
-        }
-    }
-
-    public void deleteLastChar() {
-        int length = mText.length();
-        String textbefore = mText;
-        if (length > 0) {
-            mText = mText.substring(0, length - 1);
-            CharState charState = mTextChars.get(length - 1);
-            charState.startRemoveAnimation(0, 0);
-        }
-        userActivity();
-        sendAccessibilityEventTypeViewTextChanged(textbefore, textbefore.length() - 1, 1, 0);
-    }
-
-    public String getText() {
-        return mText;
-    }
-
     private CharState obtainCharState(char c) {
-        CharState charState;
-        if(mCharPool.isEmpty()) {
-            charState = new CharState();
-        } else {
-            charState = mCharPool.pop();
-            charState.reset();
-        }
+        CharState charState = new CharState();
         charState.whichChar = c;
         return charState;
     }
 
-    public void reset(boolean animated, boolean announce) {
-        String textbefore = mText;
-        mText = "";
-        int length = mTextChars.size();
-        int middleIndex = (length - 1) / 2;
-        long delayPerElement = RESET_DELAY_PER_ELEMENT;
-        for (int i = 0; i < length; i++) {
+    @Override
+    protected CharSequence getTransformedText() {
+        int textLength = mTextChars.size();
+        StringBuilder stringBuilder = new StringBuilder(textLength);
+        for (int i = 0; i < textLength; i++) {
             CharState charState = mTextChars.get(i);
-            if (animated) {
-                int delayIndex;
-                if (i <= middleIndex) {
-                    delayIndex = i * 2;
-                } else {
-                    int distToMiddle = i - middleIndex;
-                    delayIndex = (length - 1) - (distToMiddle - 1) * 2;
-                }
-                long startDelay = delayIndex * delayPerElement;
-                startDelay = Math.min(startDelay, RESET_MAX_DELAY);
-                long maxDelay = delayPerElement * (length - 1);
-                maxDelay = Math.min(maxDelay, RESET_MAX_DELAY) + DISAPPEAR_DURATION;
-                charState.startRemoveAnimation(startDelay, maxDelay);
-                charState.removeDotSwapCallbacks();
-            } else {
-                mCharPool.push(charState);
+            // If the dot is disappearing, the character is disappearing entirely. Consider
+            // it gone.
+            if (charState.dotAnimator != null && !charState.dotAnimationIsGrowing) {
+                continue;
             }
+            stringBuilder.append(charState.isCharVisibleForA11y() ? charState.whichChar : DOT);
         }
-        if (!animated) {
-            mTextChars.clear();
-        }
-        if (announce) {
-            sendAccessibilityEventTypeViewTextChanged(textbefore, 0, textbefore.length(), 0);
-        }
-    }
-
-    void sendAccessibilityEventTypeViewTextChanged(String beforeText, int fromIndex,
-                                                   int removedCount, int addedCount) {
-        if (AccessibilityManager.getInstance(mContext).isEnabled() &&
-                (isFocused() || isSelected() && isShown())) {
-            AccessibilityEvent event =
-                    AccessibilityEvent.obtain(AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED);
-            event.setFromIndex(fromIndex);
-            event.setRemovedCount(removedCount);
-            event.setAddedCount(addedCount);
-            event.setBeforeText(beforeText);
-            event.setPassword(true);
-            sendAccessibilityEventUnchecked(event);
-        }
-    }
-
-    @Override
-    public void onInitializeAccessibilityEvent(AccessibilityEvent event) {
-        super.onInitializeAccessibilityEvent(event);
-
-        event.setClassName(EditText.class.getName());
-        event.setPassword(true);
-    }
-
-    @Override
-    public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
-        super.onInitializeAccessibilityNodeInfo(info);
-
-        info.setClassName(PasswordTextView.class.getName());
-        info.setPassword(true);
-
-        info.setEditable(true);
-
-        info.setInputType(InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        return stringBuilder;
     }
 
     private class CharState {
@@ -355,6 +341,7 @@ public class PasswordTextView extends View {
 
         Animator.AnimatorListener removeEndListener = new AnimatorListenerAdapter() {
             private boolean mCancelled;
+
             @Override
             public void onAnimationCancel(Animator animation) {
                 mCancelled = true;
@@ -364,8 +351,6 @@ public class PasswordTextView extends View {
             public void onAnimationEnd(Animator animation) {
                 if (!mCancelled) {
                     mTextChars.remove(CharState.this);
-                    mCharPool.push(CharState.this);
-                    reset();
                     cancelAnimator(textTranslateAnimator);
                     textTranslateAnimator = null;
                 }
@@ -405,41 +390,53 @@ public class PasswordTextView extends View {
             }
         };
 
-        private ValueAnimator.AnimatorUpdateListener dotSizeUpdater
-                = new ValueAnimator.AnimatorUpdateListener() {
-            @Override
-            public void onAnimationUpdate(ValueAnimator animation) {
-                currentDotSizeFactor = (float) animation.getAnimatedValue();
-                invalidate();
-            }
-        };
+        private ValueAnimator.AnimatorUpdateListener mDotSizeUpdater =
+                new ValueAnimator.AnimatorUpdateListener() {
+                    @Override
+                    public void onAnimationUpdate(ValueAnimator animation) {
+                        currentDotSizeFactor = (float) animation.getAnimatedValue();
+                        invalidate();
+                    }
+                };
 
-        private ValueAnimator.AnimatorUpdateListener textSizeUpdater
-                = new ValueAnimator.AnimatorUpdateListener() {
-            @Override
-            public void onAnimationUpdate(ValueAnimator animation) {
-                currentTextSizeFactor = (float) animation.getAnimatedValue();
-                invalidate();
-            }
-        };
+        private ValueAnimator.AnimatorUpdateListener mTextSizeUpdater =
+                new ValueAnimator.AnimatorUpdateListener() {
+                    @Override
+                    public void onAnimationUpdate(ValueAnimator animation) {
+                        boolean textVisibleBefore = isCharVisibleForA11y();
+                        float beforeTextSizeFactor = currentTextSizeFactor;
+                        currentTextSizeFactor = (float) animation.getAnimatedValue();
+                        if (textVisibleBefore != isCharVisibleForA11y()) {
+                            currentTextSizeFactor = beforeTextSizeFactor;
+                            CharSequence beforeText = getTransformedText();
+                            currentTextSizeFactor = (float) animation.getAnimatedValue();
+                            int indexOfThisChar = mTextChars.indexOf(CharState.this);
+                            if (indexOfThisChar >= 0) {
+                                sendAccessibilityEventTypeViewTextChanged(beforeText,
+                                        indexOfThisChar, 1, 1);
+                            }
+                        }
+                        invalidate();
+                    }
+                };
 
-        private ValueAnimator.AnimatorUpdateListener textTranslationUpdater
-                = new ValueAnimator.AnimatorUpdateListener() {
-            @Override
-            public void onAnimationUpdate(ValueAnimator animation) {
-                currentTextTranslationY = (float) animation.getAnimatedValue();
-                invalidate();
-            }
-        };
+        private ValueAnimator.AnimatorUpdateListener mTextTranslationUpdater =
+                new ValueAnimator.AnimatorUpdateListener() {
+                    @Override
+                    public void onAnimationUpdate(ValueAnimator animation) {
+                        currentTextTranslationY = (float) animation.getAnimatedValue();
+                        invalidate();
+                    }
+                };
 
-        private ValueAnimator.AnimatorUpdateListener widthUpdater
-                = new ValueAnimator.AnimatorUpdateListener() {
-            @Override
-            public void onAnimationUpdate(ValueAnimator animation) {
-                currentWidthFactor = (float) animation.getAnimatedValue();
-                invalidate();
-            }
-        };
+        private ValueAnimator.AnimatorUpdateListener mWidthUpdater =
+                new ValueAnimator.AnimatorUpdateListener() {
+                    @Override
+                    public void onAnimationUpdate(ValueAnimator animation) {
+                        currentWidthFactor = (float) animation.getAnimatedValue();
+                        invalidate();
+                    }
+                };
 
         private Runnable dotSwapperRunnable = new Runnable() {
             @Override
@@ -449,28 +446,16 @@ public class PasswordTextView extends View {
             }
         };
 
-        void reset() {
-            whichChar = 0;
-            currentTextSizeFactor = 0.0f;
-            currentDotSizeFactor = 0.0f;
-            currentWidthFactor = 0.0f;
-            cancelAnimator(textAnimator);
-            textAnimator = null;
-            cancelAnimator(dotAnimator);
-            dotAnimator = null;
-            cancelAnimator(widthAnimator);
-            widthAnimator = null;
-            currentTextTranslationY = 1.0f;
-            removeDotSwapCallbacks();
-        }
-
         void startRemoveAnimation(long startDelay, long widthDelay) {
-            boolean dotNeedsAnimation = (currentDotSizeFactor > 0.0f && dotAnimator == null)
-                    || (dotAnimator != null && dotAnimationIsGrowing);
-            boolean textNeedsAnimation = (currentTextSizeFactor > 0.0f && textAnimator == null)
-                    || (textAnimator != null && textAnimationIsGrowing);
-            boolean widthNeedsAnimation = (currentWidthFactor > 0.0f && widthAnimator == null)
-                    || (widthAnimator != null && widthAnimationIsGrowing);
+            boolean dotNeedsAnimation =
+                    (currentDotSizeFactor > 0.0f && dotAnimator == null) || (dotAnimator != null
+                            && dotAnimationIsGrowing);
+            boolean textNeedsAnimation =
+                    (currentTextSizeFactor > 0.0f && textAnimator == null) || (textAnimator != null
+                            && textAnimationIsGrowing);
+            boolean widthNeedsAnimation =
+                    (currentWidthFactor > 0.0f && widthAnimator == null) || (widthAnimator != null
+                            && widthAnimationIsGrowing);
             if (dotNeedsAnimation) {
                 startDotDisappearAnimation(startDelay);
             }
@@ -483,10 +468,10 @@ public class PasswordTextView extends View {
         }
 
         void startAppearAnimation() {
-            boolean dotNeedsAnimation = !mShowPassword
-                    && (dotAnimator == null || !dotAnimationIsGrowing);
-            boolean textNeedsAnimation = mShowPassword
-                    && (textAnimator == null || !textAnimationIsGrowing);
+            boolean dotNeedsAnimation =
+                    !mShowPassword && (dotAnimator == null || !dotAnimationIsGrowing);
+            boolean textNeedsAnimation =
+                    mShowPassword && (textAnimator == null || !textAnimationIsGrowing);
             boolean widthNeedsAnimation = (widthAnimator == null || !widthAnimationIsGrowing);
             if (dotNeedsAnimation) {
                 startDotAppearAnimation(0);
@@ -520,8 +505,8 @@ public class PasswordTextView extends View {
         void swapToDotWhenAppearFinished() {
             removeDotSwapCallbacks();
             if (textAnimator != null) {
-                long remainingDuration = textAnimator.getDuration()
-                        - textAnimator.getCurrentPlayTime();
+                long remainingDuration =
+                        textAnimator.getDuration() - textAnimator.getCurrentPlayTime();
                 postDotSwap(remainingDuration + TEXT_REST_DURATION_AFTER_APPEAR);
             } else {
                 performSwap();
@@ -530,14 +515,14 @@ public class PasswordTextView extends View {
 
         private void performSwap() {
             startTextDisappearAnimation(0);
-            startDotAppearAnimation(DISAPPEAR_DURATION
-                    - DOT_APPEAR_TEXT_DISAPPEAR_OVERLAP_DURATION);
+            startDotAppearAnimation(
+                    DISAPPEAR_DURATION - DOT_APPEAR_TEXT_DISAPPEAR_OVERLAP_DURATION);
         }
 
         private void startWidthDisappearAnimation(long widthDelay) {
             cancelAnimator(widthAnimator);
             widthAnimator = ValueAnimator.ofFloat(currentWidthFactor, 0.0f);
-            widthAnimator.addUpdateListener(widthUpdater);
+            widthAnimator.addUpdateListener(mWidthUpdater);
             widthAnimator.addListener(widthFinishListener);
             widthAnimator.addListener(removeEndListener);
             widthAnimator.setDuration((long) (DISAPPEAR_DURATION * currentWidthFactor));
@@ -549,7 +534,7 @@ public class PasswordTextView extends View {
         private void startTextDisappearAnimation(long startDelay) {
             cancelAnimator(textAnimator);
             textAnimator = ValueAnimator.ofFloat(currentTextSizeFactor, 0.0f);
-            textAnimator.addUpdateListener(textSizeUpdater);
+            textAnimator.addUpdateListener(mTextSizeUpdater);
             textAnimator.addListener(textFinishListener);
             textAnimator.setInterpolator(mDisappearInterpolator);
             textAnimator.setDuration((long) (DISAPPEAR_DURATION * currentTextSizeFactor));
@@ -561,7 +546,7 @@ public class PasswordTextView extends View {
         private void startDotDisappearAnimation(long startDelay) {
             cancelAnimator(dotAnimator);
             ValueAnimator animator = ValueAnimator.ofFloat(currentDotSizeFactor, 0.0f);
-            animator.addUpdateListener(dotSizeUpdater);
+            animator.addUpdateListener(mDotSizeUpdater);
             animator.addListener(dotFinishListener);
             animator.setInterpolator(mDisappearInterpolator);
             long duration = (long) (DISAPPEAR_DURATION * Math.min(currentDotSizeFactor, 1.0f));
@@ -575,7 +560,7 @@ public class PasswordTextView extends View {
         private void startWidthAppearAnimation() {
             cancelAnimator(widthAnimator);
             widthAnimator = ValueAnimator.ofFloat(currentWidthFactor, 1.0f);
-            widthAnimator.addUpdateListener(widthUpdater);
+            widthAnimator.addUpdateListener(mWidthUpdater);
             widthAnimator.addListener(widthFinishListener);
             widthAnimator.setDuration((long) (APPEAR_DURATION * (1f - currentWidthFactor)));
             widthAnimator.start();
@@ -585,7 +570,7 @@ public class PasswordTextView extends View {
         private void startTextAppearAnimation() {
             cancelAnimator(textAnimator);
             textAnimator = ValueAnimator.ofFloat(currentTextSizeFactor, 1.0f);
-            textAnimator.addUpdateListener(textSizeUpdater);
+            textAnimator.addUpdateListener(mTextSizeUpdater);
             textAnimator.addListener(textFinishListener);
             textAnimator.setInterpolator(mAppearInterpolator);
             textAnimator.setDuration((long) (APPEAR_DURATION * (1f - currentTextSizeFactor)));
@@ -595,7 +580,7 @@ public class PasswordTextView extends View {
             // handle translation
             if (textTranslateAnimator == null) {
                 textTranslateAnimator = ValueAnimator.ofFloat(1.0f, 0.0f);
-                textTranslateAnimator.addUpdateListener(textTranslationUpdater);
+                textTranslateAnimator.addUpdateListener(mTextTranslationUpdater);
                 textTranslateAnimator.addListener(textTranslateFinishListener);
                 textTranslateAnimator.setInterpolator(mAppearInterpolator);
                 textTranslateAnimator.setDuration(APPEAR_DURATION);
@@ -609,14 +594,14 @@ public class PasswordTextView extends View {
                 // We perform an overshoot animation
                 ValueAnimator overShootAnimator = ValueAnimator.ofFloat(currentDotSizeFactor,
                         DOT_OVERSHOOT_FACTOR);
-                overShootAnimator.addUpdateListener(dotSizeUpdater);
+                overShootAnimator.addUpdateListener(mDotSizeUpdater);
                 overShootAnimator.setInterpolator(mAppearInterpolator);
-                long overShootDuration = (long) (DOT_APPEAR_DURATION_OVERSHOOT
-                        * OVERSHOOT_TIME_POSITION);
+                long overShootDuration =
+                        (long) (DOT_APPEAR_DURATION_OVERSHOOT * OVERSHOOT_TIME_POSITION);
                 overShootAnimator.setDuration(overShootDuration);
                 ValueAnimator settleBackAnimator = ValueAnimator.ofFloat(DOT_OVERSHOOT_FACTOR,
                         1.0f);
-                settleBackAnimator.addUpdateListener(dotSizeUpdater);
+                settleBackAnimator.addUpdateListener(mDotSizeUpdater);
                 settleBackAnimator.setDuration(DOT_APPEAR_DURATION_OVERSHOOT - overShootDuration);
                 settleBackAnimator.addListener(dotFinishListener);
                 AnimatorSet animatorSet = new AnimatorSet();
@@ -626,7 +611,7 @@ public class PasswordTextView extends View {
                 dotAnimator = animatorSet;
             } else {
                 ValueAnimator growAnimator = ValueAnimator.ofFloat(currentDotSizeFactor, 1.0f);
-                growAnimator.addUpdateListener(dotSizeUpdater);
+                growAnimator.addUpdateListener(mDotSizeUpdater);
                 growAnimator.setDuration((long) (APPEAR_DURATION * (1.0f - currentDotSizeFactor)));
                 growAnimator.addListener(dotFinishListener);
                 growAnimator.setStartDelay(delay);
@@ -670,6 +655,14 @@ public class PasswordTextView extends View {
                 canvas.restore();
             }
             return charWidth + mCharPadding * currentWidthFactor;
+        }
+
+        public boolean isCharVisibleForA11y() {
+            // The text has size 0 when it is first added, but we want to count it as visible if
+            // it will become visible presently. Count text as visible if an animator
+            // is configured to make it grow.
+            boolean textIsGrowing = textAnimator != null && textAnimationIsGrowing;
+            return (currentTextSizeFactor > 0) || textIsGrowing;
         }
     }
 }

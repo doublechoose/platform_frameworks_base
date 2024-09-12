@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <android-base/macros.h>
 #include <binder/IPCThreadState.h>
 #include <hwbinder/IPCThreadState.h>
 #include <utils/Log.h>
@@ -48,7 +49,7 @@ public:
 
     virtual void onVmCreated(JNIEnv* env)
     {
-        if (mClassName.isEmpty()) {
+        if (mClassName.empty()) {
             return; // Zygote. Nothing to do here.
         }
 
@@ -65,10 +66,10 @@ public:
          * executing boot class Java code and thereby deny ourselves access to
          * non-boot classes.
          */
-        char* slashClassName = toSlashClassName(mClassName.string());
+        char* slashClassName = toSlashClassName(mClassName.c_str());
         mClass = env->FindClass(slashClassName);
         if (mClass == NULL) {
-            ALOGE("ERROR: could not find class '%s'\n", mClassName.string());
+            ALOGE("ERROR: could not find class '%s'\n", mClassName.c_str());
         }
         free(slashClassName);
 
@@ -97,7 +98,7 @@ public:
 
     virtual void onExit(int code)
     {
-        if (mClassName.isEmpty()) {
+        if (mClassName.empty()) {
             // if zygote
             IPCThreadState::self()->stopProcess();
             hardware::IPCThreadState::self()->stopProcess();
@@ -137,27 +138,12 @@ static size_t computeArgBlockSize(int argc, char* const argv[]) {
 }
 
 static void maybeCreateDalvikCache() {
-#if defined(__aarch64__)
-    static const char kInstructionSet[] = "arm64";
-#elif defined(__x86_64__)
-    static const char kInstructionSet[] = "x86_64";
-#elif defined(__arm__)
-    static const char kInstructionSet[] = "arm";
-#elif defined(__i386__)
-    static const char kInstructionSet[] = "x86";
-#elif defined (__mips__) && !defined(__LP64__)
-    static const char kInstructionSet[] = "mips";
-#elif defined (__mips__) && defined(__LP64__)
-    static const char kInstructionSet[] = "mips64";
-#else
-#error "Unknown instruction set"
-#endif
     const char* androidRoot = getenv("ANDROID_DATA");
     LOG_ALWAYS_FATAL_IF(androidRoot == NULL, "ANDROID_DATA environment variable unset");
 
     char dalvikCacheDir[PATH_MAX];
     const int numChars = snprintf(dalvikCacheDir, PATH_MAX,
-            "%s/dalvik-cache/%s", androidRoot, kInstructionSet);
+            "%s/dalvik-cache/" ABI_STRING, androidRoot);
     LOG_ALWAYS_FATAL_IF((numChars >= PATH_MAX || numChars < 0),
             "Error constructing dalvik cache : %s", strerror(errno));
 
@@ -193,7 +179,7 @@ int main(int argc, char* const argv[])
         argv_String.append(argv[i]);
         argv_String.append("\" ");
       }
-      ALOGV("app_process main with argv: %s", argv_String.string());
+      ALOGV("app_process main with argv: %s", argv_String.c_str());
     }
 
     AppRuntime runtime(argv[0], computeArgBlockSize(argc, argv));
@@ -285,9 +271,9 @@ int main(int argc, char* const argv[])
         } else if (strcmp(arg, "--application") == 0) {
             application = true;
         } else if (strncmp(arg, "--nice-name=", 12) == 0) {
-            niceName.setTo(arg + 12);
+            niceName = (arg + 12);
         } else if (strncmp(arg, "--", 2) != 0) {
-            className.setTo(arg);
+            className = arg;
             break;
         } else {
             --i;
@@ -296,7 +282,7 @@ int main(int argc, char* const argv[])
     }
 
     Vector<String8> args;
-    if (!className.isEmpty()) {
+    if (!className.empty()) {
         // We're not in zygote mode, the only argument we need to pass
         // to RuntimeInit is the application argument.
         //
@@ -314,7 +300,7 @@ int main(int argc, char* const argv[])
             restOfArgs.append(argv_new[k]);
             restOfArgs.append("\" ");
           }
-          ALOGV("Class name = %s, args = %s", className.string(), restOfArgs.string());
+          ALOGV("Class name = %s, args = %s", className.c_str(), restOfArgs.c_str());
         }
     } else {
         // We're in zygote mode.
@@ -342,13 +328,13 @@ int main(int argc, char* const argv[])
         }
     }
 
-    if (!niceName.isEmpty()) {
-        runtime.setArgv0(niceName.string(), true /* setProcName */);
+    if (!niceName.empty()) {
+        runtime.setArgv0(niceName.c_str(), true /* setProcName */);
     }
 
     if (zygote) {
         runtime.start("com.android.internal.os.ZygoteInit", args, zygote);
-    } else if (className) {
+    } else if (!className.empty()) {
         runtime.start("com.android.internal.os.RuntimeInit", args, zygote);
     } else {
         fprintf(stderr, "Error: no class name or --zygote supplied.\n");

@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package android.content.res;
 
 import static android.content.res.FontResourcesParser.FamilyResourceEntry;
@@ -26,9 +27,11 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
 import android.app.Instrumentation;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.platform.test.annotations.Presubmit;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import com.android.frameworks.coretests.R;
 
@@ -43,6 +46,7 @@ import java.util.List;
 /**
  * Tests for {@link FontResourcesParser}.
  */
+@Presubmit
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class FontResourcesParserTest {
@@ -58,7 +62,7 @@ public class FontResourcesParserTest {
 
     @Test
     public void testParse() throws XmlPullParserException, IOException {
-        XmlResourceParser parser = mResources.getXml(R.font.samplexmlfont);
+        XmlResourceParser parser = mResources.getXml(R.font.samplexmlfontforparsing);
 
         FamilyResourceEntry result = FontResourcesParser.parse(parser, mResources);
 
@@ -69,18 +73,26 @@ public class FontResourcesParserTest {
         FontFileResourceEntry font1 = fileEntries[0];
         assertEquals(400, font1.getWeight());
         assertEquals(0, font1.getItalic());
+        assertEquals("'wdth' 0.8", font1.getVariationSettings());
+        assertEquals(0, font1.getTtcIndex());
         assertEquals("res/font/samplefont.ttf", font1.getFileName());
         FontFileResourceEntry font2 = fileEntries[1];
         assertEquals(400, font2.getWeight());
         assertEquals(1, font2.getItalic());
+        assertEquals(1, font2.getTtcIndex());
+        assertEquals("'cntr' 0.5", font2.getVariationSettings());
         assertEquals("res/font/samplefont2.ttf", font2.getFileName());
         FontFileResourceEntry font3 = fileEntries[2];
         assertEquals(800, font3.getWeight());
         assertEquals(0, font3.getItalic());
+        assertEquals(2, font3.getTtcIndex());
+        assertEquals("'wdth' 500.0, 'wght' 300.0", font3.getVariationSettings());
         assertEquals("res/font/samplefont3.ttf", font3.getFileName());
         FontFileResourceEntry font4 = fileEntries[3];
         assertEquals(800, font4.getWeight());
         assertEquals(1, font4.getItalic());
+        assertEquals(0, font4.getTtcIndex());
+        assertEquals(null, font4.getVariationSettings());
         assertEquals("res/font/samplefont4.ttf", font4.getFileName());
     }
 
@@ -95,6 +107,7 @@ public class FontResourcesParserTest {
         assertEquals("com.example.test.fontprovider.authority", providerEntry.getAuthority());
         assertEquals("com.example.test.fontprovider.package", providerEntry.getPackage());
         assertEquals("MyRequestedFont", providerEntry.getQuery());
+        assertEquals("my-request-font", providerEntry.getSystemFontFamilyName());
     }
 
     @Test

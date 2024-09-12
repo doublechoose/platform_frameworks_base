@@ -18,21 +18,27 @@
 
 #include <android/os/IncidentReportArgs.h>
 
-#include <cutils/log.h>
+#include <log/log.h>
 
 namespace android {
 namespace os {
 
 IncidentReportArgs::IncidentReportArgs()
     :mSections(),
-     mAll(false)
+     mAll(false),
+     mPrivacyPolicy(-1),
+     mGzip(false)
 {
 }
 
 IncidentReportArgs::IncidentReportArgs(const IncidentReportArgs& that)
     :mSections(that.mSections),
      mHeaders(that.mHeaders),
-     mAll(that.mAll)
+     mAll(that.mAll),
+     mPrivacyPolicy(that.mPrivacyPolicy),
+     mReceiverPkg(that.mReceiverPkg),
+     mReceiverCls(that.mReceiverCls),
+     mGzip(that.mGzip)
 {
 }
 
@@ -67,11 +73,31 @@ IncidentReportArgs::writeToParcel(Parcel* out) const
         return err;
     }
 
-    for (vector<vector<int8_t>>::const_iterator it = mHeaders.begin(); it != mHeaders.end(); it++) {
+    for (vector<vector<uint8_t>>::const_iterator it = mHeaders.begin(); it != mHeaders.end(); it++) {
         err = out->writeByteVector(*it);
         if (err != NO_ERROR) {
             return err;
         }
+    }
+
+    err = out->writeInt32(mPrivacyPolicy);
+    if (err != NO_ERROR) {
+        return err;
+    }
+
+    err = out->writeString16(String16(mReceiverPkg.c_str()));
+    if (err != NO_ERROR) {
+        return err;
+    }
+
+    err = out->writeString16(String16(mReceiverCls.c_str()));
+    if (err != NO_ERROR) {
+        return err;
+    }
+
+    err = out->writeInt32(mGzip);
+    if (err != NO_ERROR) {
+        return err;
     }
 
     return NO_ERROR;
@@ -107,17 +133,35 @@ IncidentReportArgs::readFromParcel(const Parcel* in)
         mSections.insert(section);
     }
 
-    int32_t headerCount;
-    err = in->readInt32(&headerCount);
+    err = in->resizeOutVector<vector<uint8_t>>(&mHeaders);
     if (err != NO_ERROR) {
         return err;
     }
-    mHeaders.resize(headerCount);
-    for (int i=0; i<headerCount; i++) {
+
+    for (int i=0; i<mHeaders.size(); i++) {
         err = in->readByteVector(&mHeaders[i]);
         if (err != NO_ERROR) {
             return err;
         }
+    }
+
+    int32_t privacyPolicy;
+    err = in->readInt32(&privacyPolicy);
+    if (err != NO_ERROR) {
+        return err;
+    }
+    mPrivacyPolicy = privacyPolicy;
+
+    mReceiverPkg = String8(in->readString16()).c_str();
+    mReceiverCls = String8(in->readString16()).c_str();
+
+    int32_t gzip;
+    err = in->readInt32(&gzip);
+    if (err != NO_ERROR) {
+        return err;
+    }
+    if (gzip != 0) {
+        mGzip = gzip;
     }
 
     return OK;
@@ -133,6 +177,12 @@ IncidentReportArgs::setAll(bool all)
 }
 
 void
+IncidentReportArgs::setPrivacyPolicy(int privacyPolicy)
+{
+    mPrivacyPolicy = privacyPolicy;
+}
+
+void
 IncidentReportArgs::addSection(int section)
 {
     if (!mAll) {
@@ -141,29 +191,54 @@ IncidentReportArgs::addSection(int section)
 }
 
 void
-IncidentReportArgs::addHeader(const vector<int8_t>& header)
+IncidentReportArgs::setReceiverPkg(const string& pkg)
 {
-    mHeaders.push_back(header);
+    mReceiverPkg = pkg;
+}
+
+void
+IncidentReportArgs::setReceiverCls(const string& cls)
+{
+    mReceiverCls = cls;
+}
+
+void
+IncidentReportArgs::addHeader(const vector<uint8_t>& headerProto)
+{
+    mHeaders.push_back(headerProto);
+}
+
+void
+IncidentReportArgs::setGzip(bool gzip)
+{
+    mGzip = gzip;
 }
 
 bool
-IncidentReportArgs::containsSection(int section) const
+IncidentReportArgs::containsSection(int section, bool specific) const
 {
-     return mAll || mSections.find(section) != mSections.end();
+    if (specific) {
+        return mSections.find(section) != mSections.end();
+    } else {
+        return mAll || mSections.find(section) != mSections.end();
+    }
 }
 
 void
 IncidentReportArgs::merge(const IncidentReportArgs& that)
 {
-    if (mAll) {
-        return;
-    } else if (that.mAll) {
-        mAll = true;
-        mSections.clear();
-    } else {
-        for (set<int>::const_iterator it=that.mSections.begin();
-                it!=that.mSections.end(); it++) {
-            mSections.insert(*it);
+    for (const vector<uint8_t>& header: that.mHeaders) {
+        mHeaders.push_back(header);
+    }
+    if (!mAll) {
+        if (that.mAll) {
+            mAll = true;
+            mSections.clear();
+        } else {
+            for (set<int>::const_iterator it=that.mSections.begin();
+                    it!=that.mSections.end(); it++) {
+                mSections.insert(*it);
+            }
         }
     }
 }

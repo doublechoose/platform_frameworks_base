@@ -31,6 +31,7 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.Icon;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.service.print.PrinterInfoProto;
 import android.text.TextUtils;
 
 import com.android.internal.util.Preconditions;
@@ -52,20 +53,23 @@ import java.lang.annotation.RetentionPolicy;
 public final class PrinterInfo implements Parcelable {
 
     /** @hide */
-    @IntDef({
-            STATUS_IDLE, STATUS_BUSY, STATUS_UNAVAILABLE
+    @IntDef(prefix = { "STATUS_" }, value = {
+            STATUS_IDLE,
+            STATUS_BUSY,
+            STATUS_UNAVAILABLE
     })
     @Retention(RetentionPolicy.SOURCE)
     public @interface Status {
     }
+
     /** Printer status: the printer is idle and ready to print. */
-    public static final int STATUS_IDLE = 1;
+    public static final int STATUS_IDLE = PrinterInfoProto.STATUS_IDLE;
 
     /** Printer status: the printer is busy printing. */
-    public static final int STATUS_BUSY = 2;
+    public static final int STATUS_BUSY = PrinterInfoProto.STATUS_BUSY;
 
     /** Printer status: the printer is not available. */
-    public static final int STATUS_UNAVAILABLE = 3;
+    public static final int STATUS_UNAVAILABLE = PrinterInfoProto.STATUS_UNAVAILABLE;
 
     private final @NonNull PrinterId mId;
 
@@ -266,15 +270,15 @@ public final class PrinterInfo implements Parcelable {
     private PrinterInfo(Parcel parcel) {
         // mName can be null due to unchecked set in Builder.setName and status can be invalid
         // due to unchecked set in Builder.setStatus, hence we can only check mId for a valid state
-        mId = checkPrinterId((PrinterId) parcel.readParcelable(null));
+        mId = checkPrinterId((PrinterId) parcel.readParcelable(null, android.print.PrinterId.class));
         mName = checkName(parcel.readString());
         mStatus = checkStatus(parcel.readInt());
         mDescription = parcel.readString();
-        mCapabilities = parcel.readParcelable(null);
+        mCapabilities = parcel.readParcelable(null, android.print.PrinterCapabilitiesInfo.class);
         mIconResourceId = parcel.readInt();
         mHasCustomPrinterIcon = parcel.readByte() != 0;
         mCustomPrinterIconGen = parcel.readInt();
-        mInfoIntent = parcel.readParcelable(null);
+        mInfoIntent = parcel.readParcelable(null, android.app.PendingIntent.class);
     }
 
     @Override
@@ -356,7 +360,7 @@ public final class PrinterInfo implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object obj) {
+    public boolean equals(@Nullable Object obj) {
         if (this == obj) {
             return true;
         }
@@ -559,7 +563,7 @@ public final class PrinterInfo implements Parcelable {
         }
     }
 
-    public static final Parcelable.Creator<PrinterInfo> CREATOR =
+    public static final @android.annotation.NonNull Parcelable.Creator<PrinterInfo> CREATOR =
             new Parcelable.Creator<PrinterInfo>() {
         @Override
         public PrinterInfo createFromParcel(Parcel parcel) {

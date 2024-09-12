@@ -17,7 +17,7 @@
 #ifndef ANDROID_HWUI_PROPERTIES_H
 #define ANDROID_HWUI_PROPERTIES_H
 
-#include <cutils/properties.h>
+#include <cutils/compiler.h>
 
 /**
  * This file contains the list of system properties used to configure libhwui.
@@ -94,20 +94,6 @@ enum DebugLevel {
 #define PROPERTY_PROFILE_VISUALIZE_BARS "visual_bars"
 
 /**
- * Used to enable/disable non-rectangular clipping debugging.
- *
- * The accepted values are:
- * "highlight", drawing commands clipped by the stencil will
- *              be colored differently
- * "region", renders the clipping region on screen whenever
- *           the stencil is set
- * "hide", don't show the clip
- *
- * The default value is "hide".
- */
-#define PROPERTY_DEBUG_STENCIL_CLIP "debug.hwui.show_non_rect_clip"
-
-/**
  * Turn on to draw dirty regions every other frame.
  *
  * Possible values:
@@ -115,19 +101,6 @@ enum DebugLevel {
  * "false", to disable dirty regions debugging
  */
 #define PROPERTY_DEBUG_SHOW_DIRTY_REGIONS "debug.hwui.show_dirty_regions"
-
-/**
- * Disables draw operation deferral if set to "true", forcing draw
- * commands to be issued to OpenGL in order, and processed in sequence
- * with state-manipulation canvas commands.
- */
-#define PROPERTY_DISABLE_DRAW_DEFER "debug.hwui.disable_draw_defer"
-
-/**
- * Used to disable draw operation reordering when deferring draw operations
- * Has no effect if PROPERTY_DISABLE_DRAW_DEFER is set to "true"
- */
-#define PROPERTY_DISABLE_DRAW_REORDER "debug.hwui.disable_draw_reorder"
 
 /**
  * Setting this property will enable or disable the dropping of frames with
@@ -153,112 +126,136 @@ enum DebugLevel {
 #define PROPERTY_FILTER_TEST_OVERHEAD "debug.hwui.filter_test_overhead"
 
 /**
+ * Indicates whether PBOs can be used to back pixel buffers.
+ * Accepted values are "true" and "false". Default is true.
+ */
+#define PROPERTY_ENABLE_GPU_PIXEL_BUFFERS "debug.hwui.use_gpu_pixel_buffers"
+
+/**
  * Allows to set rendering pipeline mode to OpenGL (default), Skia OpenGL
  * or Vulkan.
  */
 #define PROPERTY_RENDERER "debug.hwui.renderer"
 
-///////////////////////////////////////////////////////////////////////////////
-// Runtime configuration properties
-///////////////////////////////////////////////////////////////////////////////
+/**
+ * Allows to collect a recording of Skia drawing commands.
+ */
+#define PROPERTY_CAPTURE_SKP_ENABLED "debug.hwui.capture_skp_enabled"
 
 /**
- * Used to enable/disable scissor optimization. The accepted values are
- * "true" and "false". The default value is "false".
+ * Might split Skia's GPU resource utilization into separate tracing tracks (slow).
  *
- * When scissor optimization is enabled, libhwui will attempt to
- * minimize the use of scissor by selectively enabling and disabling the
- * GL scissor test.
- * When the optimization is disabled, OpenGLRenderer will keep the GL
- * scissor test enabled and change the scissor rect as needed.
- * Some GPUs (for instance the SGX 540) perform better when changing
- * the scissor rect often than when enabling/disabling the scissor test
- * often.
+ * Aggregate total and purgeable numbers will still be reported under a "misc" track when this is
+ * disabled, they just won't be split into distinct categories. Results may vary depending on GPU
+ * backend/API, and the category mappings defined in ATraceMemoryDump's hardcoded sResourceMap.
  */
-#define PROPERTY_DISABLE_SCISSOR_OPTIMIZATION "ro.hwui.disable_scissor_opt"
+#define PROPERTY_TRACE_GPU_RESOURCES "debug.hwui.trace_gpu_resources"
 
 /**
- * Indicates whether PBOs can be used to back pixel buffers.
- * Accepted values are "true" and "false". Default is true.
+ * Allows broad recording of Skia drawing commands.
+ *
+ * If disabled, a very minimal set of trace events *may* be recorded.
+ * If enabled, a much broader set of trace events *may* be recorded.
+ *
+ * In either case, trace events are only recorded if an appropriately configured tracing session is
+ * active.
+ *
+ * Use debug.hwui.skia_use_perfetto_track_events to determine if ATrace (default) or Perfetto is
+ * used as the tracing backend.
  */
-#define PROPERTY_ENABLE_GPU_PIXEL_BUFFERS "ro.hwui.use_gpu_pixel_buffers"
+#define PROPERTY_SKIA_TRACING_ENABLED "debug.hwui.skia_tracing_enabled"
 
-// These properties are defined in mega-bytes
-#define PROPERTY_TEXTURE_CACHE_SIZE "ro.hwui.texture_cache_size"
-#define PROPERTY_LAYER_CACHE_SIZE "ro.hwui.layer_cache_size"
-#define PROPERTY_RENDER_BUFFER_CACHE_SIZE "ro.hwui.r_buffer_cache_size"
-#define PROPERTY_GRADIENT_CACHE_SIZE "ro.hwui.gradient_cache_size"
-#define PROPERTY_PATH_CACHE_SIZE "ro.hwui.path_cache_size"
-#define PROPERTY_VERTEX_CACHE_SIZE "ro.hwui.vertex_cache_size"
-#define PROPERTY_PATCH_CACHE_SIZE "ro.hwui.patch_cache_size"
-#define PROPERTY_DROP_SHADOW_CACHE_SIZE "ro.hwui.drop_shadow_cache_size"
-#define PROPERTY_FBO_CACHE_SIZE "ro.hwui.fbo_cache_size"
+/**
+ * Switches Skia's tracing to use Perfetto's Track Event system instead of ATrace.
+ *
+ * If disabled, ATrace will be used by default, which will record trace events from any of Skia's
+ * tracing categories if overall system tracing is active and the "gfx" and "view" ATrace categories
+ * are enabled.
+ *
+ * If enabled, then Perfetto's Track Event system will be used instead, which will only record if an
+ * active Perfetto tracing session is targeting the correct apps and Skia tracing categories with
+ * the Track Event data source enabled. This approach may be used to selectively filter out
+ * undesired Skia tracing categories, and events will contain more data fields.
+ */
+#define PROPERTY_SKIA_USE_PERFETTO_TRACK_EVENTS "debug.hwui.skia_use_perfetto_track_events"
 
-// These properties are defined in percentage (range 0..1)
-#define PROPERTY_TEXTURE_CACHE_FLUSH_RATE "ro.hwui.texture_cache_flushrate"
+/**
+ * Defines how many frames in a sequence to capture.
+ */
+#define PROPERTY_CAPTURE_SKP_FRAMES "debug.hwui.capture_skp_frames"
 
-// These properties are defined in pixels
-#define PROPERTY_TEXT_SMALL_CACHE_WIDTH "ro.hwui.text_small_cache_width"
-#define PROPERTY_TEXT_SMALL_CACHE_HEIGHT "ro.hwui.text_small_cache_height"
-#define PROPERTY_TEXT_LARGE_CACHE_WIDTH "ro.hwui.text_large_cache_width"
-#define PROPERTY_TEXT_LARGE_CACHE_HEIGHT "ro.hwui.text_large_cache_height"
+/**
+ * File name and location, where a SKP recording will be saved.
+ */
+#define PROPERTY_CAPTURE_SKP_FILENAME "debug.hwui.skp_filename"
 
-// Gamma (>= 1.0, <= 3.0)
-#define PROPERTY_TEXT_GAMMA "hwui.text_gamma"
+/**
+ * Controls whether HWUI will send timing hints to HintManager for
+ * better CPU scheduling. Accepted values are "true" and "false".
+ */
+#define PROPERTY_USE_HINT_MANAGER "debug.hwui.use_hint_manager"
 
-///////////////////////////////////////////////////////////////////////////////
-// Default property values
-///////////////////////////////////////////////////////////////////////////////
+/**
+ * Percentage of frame time that's used for CPU work. The rest is
+ * reserved for GPU work. This is used with use_hint_manager to
+ * provide timing hints to HintManager. Accepted values are
+ * integer from 1-100.
+ */
+#define PROPERTY_TARGET_CPU_TIME_PERCENTAGE "debug.hwui.target_cpu_time_percent"
 
-#define DEFAULT_TEXTURE_CACHE_SIZE 24.0f
-#define DEFAULT_LAYER_CACHE_SIZE 16.0f
-#define DEFAULT_RENDER_BUFFER_CACHE_SIZE 2.0f
-#define DEFAULT_PATH_CACHE_SIZE 4.0f
-#define DEFAULT_VERTEX_CACHE_SIZE 1.0f
-#define DEFAULT_PATCH_CACHE_SIZE 128.0f // in kB
-#define DEFAULT_GRADIENT_CACHE_SIZE 0.5f
-#define DEFAULT_DROP_SHADOW_CACHE_SIZE 2.0f
-#define DEFAULT_FBO_CACHE_SIZE 0
+/**
+ * Property for whether this is running in the emulator.
+ */
+#define PROPERTY_IS_EMULATOR "ro.boot.qemu"
 
-#define DEFAULT_TEXTURE_CACHE_FLUSH_RATE 0.6f
+/**
+ * Turns on the Skia GPU option "reduceOpsTaskSplitting" which improves GPU
+ * efficiency but may increase VRAM consumption. Default is "true".
+ */
+#define PROPERTY_REDUCE_OPS_TASK_SPLITTING "renderthread.skia.reduceopstasksplitting"
 
-#define DEFAULT_TEXT_GAMMA 1.45f // Match design tools
+/**
+ * Enable WebView Overlays feature.
+ */
+#define PROPERTY_WEBVIEW_OVERLAYS_ENABLED "debug.hwui.webview_overlays_enabled"
 
-// cap to 256 to limite paths in the path cache
-#define DEFAULT_PATH_TEXTURE_CAP 256
+/**
+ * Property for globally GL drawing state. Can be overridden per process with
+ * setDrawingEnabled.
+ */
+#define PROPERTY_DRAWING_ENABLED "debug.hwui.drawing_enabled"
+
+#define PROPERTY_MEMORY_POLICY "debug.hwui.app_memory_policy"
+
+#define PROPERTY_8BIT_HDR_HEADROOM "debug.hwui.8bit_hdr_headroom"
+
+/**
+ * Whether to initialize GL even when HWUI is running Vulkan.
+ */
+#define PROPERTY_INITIALIZE_GL_ALWAYS "debug.hwui.initialize_gl_always"
 
 ///////////////////////////////////////////////////////////////////////////////
 // Misc
 ///////////////////////////////////////////////////////////////////////////////
 
 // Converts a number of mega-bytes into bytes
-#define MB(s) ((s) * 1024 * 1024)
+#define MB(s) ((s)*1024 * 1024)
 // Converts a number of kilo-bytes into bytes
-#define KB(s) ((s) * 1024)
+#define KB(s) ((s)*1024)
 
-enum class ProfileType {
-    None,
-    Console,
-    Bars
+enum class ProfileType { None, Console, Bars };
+
+enum class OverdrawColorSet { Default = 0, Deuteranomaly };
+
+enum class RenderPipelineType { SkiaGL, SkiaVulkan, SkiaCpu, NotInitialized = 128 };
+
+enum class StretchEffectBehavior {
+    ShaderHWUI,   // Stretch shader in HWUI only, matrix scale in SF
+    Shader,       // Stretch shader in both HWUI and SF
+    UniformScale  // Uniform scale stretch everywhere
 };
 
-enum class OverdrawColorSet {
-    Default = 0,
-    Deuteranomaly
-};
-
-enum class StencilClipDebug {
-    Hide,
-    ShowHighlight,
-    ShowRegion
-};
-
-enum class RenderPipelineType {
-    OpenGL = 0,
-    SkiaGL,
-    SkiaVulkan,
-    NotInitialized = 128
-};
+enum class DrawingEnabled { NotInitialized, On, Off };
 
 /**
  * Renderthread-only singleton which manages several static rendering properties. Most of these
@@ -269,32 +266,21 @@ class Properties {
 public:
     static bool load();
 
-    static bool drawDeferDisabled;
-    static bool drawReorderDisabled;
     static bool debugLayersUpdates;
     static bool debugOverdraw;
+    static bool debugTraceGpuResourceCategories;
     static bool showDirtyRegions;
     // TODO: Remove after stabilization period
     static bool skipEmptyFrames;
     static bool useBufferAge;
     static bool enablePartialUpdates;
+    static bool enableRenderEffectCache;
 
-    static float textGamma;
-
-    static int fboCacheSize;
-    static int gradientCacheSize;
-    static int layerPoolSize;
-    static int patchCacheSize;
-    static int pathCacheSize;
-    static int renderBufferCacheSize;
-    static int tessellationCacheSize;
-    static int textDropShadowCacheSize;
-    static int textureCacheSize;
-    static float textureCacheFlushRate;
+    // TODO: Move somewhere else?
+    static constexpr float textGamma = 1.45f;
 
     static DebugLevel debugLevel;
     static OverdrawColorSet overdrawColorSet;
-    static StencilClipDebug debugStencilClip;
 
     // Override the value for a subset of properties in this class
     static void overrideProperty(const char* name, const char* value);
@@ -307,8 +293,10 @@ public:
     static int overrideSpotShadowStrength;
 
     static ProfileType getProfileType();
+    static RenderPipelineType peekRenderPipelineType();
     static RenderPipelineType getRenderPipelineType();
-    static bool isSkiaEnabled();
+
+    static bool enableHighContrastText;
 
     // Should be used only by test apps
     static bool waitForGpuCompletion;
@@ -324,18 +312,79 @@ public:
     // created after changing this.
     static bool disableVsync;
 
+    static bool skpCaptureEnabled;
+
+    // For experimentation b/68769804
+    static bool enableRTAnimations;
+
     // Used for testing only to change the render pipeline.
-#ifdef HWUI_GLES_WRAP_ENABLED
     static void overrideRenderPipelineType(RenderPipelineType);
-#endif
+
+    static bool runningInEmulator;
+
+    static bool debuggingEnabled;
+    static bool isolatedProcess;
+
+    static int contextPriority;
+
+    static float defaultSdrWhitePoint;
+
+    static bool useHintManager;
+    static int targetCpuTimePercentage;
+
+    static bool enableWebViewOverlays;
+
+    static bool isHighEndGfx;
+    static bool isLowRam;
+    static bool isSystemOrPersistent;
+
+    static float maxHdrHeadroomOn8bit;
+
+    static bool clipSurfaceViews;
+    static bool hdr10bitPlus;
+
+    static int timeoutMultiplier;
+
+    static StretchEffectBehavior getStretchEffectBehavior() {
+        return stretchEffectBehavior;
+    }
+
+    static void setIsHighEndGfx(bool isHighEndGfx) {
+        Properties::isHighEndGfx = isHighEndGfx;
+        stretchEffectBehavior = isHighEndGfx ?
+            StretchEffectBehavior::ShaderHWUI :
+            StretchEffectBehavior::UniformScale;
+    }
+
+    static void setIsLowRam(bool isLowRam) { Properties::isLowRam = isLowRam; }
+
+    static void setIsSystemOrPersistent(bool isSystemOrPersistent) {
+        Properties::isSystemOrPersistent = isSystemOrPersistent;
+    }
+
+    /**
+     * Used for testing. Typical configuration of stretch behavior is done
+     * through setIsHighEndGfx
+     */
+    static void setStretchEffectBehavior(StretchEffectBehavior behavior) {
+        stretchEffectBehavior = behavior;
+    }
+
+    // Represents if drawing is enabled. Should only be Off in headless testing environments
+    static DrawingEnabled drawingEnabled;
+    static bool isDrawingEnabled();
+    static void setDrawingEnabled(bool enable);
+
+    static bool initializeGlAlways();
 
 private:
+    static StretchEffectBehavior stretchEffectBehavior;
     static ProfileType sProfileType;
     static bool sDisableProfileBars;
     static RenderPipelineType sRenderPipelineType;
-}; // class Caches
+};  // class Caches
 
-}; // namespace uirenderer
-}; // namespace android
+}  // namespace uirenderer
+}  // namespace android
 
-#endif // ANDROID_HWUI_PROPERTIES_H
+#endif  // ANDROID_HWUI_PROPERTIES_H

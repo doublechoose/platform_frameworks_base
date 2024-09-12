@@ -17,17 +17,6 @@
 #ifndef AAPT_RESOURCE_TABLE_H
 #define AAPT_RESOURCE_TABLE_H
 
-#include "ConfigDescription.h"
-#include "Diagnostics.h"
-#include "Resource.h"
-#include "ResourceValues.h"
-#include "Source.h"
-#include "StringPool.h"
-#include "io/File.h"
-
-#include "android-base/macros.h"
-#include "androidfw/StringPiece.h"
-
 #include <functional>
 #include <map>
 #include <memory>
@@ -36,126 +25,165 @@
 #include <unordered_map>
 #include <vector>
 
+#include "Resource.h"
+#include "ResourceValues.h"
+#include "android-base/macros.h"
+#include "androidfw/ConfigDescription.h"
+#include "androidfw/IDiagnostics.h"
+#include "androidfw/Source.h"
+#include "androidfw/StringPiece.h"
+#include "androidfw/StringPool.h"
+#include "io/File.h"
+
+using PolicyFlags = android::ResTable_overlayable_policy_header::PolicyFlags;
+
 namespace aapt {
 
-enum class SymbolState {
-  kUndefined,
-  kPrivate,
-  kPublic,
+// The Public status of a resource.
+struct Visibility {
+  enum class Level {
+    kUndefined,
+    kPrivate,
+    kPublic,
+  };
+
+  Level level = Level::kUndefined;
+  android::Source source;
+  std::string comment;
+
+  // Indicates that the resource id may change across builds and that the public R.java identifier
+  // for this resource should not be final. This is set to `true` for resources in `staging-group`
+  // tags.
+  bool staged_api = false;
 };
 
-/**
- * The Public status of a resource.
- */
-struct Symbol {
-  SymbolState state = SymbolState::kUndefined;
-  Source source;
-
-  // Whether this entry (originating from an overlay) can be added as a new resource.
-  bool allow_new = false;
-
+// Represents <add-resource> in an overlay.
+struct AllowNew {
+  android::Source source;
   std::string comment;
+};
+
+// Represents the staged resource id of a finalized resource.
+struct StagedId {
+  ResourceId id;
+  android::Source source;
+};
+
+struct Overlayable {
+  Overlayable() = default;
+  Overlayable(android::StringPiece name, android::StringPiece actor) : name(name), actor(actor) {
+  }
+  Overlayable(android::StringPiece name, android::StringPiece actor, const android::Source& source)
+      : name(name), actor(actor), source(source) {
+  }
+
+  static const char* kActorScheme;
+  std::string name;
+  std::string actor;
+  android::Source source;
+};
+
+// Represents a declaration that a resource is overlayable at runtime.
+struct OverlayableItem {
+  explicit OverlayableItem(const std::shared_ptr<Overlayable>& overlayable)
+      : overlayable(overlayable) {}
+  std::shared_ptr<Overlayable> overlayable;
+  PolicyFlags policies = PolicyFlags::NONE;
+  std::string comment;
+  android::Source source;
 };
 
 class ResourceConfigValue {
  public:
-  /**
-   * The configuration for which this value is defined.
-   */
-  const ConfigDescription config;
+  // The configuration for which this value is defined.
+  const android::ConfigDescription config;
 
-  /**
-   * The product for which this value is defined.
-   */
+  // The product for which this value is defined.
   const std::string product;
 
-  /**
-   * The actual Value.
-   */
+  // The actual Value.
   std::unique_ptr<Value> value;
 
-  ResourceConfigValue(const ConfigDescription& config, const android::StringPiece& product)
-      : config(config), product(product.to_string()) {}
+  ResourceConfigValue(const android::ConfigDescription& config, android::StringPiece product)
+      : config(config), product(product) {
+  }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(ResourceConfigValue);
 };
 
-/**
- * Represents a resource entry, which may have
- * varying values for each defined configuration.
- */
+// Represents a resource entry, which may have varying values for each defined configuration.
 class ResourceEntry {
  public:
-  /**
-   * The name of the resource. Immutable, as
-   * this determines the order of this resource
-   * when doing lookups.
-   */
+  // The name of the resource. Immutable, as this determines the order of this resource
+  // when doing lookups.
   const std::string name;
 
-  /**
-   * The entry ID for this resource.
-   */
-  Maybe<uint16_t> id;
+  // The entry ID for this resource (the EEEE in 0xPPTTEEEE).
+  std::optional<ResourceId> id;
 
-  /**
-   * Whether this resource is public (and must maintain the same entry ID across
-   * builds).
-   */
-  Symbol symbol_status;
+  // Whether this resource is public (and must maintain the same entry ID across builds).
+  Visibility visibility;
 
-  /**
-   * The resource's values for each configuration.
-   */
+  std::optional<AllowNew> allow_new;
+
+  // The declarations of this resource as overlayable for RROs
+  std::optional<OverlayableItem> overlayable_item;
+
+  // The staged resource id for a finalized resource.
+  std::optional<StagedId> staged_id;
+
+  // The resource's values for each configuration.
   std::vector<std::unique_ptr<ResourceConfigValue>> values;
 
-  explicit ResourceEntry(const android::StringPiece& name) : name(name.to_string()) {}
+  explicit ResourceEntry(android::StringPiece name) : name(name) {
+  }
 
-  ResourceConfigValue* FindValue(const ConfigDescription& config);
-  ResourceConfigValue* FindValue(const ConfigDescription& config,
-                                 const android::StringPiece& product);
-  ResourceConfigValue* FindOrCreateValue(const ConfigDescription& config,
-                                         const android::StringPiece& product);
-  std::vector<ResourceConfigValue*> FindAllValues(const ConfigDescription& config);
-  std::vector<ResourceConfigValue*> FindValuesIf(
-      const std::function<bool(ResourceConfigValue*)>& f);
+  ResourceConfigValue* FindValue(const android::ConfigDescription& config,
+                                 android::StringPiece product = {});
+  const ResourceConfigValue* FindValue(const android::ConfigDescription& config,
+                                       android::StringPiece product = {}) const;
+
+  ResourceConfigValue* FindOrCreateValue(const android::ConfigDescription& config,
+                                         android::StringPiece product);
+  std::vector<ResourceConfigValue*> FindAllValues(const android::ConfigDescription& config);
+
+  template <typename Func>
+  std::vector<ResourceConfigValue*> FindValuesIf(Func f) {
+    std::vector<ResourceConfigValue*> results;
+    for (auto& config_value : values) {
+      if (f(config_value.get())) {
+        results.push_back(config_value.get());
+      }
+    }
+    return results;
+  }
+
+  bool HasDefaultValue() const;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(ResourceEntry);
 };
 
-/**
- * Represents a resource type, which holds entries defined
- * for this type.
- */
+// Represents a resource type (eg. string, drawable, layout, etc.) containing resource entries.
 class ResourceTableType {
  public:
-  /**
-   * The logical type of resource (string, drawable, layout, etc.).
-   */
-  const ResourceType type;
+  // The logical type of resource (string, drawable, layout, etc.).
+  const ResourceNamedType named_type;
 
-  /**
-   * The type ID for this resource.
-   */
-  Maybe<uint8_t> id;
+  // Whether this type is public (and must maintain the same type ID across builds).
+  Visibility::Level visibility_level = Visibility::Level::kUndefined;
 
-  /**
-   * Whether this type is public (and must maintain the same
-   * type ID across builds).
-   */
-  Symbol symbol_status;
-
-  /**
-   * List of resources for this type.
-   */
+  // List of resources for this type.
   std::vector<std::unique_ptr<ResourceEntry>> entries;
 
-  explicit ResourceTableType(const ResourceType type) : type(type) {}
+  explicit ResourceTableType(const ResourceNamedTypeRef& type)
+      : named_type(type.ToResourceNamedType()) {
+  }
 
-  ResourceEntry* FindEntry(const android::StringPiece& name);
-  ResourceEntry* FindOrCreateEntry(const android::StringPiece& name);
+  ResourceEntry* CreateEntry(android::StringPiece name);
+  ResourceEntry* FindEntry(android::StringPiece name) const;
+  ResourceEntry* FindOrCreateEntry(android::StringPiece name);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(ResourceTableType);
@@ -163,72 +191,126 @@ class ResourceTableType {
 
 class ResourceTablePackage {
  public:
-  Maybe<uint8_t> id;
   std::string name;
 
   std::vector<std::unique_ptr<ResourceTableType>> types;
 
+  explicit ResourceTablePackage(android::StringPiece name) : name(name) {
+  }
+
   ResourceTablePackage() = default;
-  ResourceTableType* FindType(ResourceType type);
-  ResourceTableType* FindOrCreateType(const ResourceType type);
+  ResourceTableType* FindTypeWithDefaultName(const ResourceType type) const;
+  ResourceTableType* FindType(const ResourceNamedTypeRef& type) const;
+  ResourceTableType* FindOrCreateType(const ResourceNamedTypeRef& type);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(ResourceTablePackage);
 };
 
-/**
- * The container and index for all resources defined for an app. This gets
- * flattened into a binary resource table (resources.arsc).
- */
+struct ResourceTableEntryView {
+  std::string name;
+  std::optional<uint16_t> id;
+  Visibility visibility;
+  std::optional<AllowNew> allow_new;
+  std::optional<OverlayableItem> overlayable_item;
+  std::optional<StagedId> staged_id;
+  std::vector<const ResourceConfigValue*> values;
+
+  const ResourceConfigValue* FindValue(const android::ConfigDescription& config,
+                                       android::StringPiece product = {}) const;
+};
+
+struct ResourceTableTypeView {
+  ResourceNamedType named_type;
+  std::optional<uint8_t> id;
+  Visibility::Level visibility_level = Visibility::Level::kUndefined;
+
+  // Entries sorted in ascending entry id order. If ids have not been assigned, the entries are
+  // sorted lexicographically.
+  std::vector<ResourceTableEntryView> entries;
+};
+
+struct ResourceTablePackageView {
+  std::string name;
+  std::optional<uint8_t> id;
+  // Types sorted in ascending type id order. If ids have not been assigned, the types are sorted by
+  // their declaration order in the ResourceType enum.
+  std::vector<ResourceTableTypeView> types;
+};
+
+struct ResourceTableViewOptions {
+  bool create_alias_entries = false;
+};
+
+struct ResourceTableView {
+  // Packages sorted in ascending package id order. If ids have not been assigned, the packages are
+  // sorted lexicographically.
+  std::vector<ResourceTablePackageView> packages;
+};
+
+enum class OnIdConflict {
+  // If the resource entry already exists but has a different resource id, the resource value will
+  // not be added to the table.
+  ERROR,
+
+  // If the resource entry already exists but has a different resource id, create a new resource
+  // with this resource name and id combination.
+  CREATE_ENTRY,
+};
+
+struct NewResource {
+  ResourceName name;
+  std::unique_ptr<Value> value;
+  android::ConfigDescription config;
+  std::string product;
+  std::optional<std::pair<ResourceId, OnIdConflict>> id;
+  std::optional<Visibility> visibility;
+  std::optional<OverlayableItem> overlayable;
+  std::optional<AllowNew> allow_new;
+  std::optional<StagedId> staged_id;
+  bool allow_mangled = false;
+};
+
+struct NewResourceBuilder {
+  explicit NewResourceBuilder(const ResourceNameRef& name);
+  explicit NewResourceBuilder(const std::string& name);
+  NewResourceBuilder& SetValue(std::unique_ptr<Value> value, android::ConfigDescription config = {},
+                               std::string product = {});
+  NewResourceBuilder& SetId(ResourceId id, OnIdConflict on_conflict = OnIdConflict::ERROR);
+  NewResourceBuilder& SetVisibility(Visibility id);
+  NewResourceBuilder& SetOverlayable(OverlayableItem overlayable);
+  NewResourceBuilder& SetAllowNew(AllowNew allow_new);
+  NewResourceBuilder& SetStagedId(StagedId id);
+  NewResourceBuilder& SetAllowMangled(bool allow_mangled);
+  NewResource Build();
+
+ private:
+  NewResource res_;
+};
+
+// The container and index for all resources defined for an app.
 class ResourceTable {
  public:
+  enum class Validation {
+    kEnabled,
+    kDisabled,
+  };
+
+  enum class CollisionResult { kKeepBoth, kKeepOriginal, kConflict, kTakeNew };
+
   ResourceTable() = default;
+  explicit ResourceTable(Validation validation);
 
-  enum class CollisionResult { kKeepOriginal, kConflict, kTakeNew };
+  bool AddResource(NewResource&& res, android::IDiagnostics* diag);
 
-  using CollisionResolverFunc = std::function<CollisionResult(Value*, Value*)>;
+  // Retrieves a sorted a view of the packages, types, and entries sorted in ascending resource id
+  // order.
+  ResourceTableView GetPartitionedView(const ResourceTableViewOptions& options = {}) const;
 
-  /**
-   * When a collision of resources occurs, this method decides which value to
-   * keep.
-   */
-  static CollisionResult ResolveValueCollision(Value* existing, Value* incoming);
-
-  bool AddResource(const ResourceNameRef& name, const ConfigDescription& config,
-                   const android::StringPiece& product, std::unique_ptr<Value> value,
-                   IDiagnostics* diag);
-
-  bool AddResource(const ResourceNameRef& name, const ResourceId& res_id,
-                   const ConfigDescription& config, const android::StringPiece& product,
-                   std::unique_ptr<Value> value, IDiagnostics* diag);
-
-  bool AddFileReference(const ResourceNameRef& name, const ConfigDescription& config,
-                        const Source& source, const android::StringPiece& path, IDiagnostics* diag);
-
-  bool AddFileReferenceAllowMangled(const ResourceNameRef& name, const ConfigDescription& config,
-                                    const Source& source, const android::StringPiece& path,
-                                    io::IFile* file, IDiagnostics* diag);
-
-  /**
-   * Same as AddResource, but doesn't verify the validity of the name. This is
-   * used
-   * when loading resources from an existing binary resource table that may have
-   * mangled
-   * names.
-   */
-  bool AddResourceAllowMangled(const ResourceNameRef& name, const ConfigDescription& config,
-                               const android::StringPiece& product, std::unique_ptr<Value> value,
-                               IDiagnostics* diag);
-
-  bool AddResourceAllowMangled(const ResourceNameRef& name, const ResourceId& id,
-                               const ConfigDescription& config, const android::StringPiece& product,
-                               std::unique_ptr<Value> value, IDiagnostics* diag);
-
-  bool SetSymbolState(const ResourceNameRef& name, const ResourceId& res_id,
-                      const Symbol& symbol, IDiagnostics* diag);
-
-  bool SetSymbolStateAllowMangled(const ResourceNameRef& name, const ResourceId& res_id,
-                                  const Symbol& symbol, IDiagnostics* diag);
+  using ReferencedPackages = std::map<uint8_t, std::string>;
+  const ReferencedPackages& GetReferencedPackages() const {
+    return included_packages_;
+  }
 
   struct SearchResult {
     ResourceTablePackage* package;
@@ -236,65 +318,41 @@ class ResourceTable {
     ResourceEntry* entry;
   };
 
-  Maybe<SearchResult> FindResource(const ResourceNameRef& name);
+  std::optional<SearchResult> FindResource(const ResourceNameRef& name) const;
+  std::optional<SearchResult> FindResource(const ResourceNameRef& name, ResourceId id) const;
+  bool RemoveResource(const ResourceNameRef& name, ResourceId id) const;
 
-  /**
-   * Returns the package struct with the given name, or nullptr if such a
-   * package does not
-   * exist. The empty string is a valid package and typically is used to
-   * represent the
-   * 'current' package before it is known to the ResourceTable.
-   */
-  ResourceTablePackage* FindPackage(const android::StringPiece& name);
+  // Returns the package struct with the given name, or nullptr if such a package does not
+  // exist. The empty string is a valid package and typically is used to represent the
+  // 'current' package before it is known to the ResourceTable.
+  ResourceTablePackage* FindPackage(android::StringPiece name) const;
+  ResourceTablePackage* FindOrCreatePackage(android::StringPiece name);
 
-  ResourceTablePackage* FindPackageById(uint8_t id);
+  std::unique_ptr<ResourceTable> Clone() const;
 
-  ResourceTablePackage* CreatePackage(const android::StringPiece& name, Maybe<uint8_t> id = {});
+  // When a collision of resources occurs, this method decides which value to keep.
+  static CollisionResult ResolveValueCollision(Value* existing, Value* incoming);
 
-  /**
-   * The string pool used by this resource table. Values that reference strings
-   * must use
-   * this pool to create their strings.
-   *
-   * NOTE: `string_pool` must come before `packages` so that it is destroyed
-   * after.
-   * When `string_pool` references are destroyed (as they will be when
-   * `packages`
-   * is destroyed), they decrement a refCount, which would cause invalid
-   * memory access if the pool was already destroyed.
-   */
-  StringPool string_pool;
+  // The string pool used by this resource table. Values that reference strings must use
+  // this pool to create their strings.
+  // NOTE: `string_pool` must come before `packages` so that it is destroyed after.
+  // When `string_pool` references are destroyed (as they will be when `packages` is destroyed),
+  // they decrement a refCount, which would cause invalid memory access if the pool was already
+  // destroyed.
+  android::StringPool string_pool;
 
-  /**
-   * The list of packages in this table, sorted alphabetically by package name.
-   */
+  // The list of packages in this table, sorted alphabetically by package name and increasing
+  // package ID (missing ID being the lowest).
   std::vector<std::unique_ptr<ResourceTablePackage>> packages;
 
   // Set of dynamic packages that this table may reference. Their package names get encoded
   // into the resources.arsc along with their compile-time assigned IDs.
-  std::map<size_t, std::string> included_packages_;
+  ReferencedPackages included_packages_;
 
  private:
-  // The function type that validates a symbol name. Returns a non-empty StringPiece representing
-  // the offending character (which may be more than one byte in UTF-8). Returns an empty string
-  // if the name was valid.
-  using NameValidator = android::StringPiece(const android::StringPiece&);
-
-  ResourceTablePackage* FindOrCreatePackage(const android::StringPiece& name);
-
-  bool AddResourceImpl(const ResourceNameRef& name, const ResourceId& res_id,
-                       const ConfigDescription& config, const android::StringPiece& product,
-                       std::unique_ptr<Value> value, NameValidator name_validator,
-                       const CollisionResolverFunc& conflict_resolver, IDiagnostics* diag);
-
-  bool AddFileReferenceImpl(const ResourceNameRef& name, const ConfigDescription& config,
-                            const Source& source, const android::StringPiece& path, io::IFile* file,
-                            NameValidator name_validator, IDiagnostics* diag);
-
-  bool SetSymbolStateImpl(const ResourceNameRef& name, const ResourceId& res_id,
-                          const Symbol& symbol, NameValidator name_validator, IDiagnostics* diag);
-
   DISALLOW_COPY_AND_ASSIGN(ResourceTable);
+
+  Validation validation_ = Validation::kEnabled;
 };
 
 }  // namespace aapt

@@ -16,15 +16,15 @@
 
 package com.android.settingslib.users;
 
-import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyInt;
+import static org.mockito.Matchers.anyLong;
 import static org.mockito.Matchers.argThat;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Matchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import android.appwidget.AppWidgetManager;
 import android.content.Context;
@@ -41,13 +41,15 @@ import android.content.pm.UserInfo;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.UserManager;
-import android.test.suitebuilder.annotation.SmallTest;
 import android.view.inputmethod.InputMethodInfo;
+
+import androidx.test.filters.SmallTest;
+
 import com.android.settingslib.BaseTest;
 
+import org.mockito.ArgumentMatcher;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
-import org.mockito.compat.ArgumentMatcher;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -133,12 +135,12 @@ public class AppRestrictionsHelperTest extends BaseTest {
         ApplicationInfo info = new ApplicationInfo();
         info.privateFlags |= ApplicationInfo.PRIVATE_FLAG_HIDDEN;
         info.flags |= ApplicationInfo.FLAG_INSTALLED;
-        when(mIpm.getApplicationInfo(eq("app2"), anyInt(), eq(testUserId)))
+        when(mIpm.getApplicationInfo(eq("app2"), anyLong(), eq(testUserId)))
                 .thenReturn(info);
 
         mHelper.setPackageSelected("app3", false);
         info = new ApplicationInfo();
-        when(mIpm.getApplicationInfo(eq("app3"), anyInt(), eq(testUserId)))
+        when(mIpm.getApplicationInfo(eq("app3"), anyLong(), eq(testUserId)))
                 .thenReturn(info);
 
         AppRestrictionsHelper.OnDisableUiForPackageListener mockListener =
@@ -146,7 +148,8 @@ public class AppRestrictionsHelperTest extends BaseTest {
         mHelper.applyUserAppsStates(mockListener);
 
         verify(mIpm, times(1)).installExistingPackageAsUser("app1", testUserId,
-                0 /*installFlags*/, PackageManager.INSTALL_REASON_UNKNOWN);
+                PackageManager.INSTALL_ALL_WHITELIST_RESTRICTED_PERMISSIONS,
+                PackageManager.INSTALL_REASON_UNKNOWN, null);
         verify(mIpm, times(1)).setApplicationHiddenSettingAsUser("app2", false, testUserId);
         verify(mockListener).onDisableUiForPackage("app2");
         verify(mPm, times(1)).deletePackageAsUser(eq("app3"),
@@ -159,14 +162,14 @@ public class AppRestrictionsHelperTest extends BaseTest {
         for (String pkg : defaultImes) {
             final ResolveInfo ri = createResolveInfoForSystemApp(pkg);
             final InputMethodInfo inputMethodInfo = new InputMethodInfo(
-                    ri, false, null, null, 0, true, true);
+                    ri, false, null, null, 0, true, true, false);
             inputMethods.add(inputMethodInfo);
             addInstalledApp(ri);
         }
         for (String pkg : otherImes) {
             final ResolveInfo ri = createResolveInfoForSystemApp(pkg);
             final InputMethodInfo inputMethodInfo = new InputMethodInfo(
-                    ri, false, null, null, 0, false, true);
+                    ri, false, null, null, 0, false, true, false);
             inputMethods.add(inputMethodInfo);
             addInstalledApp(ri);
         }
@@ -241,7 +244,7 @@ public class AppRestrictionsHelperTest extends BaseTest {
         return ri;
     }
 
-    private class IntentMatcher extends ArgumentMatcher<Intent> {
+    private class IntentMatcher implements ArgumentMatcher<Intent> {
         private final Intent mIntent;
 
         IntentMatcher(Intent intent) {
@@ -249,11 +252,8 @@ public class AppRestrictionsHelperTest extends BaseTest {
         }
 
         @Override
-        public boolean matchesObject(Object argument) {
-            if (argument instanceof Intent) {
-                return ((Intent) argument).filterEquals(mIntent);
-            }
-            return false;
+        public boolean matches(Intent argument) {
+            return argument != null && argument.filterEquals(mIntent);
         }
 
         @Override

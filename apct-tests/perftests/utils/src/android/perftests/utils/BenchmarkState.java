@@ -20,12 +20,12 @@ import android.app.Activity;
 import android.app.Instrumentation;
 import android.os.Bundle;
 import android.os.Debug;
-import android.support.test.InstrumentationRegistry;
 import android.util.Log;
+
+import androidx.test.InstrumentationRegistry;
 
 import java.io.File;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -53,7 +53,8 @@ public final class BenchmarkState {
     private static final int NOT_STARTED = 0;  // The benchmark has not started yet.
     private static final int WARMUP = 1; // The benchmark is warming up.
     private static final int RUNNING = 2;  // The benchmark is running.
-    private static final int FINISHED = 3;  // The benchmark has stopped.
+    private static final int RUNNING_CUSTOMIZED = 3;  // Running for customized measurement.
+    private static final int FINISHED = 4;  // The benchmark has stopped.
 
     private int mState = NOT_STARTED;  // Current benchmark state.
 
@@ -76,48 +77,23 @@ public final class BenchmarkState {
 
     private int mRepeatCount = 0;
 
+    /**
+     * Additional iteration that used to apply customized measurement. The result during these
+     * iterations won't be counted into {@link #mStats}.
+     */
+    private int mMaxCustomizedIterations;
+    private int mCustomizedIterations;
+    private CustomizedIterationListener mCustomizedIterationListener;
+
     // Statistics. These values will be filled when the benchmark has finished.
     // The computation needs double precision, but long int is fine for final reporting.
-    private long mMedian = 0;
-    private double mMean = 0.0;
-    private double mStandardDeviation = 0.0;
-    private long mMin = 0;
+    private Stats mStats;
 
     // Individual duration in nano seconds.
     private ArrayList<Long> mResults = new ArrayList<>();
 
     private static final long ms2ns(long ms) {
         return TimeUnit.MILLISECONDS.toNanos(ms);
-    }
-
-    /**
-     * Calculates statistics.
-     */
-    private void calculateSatistics() {
-        final int size = mResults.size();
-        if (size <= 1) {
-            throw new IllegalStateException("At least two results are necessary.");
-        }
-
-        Collections.sort(mResults);
-        mMedian = size % 2 == 0 ? (mResults.get(size / 2) + mResults.get(size / 2 + 1)) / 2 :
-                mResults.get(size / 2);
-
-        mMin = mResults.get(0);
-        for (int i = 0; i < size; ++i) {
-            long result = mResults.get(i);
-            mMean += result;
-            if (result < mMin) {
-                mMin = result;
-            }
-        }
-        mMean /= (double) size;
-
-        for (int i = 0; i < size; ++i) {
-            final double tmp = mResults.get(i) - mMean;
-            mStandardDeviation += tmp * tmp;
-        }
-        mStandardDeviation = Math.sqrt(mStandardDeviation / (double) (size - 1));
     }
 
     // Stops the benchmark timer.
@@ -141,6 +117,15 @@ public final class BenchmarkState {
         mPausedDurationNs += System.nanoTime() - mPausedTimeNs;
         mPausedTimeNs = 0;
         mPaused = false;
+    }
+
+    /**
+     * This is used to run the benchmark with more information by enabling some debug mechanism but
+     * we don't want to account the special runs (slower) in the stats report.
+     */
+    public void setCustomizedIterations(int iterations, CustomizedIterationListener listener) {
+        mMaxCustomizedIterations = iterations;
+        mCustomizedIterationListener = listener;
     }
 
     private void beginWarmup() {
@@ -173,7 +158,12 @@ public final class BenchmarkState {
             if (ENABLE_PROFILING) {
                 Debug.stopMethodTracing();
             }
-            calculateSatistics();
+            mStats = new Stats(mResults);
+            if (mMaxCustomizedIterations > 0 && mCustomizedIterationListener != null) {
+                mState = RUNNING_CUSTOMIZED;
+                mCustomizedIterationListener.onStart(mCustomizedIterations);
+                return true;
+            }
             mState = FINISHED;
             return false;
         }
@@ -213,6 +203,15 @@ public final class BenchmarkState {
                             "Resume the benchmark before finishing each step.");
                 }
                 return true;
+            case RUNNING_CUSTOMIZED:
+                mCustomizedIterationListener.onFinished(mCustomizedIterations);
+                mCustomizedIterations++;
+                if (mCustomizedIterations >= mMaxCustomizedIterations) {
+                    mState = FINISHED;
+                    return false;
+                }
+                mCustomizedIterationListener.onStart(mCustomizedIterations);
+                return true;
             case FINISHED:
                 throw new IllegalStateException("The benchmark has finished.");
             default:
@@ -224,28 +223,28 @@ public final class BenchmarkState {
         if (mState != FINISHED) {
             throw new IllegalStateException("The benchmark hasn't finished");
         }
-        return (long) mMean;
+        return (long) mStats.getMean();
     }
 
     private long median() {
         if (mState != FINISHED) {
             throw new IllegalStateException("The benchmark hasn't finished");
         }
-        return mMedian;
+        return mStats.getMedian();
     }
 
     private long min() {
         if (mState != FINISHED) {
             throw new IllegalStateException("The benchmark hasn't finished");
         }
-        return mMin;
+        return mStats.getMin();
     }
 
     private long standardDeviation() {
         if (mState != FINISHED) {
             throw new IllegalStateException("The benchmark hasn't finished");
         }
-        return (long) mStandardDeviation;
+        return (long) mStats.getStandardDeviation();
     }
 
     private String summaryLine() {
@@ -267,10 +266,19 @@ public final class BenchmarkState {
     public void sendFullStatusReport(Instrumentation instrumentation, String key) {
         Log.i(TAG, key + summaryLine());
         Bundle status = new Bundle();
-        status.putLong(key + "_median", median());
-        status.putLong(key + "_mean", mean());
-        status.putLong(key + "_min", min());
+        status.putLong(key + "_median (ns)", median());
+        status.putLong(key + "_mean (ns)", mean());
+        status.putLong(key + "_min (ns)", min());
         status.putLong(key + "_standardDeviation", standardDeviation());
         instrumentation.sendStatus(Activity.RESULT_OK, status);
+    }
+
+    /** The interface to receive the events of customized iteration. */
+    public interface CustomizedIterationListener {
+        /** The customized iteration starts. */
+        void onStart(int iteration);
+
+        /** The customized iteration finished. */
+        void onFinished(int iteration);
     }
 }

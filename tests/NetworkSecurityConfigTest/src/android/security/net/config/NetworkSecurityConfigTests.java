@@ -17,27 +17,22 @@
 package android.security.net.config;
 
 import android.app.Activity;
+import android.content.pm.ApplicationInfo;
 import android.os.Build;
 import android.test.ActivityUnitTestCase;
 import android.util.ArraySet;
 import android.util.Pair;
+
+import com.android.org.conscrypt.TrustedCertificateStore;
+
 import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.net.Socket;
-import java.net.URL;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
-import javax.net.ssl.HttpsURLConnection;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLHandshakeException;
-import javax.net.ssl.TrustManager;
 
-import com.android.org.conscrypt.TrustedCertificateStore;
+import javax.net.ssl.SSLContext;
 
 public class NetworkSecurityConfigTests extends ActivityUnitTestCase<Activity> {
 
@@ -45,9 +40,9 @@ public class NetworkSecurityConfigTests extends ActivityUnitTestCase<Activity> {
         super(Activity.class);
     }
 
-    // SHA-256 of the G2 intermediate CA for android.com (as of 10/2015).
-    private static final byte[] G2_SPKI_SHA256
-            = hexToBytes("ec722969cb64200ab6638f68ac538e40abab5b19a6485661042a1061c4612776");
+    // SHA-256 of the GTS intermediate CA (CN = GTS CA 1C3) for android.com (as of 09/2023).
+    private static final byte[] GTS_INTERMEDIATE_SPKI_SHA256 =
+        hexToBytes("cc24e77cbc0b29b4bd4b6b1ba7eb85cf82993a8705bd7c64574e827bd3b9336c");
 
     private static final byte[] TEST_CA_BYTES
             = hexToBytes(
@@ -160,7 +155,7 @@ public class NetworkSecurityConfigTests extends ActivityUnitTestCase<Activity> {
 
     public void testGoodPin() throws Exception {
         ArraySet<Pin> pins = new ArraySet<Pin>();
-        pins.add(new Pin("SHA-256", G2_SPKI_SHA256));
+        pins.add(new Pin("SHA-256", GTS_INTERMEDIATE_SPKI_SHA256));
         NetworkSecurityConfig domain = new NetworkSecurityConfig.Builder()
                 .setPinSet(new PinSet(pins, Long.MAX_VALUE))
                 .addCertificatesEntryRef(
@@ -227,7 +222,8 @@ public class NetworkSecurityConfigTests extends ActivityUnitTestCase<Activity> {
     public void testConfigBuilderUsesParents() throws Exception {
         // Check that a builder with a parent uses the parent's values when non is set.
         NetworkSecurityConfig config = new NetworkSecurityConfig.Builder()
-                .setParent(NetworkSecurityConfig.getDefaultBuilder(Build.VERSION_CODES.N, 1))
+                .setParent(NetworkSecurityConfig
+                        .getDefaultBuilder(TestUtils.makeApplicationInfo()))
                 .build();
         assert(!config.getTrustAnchors().isEmpty());
     }
@@ -245,7 +241,7 @@ public class NetworkSecurityConfigTests extends ActivityUnitTestCase<Activity> {
 
     public void testWithUrlConnection() throws Exception {
         ArraySet<Pin> pins = new ArraySet<Pin>();
-        pins.add(new Pin("SHA-256", G2_SPKI_SHA256));
+        pins.add(new Pin("SHA-256", GTS_INTERMEDIATE_SPKI_SHA256));
         NetworkSecurityConfig domain = new NetworkSecurityConfig.Builder()
                 .setPinSet(new PinSet(pins, Long.MAX_VALUE))
                 .addCertificatesEntryRef(
@@ -268,11 +264,22 @@ public class NetworkSecurityConfigTests extends ActivityUnitTestCase<Activity> {
             // Install the test CA.
             store.installCertificate(TEST_CA_CERT);
             NetworkSecurityConfig preNConfig =
-                    NetworkSecurityConfig.getDefaultBuilder(Build.VERSION_CODES.M, 1).build();
+                    NetworkSecurityConfig
+                    .getDefaultBuilder(TestUtils.makeApplicationInfo(Build.VERSION_CODES.M))
+                    .build();
             NetworkSecurityConfig nConfig =
-                    NetworkSecurityConfig.getDefaultBuilder(Build.VERSION_CODES.N, 1).build();
+                    NetworkSecurityConfig
+                    .getDefaultBuilder(TestUtils.makeApplicationInfo(Build.VERSION_CODES.N))
+                    .build();
+            ApplicationInfo privInfo = TestUtils.makeApplicationInfo(Build.VERSION_CODES.M);
+            privInfo.privateFlags |= ApplicationInfo.PRIVATE_FLAG_PRIVILEGED;
+            NetworkSecurityConfig privConfig =
+                    NetworkSecurityConfig
+                    .getDefaultBuilder(privInfo)
+                    .build();
             Set<TrustAnchor> preNAnchors = preNConfig.getTrustAnchors();
             Set<TrustAnchor> nAnchors = nConfig.getTrustAnchors();
+            Set<TrustAnchor> privAnchors = privConfig.getTrustAnchors();
             Set<X509Certificate> preNCerts = new HashSet<X509Certificate>();
             for (TrustAnchor anchor : preNAnchors) {
                 preNCerts.add(anchor.certificate);
@@ -281,12 +288,17 @@ public class NetworkSecurityConfigTests extends ActivityUnitTestCase<Activity> {
             for (TrustAnchor anchor : nAnchors) {
                 nCerts.add(anchor.certificate);
             }
+            Set<X509Certificate> privCerts = new HashSet<X509Certificate>();
+            for (TrustAnchor anchor : privAnchors) {
+                privCerts.add(anchor.certificate);
+            }
             assertTrue(preNCerts.contains(TEST_CA_CERT));
             assertFalse(nCerts.contains(TEST_CA_CERT));
+            assertFalse(privCerts.contains(TEST_CA_CERT));
         } finally {
             // Delete the user added CA. We don't know the alias so just delete them all.
             for (String alias : store.aliases()) {
-                if (store.isUser(alias)) {
+                if (TrustedCertificateStore.isUser(alias)) {
                     try {
                         store.deleteCertificateEntry(alias);
                     } catch (Exception ignored) {

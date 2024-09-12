@@ -15,29 +15,46 @@
  */
 package com.android.server.autofill.ui;
 
+import static android.service.autofill.FillEventHistory.Event.UI_TYPE_DIALOG;
+import static android.service.autofill.FillEventHistory.Event.UI_TYPE_MENU;
+
 import static com.android.server.autofill.Helper.sDebug;
 import static com.android.server.autofill.Helper.sVerbose;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
 import android.content.IntentSender;
+import android.graphics.drawable.Drawable;
 import android.metrics.LogMaker;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.IBinder;
+import android.os.RemoteException;
 import android.service.autofill.Dataset;
+import android.service.autofill.FillEventHistory;
 import android.service.autofill.FillResponse;
 import android.service.autofill.SaveInfo;
+import android.service.autofill.ValueFinder;
 import android.text.TextUtils;
 import android.util.Slog;
+import android.view.KeyEvent;
 import android.view.autofill.AutofillId;
 import android.view.autofill.AutofillManager;
 import android.view.autofill.IAutofillWindowPresenter;
 import android.widget.Toast;
 
 import com.android.internal.logging.MetricsLogger;
-import com.android.internal.logging.nano.MetricsProto;
+import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
+import com.android.server.LocalServices;
+import com.android.server.UiModeManagerInternal;
 import com.android.server.UiThread;
+import com.android.server.autofill.Helper;
+import com.android.server.autofill.PresentationStatsEventLogger;
+import com.android.server.autofill.SaveEventLogger;
+import com.android.server.utils.Slogf;
 
 import java.io.PrintWriter;
 
@@ -56,37 +73,55 @@ public final class AutoFillUI {
 
     private @Nullable FillUi mFillUi;
     private @Nullable SaveUi mSaveUi;
+    private @Nullable DialogFillUi mFillDialog;
 
     private @Nullable AutoFillUiCallback mCallback;
 
     private final MetricsLogger mMetricsLogger = new MetricsLogger();
 
     private final @NonNull OverlayControl mOverlayControl;
+    private final @NonNull UiModeManagerInternal mUiModeMgr;
+
+    private @Nullable Runnable mCreateFillUiRunnable;
+    private @Nullable AutoFillUiCallback mSaveUiCallback;
 
     public interface AutoFillUiCallback {
         void authenticate(int requestId, int datasetIndex, @NonNull IntentSender intent,
-                @Nullable Bundle extras);
-        void fill(int requestId, int datasetIndex, @NonNull Dataset dataset);
+                @Nullable Bundle extras, int uiType);
+        void fill(int requestId, int datasetIndex, @NonNull Dataset dataset,
+                @FillEventHistory.Event.UiType int uiType);
         void save();
         void cancelSave();
         void requestShowFillUi(AutofillId id, int width, int height,
                 IAutofillWindowPresenter presenter);
         void requestHideFillUi(AutofillId id);
-        void startIntentSender(IntentSender intentSender);
+        void requestHideFillUiWhenDestroyed(AutofillId id);
+        void startIntentSenderAndFinishSession(IntentSender intentSender);
+        void startIntentSender(IntentSender intentSender, Intent intent);
+        void dispatchUnhandledKey(AutofillId id, KeyEvent keyEvent);
+        void cancelSession();
+        void requestShowSoftInput(AutofillId id);
+        void requestFallbackFromFillDialog();
+        void onShown(int uiType, int datasetSize);
     }
 
     public AutoFillUI(@NonNull Context context) {
         mContext = context;
         mOverlayControl = new OverlayControl(context);
+        mUiModeMgr = LocalServices.getService(UiModeManagerInternal.class);
     }
 
     public void setCallback(@NonNull AutoFillUiCallback callback) {
         mHandler.post(() -> {
             if (mCallback != callback) {
                 if (mCallback != null) {
-                    hideAllUiThread(mCallback);
+                    if (isSaveUiShowing()) {
+                        // keeps showing the save UI
+                        hideFillUiUiThread(callback, true);
+                    } else {
+                        hideAllUiThread(mCallback);
+                    }
                 }
-
                 mCallback = callback;
             }
         });
@@ -129,9 +164,15 @@ public final class AutoFillUI {
      * Hides the fill UI.
      */
     public void hideFillUi(@NonNull AutoFillUiCallback callback) {
-        mHandler.post(() -> hideFillUiUiThread(callback));
+        mHandler.post(() -> hideFillUiUiThread(callback, true));
     }
 
+    /**
+     * Hides the fill UI.
+     */
+    public void hideFillDialog(@NonNull AutoFillUiCallback callback) {
+        mHandler.post(() -> hideFillDialogUiThread(callback));
+    }
     /**
      * Filters the options in the fill UI.
      *
@@ -142,7 +183,6 @@ public final class AutoFillUI {
             if (callback != mCallback) {
                 return;
             }
-            hideSaveUiUiThread(callback);
             if (mFillUi != null) {
                 mFillUi.setFilterText(filterText);
             }
@@ -155,60 +195,84 @@ public final class AutoFillUI {
      * @param focusedId the currently focused field
      * @param response the current fill response
      * @param filterText text of the view to be filled
-     * @param packageName package name of the activity that is filled
-     * @param callback Identifier for the caller
+     * @param servicePackageName package name of the autofill service filling the activity
+     * @param componentName component name of the activity that is filled
+     * @param serviceLabel label of autofill service
+     * @param serviceIcon icon of autofill service
+     * @param callback identifier for the caller
+     * @param userId the user associated wit the session
+     * @param context context with the proper state (like display id) to show the UI
+     * @param sessionId id of the autofill session
+     * @param compatMode whether the app is being autofilled in compatibility mode.
+     * @param maxInputLengthForAutofill max user input to provide suggestion
      */
     public void showFillUi(@NonNull AutofillId focusedId, @NonNull FillResponse response,
-            @Nullable String filterText, @NonNull String packageName,
-            @NonNull AutoFillUiCallback callback) {
+            @Nullable String filterText, @Nullable String servicePackageName,
+            @NonNull ComponentName componentName, @NonNull CharSequence serviceLabel,
+            @NonNull Drawable serviceIcon, @NonNull AutoFillUiCallback callback,
+            @NonNull Context context, int sessionId, boolean compatMode,
+            int maxInputLengthForAutofill) {
         if (sDebug) {
-            Slog.d(TAG, "showFillUi(): id=" + focusedId + ", filter=" + filterText);
+            final int size = filterText == null ? 0 : filterText.length();
+            Slogf.d(TAG, "showFillUi(): id=%s, filter=%d chars, displayId=%d", focusedId, size,
+                    context.getDisplayId());
         }
-        final LogMaker log = (new LogMaker(MetricsProto.MetricsEvent.AUTOFILL_FILL_UI))
-                .setPackageName(packageName)
-                .addTaggedData(MetricsProto.MetricsEvent.FIELD_AUTOFILL_FILTERTEXT_LEN,
+        final LogMaker log = Helper
+                .newLogMaker(MetricsEvent.AUTOFILL_FILL_UI, componentName, servicePackageName,
+                        sessionId, compatMode)
+                .addTaggedData(MetricsEvent.FIELD_AUTOFILL_FILTERTEXT_LEN,
                         filterText == null ? 0 : filterText.length())
-                .addTaggedData(MetricsProto.MetricsEvent.FIELD_AUTOFILL_NUM_DATASETS,
+                .addTaggedData(MetricsEvent.FIELD_AUTOFILL_NUM_DATASETS,
                         response.getDatasets() == null ? 0 : response.getDatasets().size());
 
-        mHandler.post(() -> {
+        final Runnable createFillUiRunnable = () -> {
             if (callback != mCallback) {
                 return;
             }
             hideAllUiThread(callback);
-            mFillUi = new FillUi(mContext, response, focusedId,
-                    filterText, mOverlayControl, new FillUi.Callback() {
+            mFillUi = new FillUi(context, response, focusedId, filterText, mOverlayControl,
+                    serviceLabel, serviceIcon, mUiModeMgr.isNightMode(), maxInputLengthForAutofill,
+                    new FillUi.Callback() {
                 @Override
                 public void onResponsePicked(FillResponse response) {
-                    log.setType(MetricsProto.MetricsEvent.TYPE_DETAIL);
-                    hideFillUiUiThread(callback);
+                    log.setType(MetricsEvent.TYPE_DETAIL);
+                    hideFillUiUiThread(callback, true);
                     if (mCallback != null) {
                         mCallback.authenticate(response.getRequestId(),
                                 AutofillManager.AUTHENTICATION_ID_DATASET_ID_UNDEFINED,
-                                response.getAuthentication(), response.getClientState());
+                                response.getAuthentication(), response.getClientState(),
+                                UI_TYPE_MENU);
+                    }
+                }
+
+                @Override
+                public void onShown(int datasetSize) {
+                    if (mCallback != null) {
+                        mCallback.onShown(UI_TYPE_MENU, datasetSize);
                     }
                 }
 
                 @Override
                 public void onDatasetPicked(Dataset dataset) {
-                    log.setType(MetricsProto.MetricsEvent.TYPE_ACTION);
-                    hideFillUiUiThread(callback);
+                    log.setType(MetricsEvent.TYPE_ACTION);
+                    hideFillUiUiThread(callback, true);
                     if (mCallback != null) {
                         final int datasetIndex = response.getDatasets().indexOf(dataset);
-                        mCallback.fill(response.getRequestId(), datasetIndex, dataset);
+                        mCallback.fill(response.getRequestId(), datasetIndex,
+                                dataset, UI_TYPE_MENU);
                     }
                 }
 
                 @Override
                 public void onCanceled() {
-                    log.setType(MetricsProto.MetricsEvent.TYPE_DISMISS);
-                    hideFillUiUiThread(callback);
+                    log.setType(MetricsEvent.TYPE_DISMISS);
+                    hideFillUiUiThread(callback, true);
                 }
 
                 @Override
                 public void onDestroy() {
-                    if (log.getType() == MetricsProto.MetricsEvent.TYPE_UNKNOWN) {
-                        log.setType(MetricsProto.MetricsEvent.TYPE_CLOSE);
+                    if (log.getType() == MetricsEvent.TYPE_UNKNOWN) {
+                        log.setType(MetricsEvent.TYPE_CLOSE);
                     }
                     mMetricsLogger.write(log);
                 }
@@ -229,48 +293,95 @@ public final class AutoFillUI {
                 }
 
                 @Override
+                public void requestHideFillUiWhenDestroyed() {
+                    if (mCallback != null) {
+                        mCallback.requestHideFillUiWhenDestroyed(focusedId);
+                    }
+                }
+
+                @Override
                 public void startIntentSender(IntentSender intentSender) {
                     if (mCallback != null) {
-                        mCallback.startIntentSender(intentSender);
+                        mCallback.startIntentSenderAndFinishSession(intentSender);
+                    }
+                }
+
+                @Override
+                public void dispatchUnhandledKey(KeyEvent keyEvent) {
+                    if (mCallback != null) {
+                        mCallback.dispatchUnhandledKey(focusedId, keyEvent);
+                    }
+                }
+
+                @Override
+                public void cancelSession() {
+                    if (mCallback != null) {
+                        mCallback.cancelSession();
                     }
                 }
             });
-        });
+        };
+
+        if (isSaveUiShowing()) {
+            // postpone creating the fill UI for showing the save UI
+            if (sDebug) Slog.d(TAG, "postpone fill UI request..");
+            mCreateFillUiRunnable = createFillUiRunnable;
+        } else {
+            mHandler.post(createFillUiRunnable);
+        }
     }
 
     /**
      * Shows the UI asking the user to save for autofill.
      */
-    public void showSaveUi(@NonNull CharSequence providerLabel, @NonNull SaveInfo info,
-            @NonNull String packageName, @NonNull AutoFillUiCallback callback) {
-        if (sVerbose) Slog.v(TAG, "showSaveUi() for " + packageName + ": " + info);
+    public void showSaveUi(@NonNull CharSequence serviceLabel, @NonNull Drawable serviceIcon,
+            @Nullable String servicePackageName, @NonNull SaveInfo info,
+            @NonNull ValueFinder valueFinder, @NonNull ComponentName componentName,
+            @NonNull AutoFillUiCallback callback, @NonNull Context context,
+            @NonNull PendingUi pendingSaveUi, boolean isUpdate, boolean compatMode,
+            boolean showServiceIcon, @Nullable SaveEventLogger mSaveEventLogger) {
+        if (sVerbose) {
+            Slogf.v(TAG, "showSaveUi(update=%b) for %s and display %d: %s", isUpdate,
+                    componentName.toShortString(), context.getDisplayId(), info);
+        }
         int numIds = 0;
         numIds += info.getRequiredIds() == null ? 0 : info.getRequiredIds().length;
         numIds += info.getOptionalIds() == null ? 0 : info.getOptionalIds().length;
 
-        LogMaker log = (new LogMaker(MetricsProto.MetricsEvent.AUTOFILL_SAVE_UI))
-                .setPackageName(packageName).addTaggedData(
-                        MetricsProto.MetricsEvent.FIELD_AUTOFILL_NUM_IDS, numIds);
+        final LogMaker log = Helper
+                .newLogMaker(MetricsEvent.AUTOFILL_SAVE_UI, componentName, servicePackageName,
+                        pendingSaveUi.sessionId, compatMode)
+                .addTaggedData(MetricsEvent.FIELD_AUTOFILL_NUM_IDS, numIds);
+        if (isUpdate) {
+            log.addTaggedData(MetricsEvent.FIELD_AUTOFILL_UPDATE, 1);
+        }
 
         mHandler.post(() -> {
             if (callback != mCallback) {
                 return;
             }
             hideAllUiThread(callback);
-            mSaveUi = new SaveUi(mContext, providerLabel, info,
-                    mOverlayControl, new SaveUi.OnSaveListener() {
+            mSaveUiCallback = callback;
+            mSaveUi = new SaveUi(context, pendingSaveUi, serviceLabel, serviceIcon,
+                    servicePackageName, componentName, info, valueFinder, mOverlayControl,
+                    new SaveUi.OnSaveListener() {
                 @Override
                 public void onSave() {
-                    log.setType(MetricsProto.MetricsEvent.TYPE_ACTION);
-                    hideSaveUiUiThread(callback);
-                    if (mCallback != null) {
-                        mCallback.save();
+                    log.setType(MetricsEvent.TYPE_ACTION);
+                    if (mSaveEventLogger != null) {
+                        mSaveEventLogger.maybeSetSaveButtonClicked(true);
                     }
+                    hideSaveUiUiThread(callback);
+                    callback.save();
+                    destroySaveUiUiThread(pendingSaveUi, true);
                 }
 
                 @Override
                 public void onCancel(IntentSender listener) {
-                    log.setType(MetricsProto.MetricsEvent.TYPE_DISMISS);
+                    log.setType(MetricsEvent.TYPE_DISMISS);
+                    if (mSaveEventLogger != null) {
+                        mSaveEventLogger.maybeSetCancelButtonClicked(true);
+                    }
                     hideSaveUiUiThread(callback);
                     if (listener != null) {
                         try {
@@ -280,37 +391,178 @@ public final class AutoFillUI {
                                     + listener, e);
                         }
                     }
-                    if (mCallback != null) {
-                        mCallback.cancelSave();
-                    }
+                    callback.cancelSave();
+                    destroySaveUiUiThread(pendingSaveUi, true);
                 }
 
                 @Override
                 public void onDestroy() {
-                    if (log.getType() == MetricsProto.MetricsEvent.TYPE_UNKNOWN) {
-                        log.setType(MetricsProto.MetricsEvent.TYPE_CLOSE);
+                    if (log.getType() == MetricsEvent.TYPE_UNKNOWN) {
+                        log.setType(MetricsEvent.TYPE_CLOSE);
 
-                        if (mCallback != null) {
-                            mCallback.cancelSave();
-                        }
+                        callback.cancelSave();
                     }
                     mMetricsLogger.write(log);
+                    if (mSaveEventLogger != null) {
+                        mSaveEventLogger.maybeSetDialogDismissed(true);
+                    }
                 }
-            });
+
+                @Override
+                public void startIntentSender(IntentSender intentSender, Intent intent) {
+                    callback.startIntentSender(intentSender, intent);
+                }
+            }, mUiModeMgr.isNightMode(), isUpdate, compatMode, showServiceIcon);
+
+            mSaveEventLogger.maybeSetLatencySaveUiDisplayMillis();
         });
     }
 
     /**
-     * Hides all UI affordances.
+     * Shows the UI asking the user to choose for autofill.
+     */
+    public void showFillDialog(@NonNull AutofillId focusedId, @NonNull FillResponse response,
+            @Nullable String filterText, @Nullable String servicePackageName,
+            @NonNull ComponentName componentName, @Nullable Drawable serviceIcon,
+            @NonNull AutoFillUiCallback callback, int sessionId, boolean compatMode,
+            @Nullable PresentationStatsEventLogger presentationStatsEventLogger,
+            @NonNull Object sessionLock) {
+        if (sVerbose) {
+            Slog.v(TAG, "showFillDialog for "
+                    + componentName.toShortString() + ": " + response);
+        }
+
+        final LogMaker log = Helper
+                .newLogMaker(MetricsEvent.AUTOFILL_FILL_UI, componentName, servicePackageName,
+                        sessionId, compatMode)
+                .addTaggedData(MetricsEvent.FIELD_AUTOFILL_FILTERTEXT_LEN,
+                        filterText == null ? 0 : filterText.length())
+                .addTaggedData(MetricsEvent.FIELD_AUTOFILL_NUM_DATASETS,
+                        response.getDatasets() == null ? 0 : response.getDatasets().size());
+
+        mHandler.post(() -> {
+            if (callback != mCallback) {
+                return;
+            }
+            hideAllUiThread(callback);
+            mFillDialog = new DialogFillUi(mContext, response, focusedId, filterText,
+                    serviceIcon, servicePackageName, componentName, mOverlayControl,
+                    mUiModeMgr.isNightMode(), new DialogFillUi.UiCallback() {
+                        @Override
+                        public void onResponsePicked(FillResponse response) {
+                            log(MetricsEvent.TYPE_DETAIL);
+                            hideFillDialogUiThread(callback);
+                            if (mCallback != null) {
+                                mCallback.authenticate(response.getRequestId(),
+                                        AutofillManager.AUTHENTICATION_ID_DATASET_ID_UNDEFINED,
+                                        response.getAuthentication(), response.getClientState(),
+                                        UI_TYPE_DIALOG);
+                            }
+                        }
+
+                        @Override
+                        public void onShown() {
+                            mCallback.onShown(UI_TYPE_DIALOG, response.getDatasets().size());
+                        }
+
+                        @Override
+                        public void onDatasetPicked(Dataset dataset) {
+                            log(MetricsEvent.TYPE_ACTION);
+                            synchronized (sessionLock) {
+                                if (presentationStatsEventLogger != null) {
+                                    presentationStatsEventLogger.maybeSetPositiveCtaButtonClicked(
+                                            true);
+                                }
+                            }
+                            hideFillDialogUiThread(callback);
+                            if (mCallback != null) {
+                                final int datasetIndex = response.getDatasets().indexOf(dataset);
+                                mCallback.fill(response.getRequestId(), datasetIndex, dataset,
+                                        UI_TYPE_DIALOG);
+                            }
+                        }
+
+                        @Override
+                        public void onDismissed() {
+                            log(MetricsEvent.TYPE_DISMISS);
+                            synchronized (sessionLock) {
+                                if (presentationStatsEventLogger != null) {
+                                    presentationStatsEventLogger.maybeSetDialogDismissed(true);
+                                }
+                            }
+                            hideFillDialogUiThread(callback);
+                            callback.requestShowSoftInput(focusedId);
+                            callback.requestFallbackFromFillDialog();
+                        }
+
+                        @Override
+                        public void onCanceled() {
+                            log(MetricsEvent.TYPE_CLOSE);
+                            synchronized (sessionLock) {
+                                if (presentationStatsEventLogger != null) {
+                                    presentationStatsEventLogger.maybeSetNegativeCtaButtonClicked(
+                                            true);
+                                }
+                            }
+                            hideFillDialogUiThread(callback);
+                            callback.requestShowSoftInput(focusedId);
+                            callback.requestFallbackFromFillDialog();
+                        }
+
+                        @Override
+                        public void startIntentSender(IntentSender intentSender) {
+                            mCallback.startIntentSenderAndFinishSession(intentSender);
+                        }
+
+                        private void log(int type) {
+                            log.setType(type);
+                            mMetricsLogger.write(log);
+                        }
+                    });
+        });
+    }
+
+    /**
+     * Executes an operation in the pending save UI, if any.
+     */
+    public void onPendingSaveUi(int operation, @NonNull IBinder token) {
+        mHandler.post(() -> {
+            if (mSaveUi != null) {
+                mSaveUi.onPendingUi(operation, token);
+            } else {
+                Slog.w(TAG, "onPendingSaveUi(" + operation + "): no save ui");
+            }
+        });
+    }
+
+    /**
+     * Hides all autofill UIs.
      */
     public void hideAll(@Nullable AutoFillUiCallback callback) {
         mHandler.post(() -> hideAllUiThread(callback));
+    }
+
+    /**
+     * Destroy all autofill UIs.
+     */
+    public void destroyAll(@Nullable PendingUi pendingSaveUi,
+            @Nullable AutoFillUiCallback callback, boolean notifyClient) {
+        mHandler.post(() -> destroyAllUiThread(pendingSaveUi, callback, notifyClient));
+    }
+
+    public boolean isSaveUiShowing() {
+        return mSaveUi == null ? false : mSaveUi.isShowing();
+    }
+
+    public boolean isFillDialogShowing() {
+        return mFillDialog == null ? false : mFillDialog.isShowing();
     }
 
     public void dump(PrintWriter pw) {
         pw.println("Autofill UI");
         final String prefix = "  ";
         final String prefix2 = "    ";
+        pw.print(prefix); pw.print("Night mode: "); pw.println(mUiModeMgr.isNightMode());
         if (mFillUi != null) {
             pw.print(prefix); pw.println("showsFillUi: true");
             mFillUi.dump(pw, prefix2);
@@ -323,31 +575,93 @@ public final class AutoFillUI {
         } else {
             pw.print(prefix); pw.println("showsSaveUi: false");
         }
+        if (mFillDialog != null) {
+            pw.print(prefix); pw.println("showsFillDialog: true");
+            mFillDialog.dump(pw, prefix2);
+        } else {
+            pw.print(prefix); pw.println("showsFillDialog: false");
+        }
     }
 
     @android.annotation.UiThread
-    private void hideFillUiUiThread(@Nullable AutoFillUiCallback callback) {
+    private void hideFillUiUiThread(@Nullable AutoFillUiCallback callback, boolean notifyClient) {
         if (mFillUi != null && (callback == null || callback == mCallback)) {
-            mFillUi.destroy();
+            mFillUi.destroy(notifyClient);
             mFillUi = null;
         }
     }
 
     @android.annotation.UiThread
-    private void hideSaveUiUiThread(@Nullable AutoFillUiCallback callback) {
+    @Nullable
+    private PendingUi hideSaveUiUiThread(@Nullable AutoFillUiCallback callback) {
         if (sVerbose) {
             Slog.v(TAG, "hideSaveUiUiThread(): mSaveUi=" + mSaveUi + ", callback=" + callback
                     + ", mCallback=" + mCallback);
         }
-        if (mSaveUi != null && (callback == null || callback == mCallback)) {
-            mSaveUi.destroy();
-            mSaveUi = null;
+
+        if (mSaveUi != null && mSaveUiCallback == callback) {
+            return mSaveUi.hide();
+        }
+        return null;
+    }
+
+    @android.annotation.UiThread
+    private void hideFillDialogUiThread(@Nullable AutoFillUiCallback callback) {
+        if (mFillDialog != null && (callback == null || callback == mCallback)) {
+            mFillDialog.destroy();
+            mFillDialog = null;
         }
     }
 
     @android.annotation.UiThread
+    private void destroySaveUiUiThread(@Nullable PendingUi pendingSaveUi, boolean notifyClient) {
+        if (mSaveUi == null) {
+            // Calling destroySaveUiUiThread() twice is normal - it usually happens when the
+            // first call is made after the SaveUI is hidden and the second when the session is
+            // finished.
+            if (sDebug) Slog.d(TAG, "destroySaveUiUiThread(): already destroyed");
+            return;
+        }
+
+        if (sDebug) Slog.d(TAG, "destroySaveUiUiThread(): " + pendingSaveUi);
+        mSaveUi.destroy();
+        mSaveUi = null;
+        mSaveUiCallback = null;
+        if (pendingSaveUi != null && notifyClient) {
+            try {
+                if (sDebug) Slog.d(TAG, "destroySaveUiUiThread(): notifying client");
+                pendingSaveUi.client.setSaveUiState(pendingSaveUi.sessionId, false);
+            } catch (RemoteException e) {
+                Slog.e(TAG, "Error notifying client to set save UI state to hidden: " + e);
+            }
+        }
+
+        if (mCreateFillUiRunnable != null) {
+            if (sDebug) Slog.d(TAG, "start the pending fill UI request..");
+            mHandler.post(mCreateFillUiRunnable);
+            mCreateFillUiRunnable = null;
+        }
+    }
+
+    @android.annotation.UiThread
+    private void destroyAllUiThread(@Nullable PendingUi pendingSaveUi,
+            @Nullable AutoFillUiCallback callback, boolean notifyClient) {
+        hideFillUiUiThread(callback, notifyClient);
+        hideFillDialogUiThread(callback);
+        destroySaveUiUiThread(pendingSaveUi, notifyClient);
+    }
+
+    @android.annotation.UiThread
     private void hideAllUiThread(@Nullable AutoFillUiCallback callback) {
-        hideFillUiUiThread(callback);
-        hideSaveUiUiThread(callback);
+        hideFillUiUiThread(callback, true);
+        hideFillDialogUiThread(callback);
+        final PendingUi pendingSaveUi = hideSaveUiUiThread(callback);
+        if (pendingSaveUi != null && pendingSaveUi.getState() == PendingUi.STATE_FINISHED) {
+            if (sDebug) {
+                Slog.d(TAG, "hideAllUiThread(): "
+                        + "destroying Save UI because pending restoration is finished");
+            }
+            destroySaveUiUiThread(pendingSaveUi, true);
+        }
     }
 }

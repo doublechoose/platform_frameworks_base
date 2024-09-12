@@ -15,16 +15,20 @@
  */
 
 #include "TestSceneBase.h"
-#include "utils/Color.h"
 #include "tests/common/BitmapAllocationTestUtils.h"
+#include "utils/Color.h"
+
+#include <SkBitmap.h>
+#include <SkBlendMode.h>
+#include <SkCanvas.h>
+#include <SkPaint.h>
+#include <SkRefCnt.h>
 
 class HwBitmap565;
 
 static TestScene::Registrar _HwBitmap565(TestScene::Info{
-    "hwBitmap565",
-    "Draws composite shader with hardware bitmap",
-    TestScene::simpleCreateScene<HwBitmap565>
-});
+        "hwBitmap565", "Draws composite shader with hardware bitmap",
+        TestScene::simpleCreateScene<HwBitmap565>});
 
 class HwBitmap565 : public TestScene {
 public:
@@ -32,18 +36,18 @@ public:
     void createContent(int width, int height, Canvas& canvas) override {
         canvas.drawColor(Color::Grey_200, SkBlendMode::kSrcOver);
 
-        sk_sp<Bitmap> hardwareBitmap = BitmapAllocationTestUtils::allocateHardwareBitmap(200, 200,
-                kRGB_565_SkColorType, [](SkBitmap& skBitmap) {
-            skBitmap.eraseColor(Color::White);
-            SkCanvas skCanvas(skBitmap);
-            SkPaint skPaint;
-            skPaint.setColor(Color::Red_500);
-            skCanvas.drawRect(SkRect::MakeWH(100, 100), skPaint);
-            skPaint.setColor(Color::Blue_500);
-            skCanvas.drawRect(SkRect::MakeXYWH(100, 100, 100, 100), skPaint);
-        });
+        sk_sp<Bitmap> hardwareBitmap = BitmapAllocationTestUtils::allocateHardwareBitmap(
+                200, 200, kRGB_565_SkColorType, [](SkBitmap& skBitmap) {
+                    skBitmap.eraseColor(Color::White);
+                    SkCanvas skCanvas(skBitmap);
+                    SkPaint skPaint;
+                    skPaint.setColor(Color::Red_500);
+                    skCanvas.drawRect(SkRect::MakeWH(100, 100), skPaint);
+                    skPaint.setColor(Color::Blue_500);
+                    skCanvas.drawRect(SkRect::MakeXYWH(100, 100, 100, 100), skPaint);
+                });
         canvas.drawBitmap(*hardwareBitmap, 10.0f, 10.0f, nullptr);
     }
 
-    void doFrame(int frameNr) override { }
+    void doFrame(int frameNr) override {}
 };

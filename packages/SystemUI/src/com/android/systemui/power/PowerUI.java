@@ -16,70 +16,162 @@
 
 package com.android.systemui.power;
 
-import android.app.NotificationManager;
 import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.res.Resources;
+import android.content.pm.ActivityInfo;
+import android.content.res.Configuration;
 import android.database.ContentObserver;
 import android.os.BatteryManager;
 import android.os.Handler;
-import android.os.HardwarePropertiesManager;
+import android.os.IThermalEventListener;
+import android.os.IThermalService;
 import android.os.PowerManager;
+import android.os.RemoteException;
+import android.os.ServiceManager;
 import android.os.SystemClock;
+import android.os.Temperature;
 import android.os.UserHandle;
 import android.provider.Settings;
-import android.text.TextUtils;
+import android.service.vr.IVrManager;
+import android.service.vr.IVrStateCallbacks;
 import android.text.format.DateUtils;
 import android.util.Log;
 import android.util.Slog;
-import com.android.internal.logging.MetricsLogger;
-import com.android.systemui.R;
-import com.android.systemui.SystemUI;
-import com.android.systemui.statusbar.phone.StatusBar;
-import java.io.FileDescriptor;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import com.android.internal.annotations.VisibleForTesting;
+import com.android.settingslib.fuelgauge.Estimate;
+import com.android.settingslib.utils.ThreadUtils;
+import com.android.systemui.CoreStartable;
+import com.android.systemui.broadcast.BroadcastDispatcher;
+import com.android.systemui.dagger.SysUISingleton;
+import com.android.systemui.keyguard.WakefulnessLifecycle;
+import com.android.systemui.res.R;
+import com.android.systemui.settings.UserTracker;
+import com.android.systemui.statusbar.CommandQueue;
+import com.android.systemui.statusbar.policy.ConfigurationController;
+
 import java.io.PrintWriter;
 import java.util.Arrays;
+import java.util.concurrent.Future;
 
-public class PowerUI extends SystemUI {
+import javax.inject.Inject;
+
+@SysUISingleton
+public class PowerUI implements
+        CoreStartable,
+        ConfigurationController.ConfigurationListener,
+        CommandQueue.Callbacks {
+
     static final String TAG = "PowerUI";
     static final boolean DEBUG = Log.isLoggable(TAG, Log.DEBUG);
     private static final long TEMPERATURE_INTERVAL = 30 * DateUtils.SECOND_IN_MILLIS;
     private static final long TEMPERATURE_LOGGING_INTERVAL = DateUtils.HOUR_IN_MILLIS;
     private static final int MAX_RECENT_TEMPS = 125; // TEMPERATURE_LOGGING_INTERVAL plus a buffer
+    static final long THREE_HOURS_IN_MILLIS = DateUtils.HOUR_IN_MILLIS * 3;
+    private static final int CHARGE_CYCLE_PERCENT_RESET = 30;
+    public static final int NO_ESTIMATE_AVAILABLE = -1;
+    private static final String BOOT_COUNT_KEY = "boot_count";
+    private static final String PREFS = "powerui_prefs";
 
     private final Handler mHandler = new Handler();
-    private final Receiver mReceiver = new Receiver();
+    @VisibleForTesting
+    final Receiver mReceiver = new Receiver();
 
-    private PowerManager mPowerManager;
-    private HardwarePropertiesManager mHardwarePropertiesManager;
-    private WarningsUI mWarnings;
-    private int mBatteryLevel = 100;
-    private int mBatteryStatus = BatteryManager.BATTERY_STATUS_UNKNOWN;
+    private final PowerManager mPowerManager;
+    private final WarningsUI mWarnings;
+    private final WakefulnessLifecycle mWakefulnessLifecycle;
+    private final UserTracker mUserTracker;
+    private InattentiveSleepWarningView mOverlayView;
+    private final Configuration mLastConfiguration = new Configuration();
     private int mPlugType = 0;
     private int mInvalidCharger = 0;
+    private final EnhancedEstimates mEnhancedEstimates;
+    private Future mLastShowWarningTask;
+    private boolean mEnableSkinTemperatureWarning;
+    private boolean mEnableUsbTemperatureAlarm;
 
     private int mLowBatteryAlertCloseLevel;
     private final int[] mLowBatteryReminderLevels = new int[2];
 
     private long mScreenOffTime = -1;
 
-    private float mThresholdTemp;
-    private float[] mRecentTemps = new float[MAX_RECENT_TEMPS];
-    private int mNumTemps;
-    private long mNextLogTime;
+    @VisibleForTesting boolean mLowWarningShownThisChargeCycle;
+    @VisibleForTesting boolean mSevereWarningShownThisChargeCycle;
+    @VisibleForTesting BatteryStateSnapshot mCurrentBatteryStateSnapshot;
+    @VisibleForTesting BatteryStateSnapshot mLastBatteryStateSnapshot;
+    @VisibleForTesting IThermalService mThermalService;
+
+    @VisibleForTesting int mBatteryLevel = 100;
+    @VisibleForTesting int mBatteryStatus = BatteryManager.BATTERY_STATUS_UNKNOWN;
+
+    private boolean mInVrMode;
+
+    private IThermalEventListener mSkinThermalEventListener;
+    private IThermalEventListener mUsbThermalEventListener;
+    private final Context mContext;
+    private final BroadcastDispatcher mBroadcastDispatcher;
+    private final CommandQueue mCommandQueue;
+    @Nullable
+    private final IVrManager mVrManager;
+    private final WakefulnessLifecycle.Observer mWakefulnessObserver =
+            new WakefulnessLifecycle.Observer() {
+                @Override
+                public void onStartedWakingUp() {
+                    mScreenOffTime = -1;
+                }
+
+                @Override
+                public void onFinishedGoingToSleep() {
+                    mScreenOffTime = SystemClock.elapsedRealtime();
+                }
+            };
+
+    private final UserTracker.Callback mUserChangedCallback =
+            new UserTracker.Callback() {
+                @Override
+                public void onUserChanged(int newUser, @NonNull Context userContext) {
+                    mWarnings.userSwitched();
+                }
+            };
+
+    private final IVrStateCallbacks mVrStateCallbacks = new IVrStateCallbacks.Stub() {
+        @Override
+        public void onVrStateChanged(boolean enabled) {
+            mInVrMode = enabled;
+        }
+    };
+
+    @Inject
+    public PowerUI(
+            Context context,
+            BroadcastDispatcher broadcastDispatcher,
+            CommandQueue commandQueue,
+            @Nullable IVrManager vrManager,
+            WarningsUI warningsUI,
+            EnhancedEstimates enhancedEstimates,
+            WakefulnessLifecycle wakefulnessLifecycle,
+            PowerManager powerManager,
+            UserTracker userTracker) {
+        mContext = context;
+        mBroadcastDispatcher = broadcastDispatcher;
+        mCommandQueue = commandQueue;
+        mVrManager = vrManager;
+        mWarnings = warningsUI;
+        mEnhancedEstimates = enhancedEstimates;
+        mPowerManager = powerManager;
+        mWakefulnessLifecycle = wakefulnessLifecycle;
+        mUserTracker = userTracker;
+    }
 
     public void start() {
-        mPowerManager = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
-        mHardwarePropertiesManager = (HardwarePropertiesManager)
-                mContext.getSystemService(Context.HARDWARE_PROPERTIES_SERVICE);
         mScreenOffTime = mPowerManager.isScreenOn() ? -1 : SystemClock.elapsedRealtime();
-        mWarnings = new PowerNotificationWarnings(
-                mContext,
-                (NotificationManager) mContext.getSystemService(Context.NOTIFICATION_SERVICE),
-                getComponent(StatusBar.class));
+        mLastConfiguration.setTo(mContext.getResources().getConfiguration());
 
         ContentObserver obs = new ContentObserver(mHandler) {
             @Override
@@ -89,30 +181,67 @@ public class PowerUI extends SystemUI {
         };
         final ContentResolver resolver = mContext.getContentResolver();
         resolver.registerContentObserver(Settings.Global.getUriFor(
-                Settings.Global.LOW_POWER_MODE_TRIGGER_LEVEL),
+                        Settings.Global.LOW_POWER_MODE_TRIGGER_LEVEL),
                 false, obs, UserHandle.USER_ALL);
         updateBatteryWarningLevels();
         mReceiver.init();
+        mUserTracker.addCallback(mUserChangedCallback, mContext.getMainExecutor());
+        mWakefulnessLifecycle.addObserver(mWakefulnessObserver);
 
         // Check to see if we need to let the user know that the phone previously shut down due
         // to the temperature being too high.
-        showThermalShutdownDialog();
+        showWarnOnThermalShutdown();
 
-        initTemperatureWarning();
+        // Register an observer to configure mEnableSkinTemperatureWarning and perform the
+        // registration of skin thermal event listener upon Settings change.
+        resolver.registerContentObserver(
+                Settings.Global.getUriFor(Settings.Global.SHOW_TEMPERATURE_WARNING),
+                false /*notifyForDescendants*/,
+                new ContentObserver(mHandler) {
+                    @Override
+                    public void onChange(boolean selfChange) {
+                        doSkinThermalEventListenerRegistration();
+                    }
+                });
+        // Register an observer to configure mEnableUsbTemperatureAlarm and perform the
+        // registration of usb thermal event listener upon Settings change.
+        resolver.registerContentObserver(
+                Settings.Global.getUriFor(Settings.Global.SHOW_USB_TEMPERATURE_ALARM),
+                false /*notifyForDescendants*/,
+                new ContentObserver(mHandler) {
+                    @Override
+                    public void onChange(boolean selfChange) {
+                        doUsbThermalEventListenerRegistration();
+                    }
+                });
+        initThermalEventListeners();
+        mCommandQueue.addCallback(this);
+
+        if (mVrManager != null) {
+            try {
+                mVrManager.registerListener(mVrStateCallbacks);
+            } catch (RemoteException e) {
+                Slog.e(TAG, "Failed to register VR mode state listener: " + e);
+            }
+        }
+    }
+
+    @Override
+    public void onConfigChanged(Configuration newConfig) {
+        final int mask = ActivityInfo.CONFIG_MCC | ActivityInfo.CONFIG_MNC;
+
+        // Safe to modify mLastConfiguration here as it's only updated by the main thread (here).
+        if ((mLastConfiguration.updateFrom(newConfig) & mask) != 0) {
+            mHandler.post(this::initThermalEventListeners);
+        }
     }
 
     void updateBatteryWarningLevels() {
         int critLevel = mContext.getResources().getInteger(
                 com.android.internal.R.integer.config_criticalBatteryWarningLevel);
-
-        final ContentResolver resolver = mContext.getContentResolver();
-        int defWarnLevel = mContext.getResources().getInteger(
+        int warnLevel = mContext.getResources().getInteger(
                 com.android.internal.R.integer.config_lowBatteryWarningLevel);
-        int warnLevel = Settings.Global.getInt(resolver,
-                Settings.Global.LOW_POWER_MODE_TRIGGER_LEVEL, defWarnLevel);
-        if (warnLevel == 0) {
-            warnLevel = defWarnLevel;
-        }
+
         if (warnLevel < critLevel) {
             warnLevel = critLevel;
         }
@@ -132,7 +261,8 @@ public class PowerUI extends SystemUI {
      *
      * 1 means that the battery is "ok"
      * 0 means that the battery is between "ok" and what we should warn about.
-     * less than 0 means that the battery is low
+     * less than 0 means that the battery is low, -1 means the battery is reaching warning level,
+     * -2 means the battery is reaching severe level.
      */
     private int findBatteryLevelBucket(int level) {
         if (level >= mLowBatteryAlertCloseLevel) {
@@ -150,22 +280,41 @@ public class PowerUI extends SystemUI {
         throw new RuntimeException("not possible!");
     }
 
-    private final class Receiver extends BroadcastReceiver {
+    @VisibleForTesting
+    final class Receiver extends BroadcastReceiver {
+
+        private boolean mHasReceivedBattery = false;
 
         public void init() {
             // Register for Intent broadcasts for...
             IntentFilter filter = new IntentFilter();
+            filter.addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED);
             filter.addAction(Intent.ACTION_BATTERY_CHANGED);
-            filter.addAction(Intent.ACTION_SCREEN_OFF);
-            filter.addAction(Intent.ACTION_SCREEN_ON);
-            filter.addAction(Intent.ACTION_USER_SWITCHED);
-            mContext.registerReceiver(this, filter, null, mHandler);
+            mBroadcastDispatcher.registerReceiverWithHandler(this, filter, mHandler);
+            // Force get initial values. Relying on Sticky behavior until API for getting info.
+            if (!mHasReceivedBattery) {
+                // Get initial state
+                Intent intent = mContext.registerReceiver(
+                        null,
+                        new IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+                );
+                if (intent != null) {
+                    onReceive(mContext, intent);
+                }
+            }
         }
 
         @Override
         public void onReceive(Context context, Intent intent) {
             String action = intent.getAction();
-            if (action.equals(Intent.ACTION_BATTERY_CHANGED)) {
+            if (PowerManager.ACTION_POWER_SAVE_MODE_CHANGED.equals(action)) {
+                ThreadUtils.postOnBackgroundThread(() -> {
+                    if (mPowerManager.isPowerSaveMode()) {
+                        mWarnings.dismissLowBatteryWarning();
+                    }
+                });
+            } else if (Intent.ACTION_BATTERY_CHANGED.equals(action)) {
+                mHasReceivedBattery = true;
                 final int oldBatteryLevel = mBatteryLevel;
                 mBatteryLevel = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, 100);
                 final int oldBatteryStatus = mBatteryStatus;
@@ -175,6 +324,7 @@ public class PowerUI extends SystemUI {
                 mPlugType = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 1);
                 final int oldInvalidCharger = mInvalidCharger;
                 mInvalidCharger = intent.getIntExtra(BatteryManager.EXTRA_INVALID_CHARGER, 0);
+                mLastBatteryStateSnapshot = mCurrentBatteryStateSnapshot;
 
                 final boolean plugged = mPlugType != 0;
                 final boolean oldPlugged = oldPlugType != 0;
@@ -203,144 +353,308 @@ public class PowerUI extends SystemUI {
                     mWarnings.dismissInvalidChargerWarning();
                 } else if (mWarnings.isInvalidChargerWarningShowing()) {
                     // if invalid charger is showing, don't show low battery
+                    if (DEBUG) {
+                        Slog.d(TAG, "Bad Charger");
+                    }
                     return;
                 }
 
-                boolean isPowerSaver = mPowerManager.isPowerSaveMode();
-                if (!plugged
-                        && !isPowerSaver
-                        && (bucket < oldBucket || oldPlugged)
-                        && mBatteryStatus != BatteryManager.BATTERY_STATUS_UNKNOWN
-                        && bucket < 0) {
-                    // only play SFX when the dialog comes up or the bucket changes
-                    final boolean playSound = bucket != oldBucket || oldPlugged;
-                    mWarnings.showLowBatteryWarning(playSound);
-                } else if (isPowerSaver || plugged || (bucket > oldBucket && bucket > 0)) {
-                    mWarnings.dismissLowBatteryWarning();
-                } else {
-                    mWarnings.updateLowBatteryWarning();
+                // Show the correct version of low battery warning if needed
+                if (mLastShowWarningTask != null) {
+                    mLastShowWarningTask.cancel(true);
+                    if (DEBUG) {
+                        Slog.d(TAG, "cancelled task");
+                    }
                 }
-            } else if (Intent.ACTION_SCREEN_OFF.equals(action)) {
-                mScreenOffTime = SystemClock.elapsedRealtime();
-            } else if (Intent.ACTION_SCREEN_ON.equals(action)) {
-                mScreenOffTime = -1;
-            } else if (Intent.ACTION_USER_SWITCHED.equals(action)) {
-                mWarnings.userSwitched();
+                mLastShowWarningTask = ThreadUtils.postOnBackgroundThread(() -> {
+                    maybeShowBatteryWarningV2(
+                            plugged, bucket);
+                });
+
             } else {
                 Slog.w(TAG, "unknown intent: " + intent);
             }
         }
-    };
+    }
 
-    private void initTemperatureWarning() {
-        ContentResolver resolver = mContext.getContentResolver();
-        Resources resources = mContext.getResources();
-        if (Settings.Global.getInt(resolver, Settings.Global.SHOW_TEMPERATURE_WARNING,
-                resources.getInteger(R.integer.config_showTemperatureWarning)) == 0) {
-            return;
+    protected void maybeShowBatteryWarningV2(boolean plugged, int bucket) {
+        final boolean hybridEnabled = mEnhancedEstimates.isHybridNotificationEnabled();
+        final boolean isPowerSaverMode = mPowerManager.isPowerSaveMode();
+
+        // Stick current battery state into an immutable container to determine if we should show
+        // a warning.
+        if (DEBUG) {
+            Slog.d(TAG, "evaluating which notification to show");
         }
-
-        mThresholdTemp = Settings.Global.getFloat(resolver, Settings.Global.WARNING_TEMPERATURE,
-                resources.getInteger(R.integer.config_warningTemperature));
-
-        if (mThresholdTemp < 0f) {
-            // Get the throttling temperature. No need to check if we're not throttling.
-            float[] throttlingTemps = mHardwarePropertiesManager.getDeviceTemperatures(
-                    HardwarePropertiesManager.DEVICE_TEMPERATURE_SKIN,
-                    HardwarePropertiesManager.TEMPERATURE_THROTTLING);
-            if (throttlingTemps == null
-                    || throttlingTemps.length == 0
-                    || throttlingTemps[0] == HardwarePropertiesManager.UNDEFINED_TEMPERATURE) {
-                return;
+        if (hybridEnabled) {
+            if (DEBUG) {
+                Slog.d(TAG, "using hybrid");
             }
-            mThresholdTemp = throttlingTemps[0];
+            Estimate estimate = refreshEstimateIfNeeded();
+            mCurrentBatteryStateSnapshot = new BatteryStateSnapshot(mBatteryLevel, isPowerSaverMode,
+                    plugged, bucket, mBatteryStatus, mLowBatteryReminderLevels[1],
+                    mLowBatteryReminderLevels[0], estimate.getEstimateMillis(),
+                    estimate.getAverageDischargeTime(),
+                    mEnhancedEstimates.getSevereWarningThreshold(),
+                    mEnhancedEstimates.getLowWarningThreshold(), estimate.isBasedOnUsage(),
+                    mEnhancedEstimates.getLowWarningEnabled());
+        } else {
+            if (DEBUG) {
+                Slog.d(TAG, "using standard");
+            }
+            mCurrentBatteryStateSnapshot = new BatteryStateSnapshot(mBatteryLevel, isPowerSaverMode,
+                    plugged, bucket, mBatteryStatus, mLowBatteryReminderLevels[1],
+                    mLowBatteryReminderLevels[0]);
         }
-        setNextLogTime();
 
-        // We have passed all of the checks, start checking the temp
-        updateTemperatureWarning();
+        mWarnings.updateSnapshot(mCurrentBatteryStateSnapshot);
+        maybeShowHybridWarning(mCurrentBatteryStateSnapshot, mLastBatteryStateSnapshot);
     }
 
-    private void showThermalShutdownDialog() {
-        if (mPowerManager.getLastShutdownReason()
-                == PowerManager.SHUTDOWN_REASON_THERMAL_SHUTDOWN) {
-            mWarnings.showThermalShutdownWarning();
+    // updates the time estimate if we don't have one or battery level has changed.
+    @VisibleForTesting
+    Estimate refreshEstimateIfNeeded() {
+        if (mLastBatteryStateSnapshot == null
+                || mLastBatteryStateSnapshot.getTimeRemainingMillis() == NO_ESTIMATE_AVAILABLE
+                || mBatteryLevel != mLastBatteryStateSnapshot.getBatteryLevel()) {
+            final Estimate estimate = mEnhancedEstimates.getEstimate();
+            if (DEBUG) {
+                Slog.d(TAG, "updated estimate: " + estimate.getEstimateMillis());
+            }
+            return estimate;
         }
+        return new Estimate(mLastBatteryStateSnapshot.getTimeRemainingMillis(),
+                mLastBatteryStateSnapshot.isBasedOnUsage(),
+                mLastBatteryStateSnapshot.getAverageTimeToDischargeMillis());
     }
 
-    private void updateTemperatureWarning() {
-        float[] temps = mHardwarePropertiesManager.getDeviceTemperatures(
-                HardwarePropertiesManager.DEVICE_TEMPERATURE_SKIN,
-                HardwarePropertiesManager.TEMPERATURE_CURRENT);
-        if (temps.length != 0) {
-            float temp = temps[0];
-            mRecentTemps[mNumTemps++] = temp;
+    @VisibleForTesting
+    void maybeShowHybridWarning(BatteryStateSnapshot currentSnapshot,
+            BatteryStateSnapshot lastSnapshot) {
+        // if we are now over 30% battery, we can trigger hybrid notification again
+        if (currentSnapshot.getBatteryLevel() >= CHARGE_CYCLE_PERCENT_RESET) {
+            mLowWarningShownThisChargeCycle = false;
+            mSevereWarningShownThisChargeCycle = false;
+            if (DEBUG) {
+                Slog.d(TAG, "Charge cycle reset! Can show warnings again");
+            }
+        }
 
-            StatusBar statusBar = getComponent(StatusBar.class);
-            if (statusBar != null && !statusBar.isDeviceInVrMode()
-                    && temp >= mThresholdTemp) {
-                logAtTemperatureThreshold(temp);
-                mWarnings.showHighTemperatureWarning();
+        final boolean playSound = currentSnapshot.getBucket() != lastSnapshot.getBucket()
+                || lastSnapshot.getPlugged();
+
+        if (shouldShowHybridWarning(currentSnapshot)) {
+            mWarnings.showLowBatteryWarning(playSound);
+            // mark if we've already shown a warning this cycle. This will prevent the notification
+            // trigger from spamming users by only showing low/critical warnings once per cycle
+            if (currentSnapshot.getBatteryLevel() <= currentSnapshot.getSevereLevelThreshold()) {
+                mSevereWarningShownThisChargeCycle = true;
+                mLowWarningShownThisChargeCycle = true;
+                if (DEBUG) {
+                    Slog.d(TAG, "Severe warning marked as shown this cycle");
+                }
             } else {
-                mWarnings.dismissHighTemperatureWarning();
+                Slog.d(TAG, "Low warning marked as shown this cycle");
+                mLowWarningShownThisChargeCycle = true;
+            }
+        } else if (shouldDismissHybridWarning(currentSnapshot)) {
+            if (DEBUG) {
+                Slog.d(TAG, "Dismissing warning");
+            }
+            mWarnings.dismissLowBatteryWarning();
+        } else {
+            if (DEBUG) {
+                Slog.d(TAG, "Updating warning");
+            }
+            mWarnings.updateLowBatteryWarning();
+        }
+    }
+
+    @VisibleForTesting
+    boolean shouldShowHybridWarning(BatteryStateSnapshot snapshot) {
+        if (snapshot.getPlugged()
+                || snapshot.getBatteryStatus() == BatteryManager.BATTERY_STATUS_UNKNOWN) {
+            Slog.d(TAG, "can't show warning due to - plugged: " + snapshot.getPlugged()
+                    + " status unknown: "
+                    + (snapshot.getBatteryStatus() == BatteryManager.BATTERY_STATUS_UNKNOWN));
+            return false;
+        }
+
+        // Only show the low warning if enabled once per charge cycle & no battery saver
+        final boolean canShowWarning = !mLowWarningShownThisChargeCycle && !snapshot.isPowerSaver()
+                && snapshot.getBatteryLevel() <= snapshot.getLowLevelThreshold();
+
+        // Only show the severe warning once per charge cycle
+        final boolean canShowSevereWarning = !mSevereWarningShownThisChargeCycle
+                && snapshot.getBatteryLevel() <= snapshot.getSevereLevelThreshold();
+
+        final boolean canShow = canShowWarning || canShowSevereWarning;
+
+        if (DEBUG) {
+            Slog.d(TAG, "Enhanced trigger is: " + canShow + "\nwith battery snapshot:"
+                    + " mLowWarningShownThisChargeCycle: " + mLowWarningShownThisChargeCycle
+                    + " mSevereWarningShownThisChargeCycle: " + mSevereWarningShownThisChargeCycle
+                    + "\n" + snapshot.toString());
+        }
+        return canShow;
+    }
+
+    @VisibleForTesting
+    boolean shouldDismissHybridWarning(BatteryStateSnapshot snapshot) {
+        return snapshot.getPlugged()
+                || snapshot.getBatteryLevel()
+                > snapshot.getLowLevelThreshold();
+    }
+
+    protected void maybeShowBatteryWarning(
+            BatteryStateSnapshot currentSnapshot,
+            BatteryStateSnapshot lastSnapshot) {
+        final boolean playSound = currentSnapshot.getBucket() != lastSnapshot.getBucket()
+                || lastSnapshot.getPlugged();
+
+        if (shouldShowLowBatteryWarning(currentSnapshot, lastSnapshot)) {
+            mWarnings.showLowBatteryWarning(playSound);
+        } else if (shouldDismissLowBatteryWarning(currentSnapshot, lastSnapshot)) {
+            mWarnings.dismissLowBatteryWarning();
+        } else {
+            mWarnings.updateLowBatteryWarning();
+        }
+    }
+
+    @VisibleForTesting
+    boolean shouldShowLowBatteryWarning(
+            BatteryStateSnapshot currentSnapshot,
+            BatteryStateSnapshot lastSnapshot) {
+        return !currentSnapshot.getPlugged()
+                && !currentSnapshot.isPowerSaver()
+                && (((currentSnapshot.getBucket() < lastSnapshot.getBucket()
+                        || lastSnapshot.getPlugged())
+                && currentSnapshot.getBucket() < 0))
+                && currentSnapshot.getBatteryStatus() != BatteryManager.BATTERY_STATUS_UNKNOWN;
+    }
+
+    @VisibleForTesting
+    boolean shouldDismissLowBatteryWarning(
+            BatteryStateSnapshot currentSnapshot,
+            BatteryStateSnapshot lastSnapshot) {
+        return currentSnapshot.isPowerSaver()
+                || currentSnapshot.getPlugged()
+                || (currentSnapshot.getBucket() > lastSnapshot.getBucket()
+                        && currentSnapshot.getBucket() > 0);
+    }
+
+    private void initThermalEventListeners() {
+        doSkinThermalEventListenerRegistration();
+        doUsbThermalEventListenerRegistration();
+    }
+
+    @VisibleForTesting
+    synchronized void doSkinThermalEventListenerRegistration() {
+        final boolean oldEnableSkinTemperatureWarning = mEnableSkinTemperatureWarning;
+        boolean ret = false;
+
+        mEnableSkinTemperatureWarning = Settings.Global.getInt(mContext.getContentResolver(),
+            Settings.Global.SHOW_TEMPERATURE_WARNING,
+            mContext.getResources().getInteger(R.integer.config_showTemperatureWarning)) != 0;
+
+        if (mEnableSkinTemperatureWarning != oldEnableSkinTemperatureWarning) {
+            try {
+                if (mSkinThermalEventListener == null) {
+                    mSkinThermalEventListener = new SkinThermalEventListener();
+                }
+                if (mThermalService == null) {
+                    mThermalService = IThermalService.Stub.asInterface(
+                        ServiceManager.getService(Context.THERMAL_SERVICE));
+                }
+                if (mEnableSkinTemperatureWarning) {
+                    ret = mThermalService.registerThermalEventListenerWithType(
+                            mSkinThermalEventListener, Temperature.TYPE_SKIN);
+                } else {
+                    ret = mThermalService.unregisterThermalEventListener(mSkinThermalEventListener);
+                }
+            } catch (RemoteException e) {
+                Slog.e(TAG, "Exception while (un)registering skin thermal event listener.", e);
+            }
+
+            if (!ret) {
+                mEnableSkinTemperatureWarning = !mEnableSkinTemperatureWarning;
+                Slog.e(TAG, "Failed to register or unregister skin thermal event listener.");
             }
         }
-
-        logTemperatureStats();
-
-        mHandler.postDelayed(this::updateTemperatureWarning, TEMPERATURE_INTERVAL);
     }
 
-    private void logAtTemperatureThreshold(float temp) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("currentTemp=").append(temp)
-                .append(",thresholdTemp=").append(mThresholdTemp)
-                .append(",batteryStatus=").append(mBatteryStatus)
-                .append(",recentTemps=");
-        for (int i = 0; i < mNumTemps; i++) {
-            sb.append(mRecentTemps[i]).append(',');
-        }
-        Slog.i(TAG, sb.toString());
-    }
+    @VisibleForTesting
+    synchronized void doUsbThermalEventListenerRegistration() {
+        final boolean oldEnableUsbTemperatureAlarm = mEnableUsbTemperatureAlarm;
+        boolean ret = false;
 
-    /**
-     * Calculates and logs min, max, and average
-     * {@link HardwarePropertiesManager#DEVICE_TEMPERATURE_SKIN} over the past
-     * {@link #TEMPERATURE_LOGGING_INTERVAL}.
-     */
-    private void logTemperatureStats() {
-        if (mNextLogTime > System.currentTimeMillis() && mNumTemps != MAX_RECENT_TEMPS) {
-            return;
-        }
+        mEnableUsbTemperatureAlarm = Settings.Global.getInt(mContext.getContentResolver(),
+            Settings.Global.SHOW_USB_TEMPERATURE_ALARM,
+            mContext.getResources().getInteger(R.integer.config_showUsbPortAlarm)) != 0;
 
-        if (mNumTemps > 0) {
-            float sum = mRecentTemps[0], min = mRecentTemps[0], max = mRecentTemps[0];
-            for (int i = 1; i < mNumTemps; i++) {
-                float temp = mRecentTemps[i];
-                sum += temp;
-                if (temp > max) {
-                    max = temp;
+        if (mEnableUsbTemperatureAlarm != oldEnableUsbTemperatureAlarm) {
+            try {
+                if (mUsbThermalEventListener == null) {
+                    mUsbThermalEventListener = new UsbThermalEventListener();
                 }
-                if (temp < min) {
-                    min = temp;
+                if (mThermalService == null) {
+                    mThermalService = IThermalService.Stub.asInterface(
+                        ServiceManager.getService(Context.THERMAL_SERVICE));
                 }
+                if (mEnableUsbTemperatureAlarm) {
+                    ret = mThermalService.registerThermalEventListenerWithType(
+                            mUsbThermalEventListener, Temperature.TYPE_USB_PORT);
+                } else {
+                    ret = mThermalService.unregisterThermalEventListener(mUsbThermalEventListener);
+                }
+            } catch (RemoteException e) {
+                Slog.e(TAG, "Exception while (un)registering usb thermal event listener.", e);
             }
 
-            float avg = sum / mNumTemps;
-            Slog.i(TAG, "avg=" + avg + ",min=" + min + ",max=" + max);
-            MetricsLogger.histogram(mContext, "device_skin_temp_avg", (int) avg);
-            MetricsLogger.histogram(mContext, "device_skin_temp_min", (int) min);
-            MetricsLogger.histogram(mContext, "device_skin_temp_max", (int) max);
+            if (!ret) {
+                mEnableUsbTemperatureAlarm = !mEnableUsbTemperatureAlarm;
+                Slog.e(TAG, "Failed to register or unregister usb thermal event listener.");
+            }
         }
-        setNextLogTime();
-        mNumTemps = 0;
     }
 
-    private void setNextLogTime() {
-        mNextLogTime = System.currentTimeMillis() + TEMPERATURE_LOGGING_INTERVAL;
+    private void showWarnOnThermalShutdown() {
+        int bootCount = -1;
+        int lastReboot = mContext.getSharedPreferences(PREFS, 0).getInt(BOOT_COUNT_KEY, -1);
+        try {
+            bootCount = Settings.Global.getInt(mContext.getContentResolver(),
+                    Settings.Global.BOOT_COUNT);
+        } catch (Settings.SettingNotFoundException e) {
+            Slog.e(TAG, "Failed to read system boot count from Settings.Global.BOOT_COUNT");
+        }
+        // Only show the thermal shutdown warning when there is a thermal reboot.
+        if (bootCount > lastReboot) {
+            mContext.getSharedPreferences(PREFS, 0).edit().putInt(BOOT_COUNT_KEY,
+                    bootCount).apply();
+            if (mPowerManager.getLastShutdownReason()
+                    == PowerManager.SHUTDOWN_REASON_THERMAL_SHUTDOWN) {
+                mWarnings.showThermalShutdownWarning();
+            }
+        }
     }
 
-    public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+    @Override
+    public void showInattentiveSleepWarning() {
+        if (mOverlayView == null) {
+            mOverlayView = new InattentiveSleepWarningView(mContext);
+        }
+
+        mOverlayView.show();
+    }
+
+    @Override
+    public void dismissInattentiveSleepWarning(boolean animated) {
+        if (mOverlayView != null) {
+            mOverlayView.dismiss(animated);
+        }
+    }
+
+    public void dump(PrintWriter pw, String[] args) {
         pw.print("mLowBatteryAlertCloseLevel=");
         pw.println(mLowBatteryAlertCloseLevel);
         pw.print("mLowBatteryReminderLevels=");
@@ -366,26 +680,93 @@ public class PowerUI extends SystemUI {
                 Settings.Global.LOW_BATTERY_SOUND_TIMEOUT, 0));
         pw.print("bucket: ");
         pw.println(Integer.toString(findBatteryLevelBucket(mBatteryLevel)));
-        pw.print("mThresholdTemp=");
-        pw.println(Float.toString(mThresholdTemp));
-        pw.print("mNextLogTime=");
-        pw.println(Long.toString(mNextLogTime));
+        pw.print("mEnableSkinTemperatureWarning=");
+        pw.println(mEnableSkinTemperatureWarning);
+        pw.print("mEnableUsbTemperatureAlarm=");
+        pw.println(mEnableUsbTemperatureAlarm);
         mWarnings.dump(pw);
     }
 
+    /**
+     * The interface to allow PowerUI to communicate with whatever implementation of WarningsUI
+     * is being used by the system.
+     */
     public interface WarningsUI {
+
+        /**
+         * Updates battery and screen info for determining whether to trigger battery warnings or
+         * not.
+         * @param batteryLevel The current battery level
+         * @param bucket The current battery bucket
+         * @param screenOffTime How long the screen has been off in millis
+         */
         void update(int batteryLevel, int bucket, long screenOffTime);
+
         void dismissLowBatteryWarning();
+
         void showLowBatteryWarning(boolean playSound);
+
         void dismissInvalidChargerWarning();
+
         void showInvalidChargerWarning();
+
         void updateLowBatteryWarning();
+
         boolean isInvalidChargerWarningShowing();
+
         void dismissHighTemperatureWarning();
+
         void showHighTemperatureWarning();
+
+        /**
+         * Display USB port overheat alarm
+         */
+        void showUsbHighTemperatureAlarm();
+
         void showThermalShutdownWarning();
+
         void dump(PrintWriter pw);
+
         void userSwitched();
+
+        /**
+         * Updates the snapshot of battery state used for evaluating battery warnings
+         * @param snapshot object containing relevant values for making battery warning decisions.
+         */
+        void updateSnapshot(BatteryStateSnapshot snapshot);
+    }
+
+    // Skin thermal event received from thermal service manager subsystem
+    @VisibleForTesting
+    final class SkinThermalEventListener extends IThermalEventListener.Stub {
+        @Override public void notifyThrottling(Temperature temp) {
+            int status = temp.getStatus();
+
+            if (status >= Temperature.THROTTLING_EMERGENCY) {
+                if (!mInVrMode) {
+                    mWarnings.showHighTemperatureWarning();
+                    Slog.d(TAG, "SkinThermalEventListener: notifyThrottling was called "
+                            + ", current skin status = " + status
+                            + ", temperature = " + temp.getValue());
+                }
+            } else {
+                mWarnings.dismissHighTemperatureWarning();
+            }
+        }
+    }
+
+    // Usb thermal event received from thermal service manager subsystem
+    @VisibleForTesting
+    final class UsbThermalEventListener extends IThermalEventListener.Stub {
+        @Override public void notifyThrottling(Temperature temp) {
+            int status = temp.getStatus();
+
+            if (status >= Temperature.THROTTLING_EMERGENCY) {
+                mWarnings.showUsbHighTemperatureAlarm();
+                Slog.d(TAG, "UsbThermalEventListener: notifyThrottling was called "
+                        + ", current usb port status = " + status
+                        + ", temperature = " + temp.getValue());
+            }
+        }
     }
 }
-

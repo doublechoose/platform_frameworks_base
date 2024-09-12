@@ -52,11 +52,20 @@ enum : ApiVersion {
   SDK_NOUGAT = 24,
   SDK_NOUGAT_MR1 = 25,
   SDK_O = 26,
+  SDK_O_MR1 = 27,
+  SDK_P = 28,
+  SDK_Q = 29,
+  SDK_R = 30,
+  SDK_S = 31,
+  SDK_S_V2 = 32,
+  SDK_TIRAMISU = 33,
+  SDK_UPSIDE_DOWN_CAKE = 34,
+  SDK_VANILLA_ICE_CREAM = 35,
+  SDK_CUR_DEVELOPMENT = 10000,
 };
 
 ApiVersion FindAttributeSdkLevel(const ResourceId& id);
-ApiVersion FindAttributeSdkLevel(const ResourceName& name);
-std::pair<android::StringPiece, ApiVersion> GetDevelopmentSdkCodeNameAndVersion();
+std::optional<ApiVersion> GetDevelopmentSdkCodeNameVersion(android::StringPiece code_name);
 
 }  // namespace aapt
 

@@ -15,10 +15,17 @@
  */
 #pragma once
 
+#include "HolePunch.h"
+#include "RecordingCanvas.h"
+#include "ReorderBarrierDrawables.h"
 #include "SkiaCanvas.h"
 #include "SkiaDisplayList.h"
-#include "ReorderBarrierDrawables.h"
-#include <SkLiteRecorder.h>
+#include "pipeline/skia/AnimatedDrawables.h"
+
+class SkBitmap;
+class SkMatrix;
+class SkPaint;
+class SkRRect;
 
 namespace android {
 namespace uirenderer {
@@ -29,7 +36,7 @@ namespace skiapipeline {
  * SkLiteRecorder and a SkiaDisplayList.
  */
 class SkiaRecordingCanvas : public SkiaCanvas {
- public:
+public:
     explicit SkiaRecordingCanvas(uirenderer::RenderNode* renderNode, int width, int height) {
         initDisplayList(renderNode, width, height);
     }
@@ -39,44 +46,53 @@ class SkiaRecordingCanvas : public SkiaCanvas {
     }
 
     virtual void resetRecording(int width, int height,
-            uirenderer::RenderNode* renderNode) override {
+                                uirenderer::RenderNode* renderNode = nullptr) override {
         initDisplayList(renderNode, width, height);
     }
 
-    virtual uirenderer::DisplayList* finishRecording() override;
+    virtual void punchHole(const SkRRect& rect, float alpha) override;
 
-    virtual void drawBitmap(Bitmap& bitmap, float left, float top,
-            const SkPaint* paint) override;
-    virtual void drawBitmap(Bitmap& bitmap, const SkMatrix& matrix,
-            const SkPaint* paint) override;
-    virtual void drawBitmap(Bitmap& bitmap, float srcLeft, float srcTop,
-            float srcRight, float srcBottom, float dstLeft, float dstTop,
-            float dstRight, float dstBottom, const SkPaint* paint) override;
+    virtual void finishRecording(uirenderer::RenderNode* destination) override;
+    std::unique_ptr<SkiaDisplayList> finishRecording();
+
+    virtual void drawBitmap(Bitmap& bitmap, float left, float top, const Paint* paint) override;
+    virtual void drawBitmap(Bitmap& bitmap, const SkMatrix& matrix, const Paint* paint) override;
+    virtual void drawBitmap(Bitmap& bitmap, float srcLeft, float srcTop, float srcRight,
+                            float srcBottom, float dstLeft, float dstTop, float dstRight,
+                            float dstBottom, const Paint* paint) override;
     virtual void drawNinePatch(Bitmap& hwuiBitmap, const android::Res_png_9patch& chunk,
-            float dstLeft, float dstTop, float dstRight, float dstBottom,
-            const SkPaint* paint) override;
+                               float dstLeft, float dstTop, float dstRight, float dstBottom,
+                               const Paint* paint) override;
+    virtual double drawAnimatedImage(AnimatedImageDrawable* animatedImage) override;
 
     virtual void drawRoundRect(uirenderer::CanvasPropertyPrimitive* left,
-            uirenderer::CanvasPropertyPrimitive* top, uirenderer::CanvasPropertyPrimitive* right,
-            uirenderer::CanvasPropertyPrimitive* bottom, uirenderer::CanvasPropertyPrimitive* rx,
-            uirenderer::CanvasPropertyPrimitive* ry,
-            uirenderer::CanvasPropertyPaint* paint) override;
+                               uirenderer::CanvasPropertyPrimitive* top,
+                               uirenderer::CanvasPropertyPrimitive* right,
+                               uirenderer::CanvasPropertyPrimitive* bottom,
+                               uirenderer::CanvasPropertyPrimitive* rx,
+                               uirenderer::CanvasPropertyPrimitive* ry,
+                               uirenderer::CanvasPropertyPaint* paint) override;
     virtual void drawCircle(uirenderer::CanvasPropertyPrimitive* x,
-            uirenderer::CanvasPropertyPrimitive* y, uirenderer::CanvasPropertyPrimitive* radius,
-            uirenderer::CanvasPropertyPaint* paint) override;
+                            uirenderer::CanvasPropertyPrimitive* y,
+                            uirenderer::CanvasPropertyPrimitive* radius,
+                            uirenderer::CanvasPropertyPaint* paint) override;
+    virtual void drawRipple(const RippleDrawableParams& params) override;
 
     virtual void drawVectorDrawable(VectorDrawableRoot* vectorDrawable) override;
 
-    virtual void insertReorderBarrier(bool enableReorder) override;
+    virtual void enableZ(bool enableZ) override;
+    virtual void drawMesh(const Mesh& mesh, sk_sp<SkBlender> blender, const Paint& paint) override;
     virtual void drawLayer(uirenderer::DeferredLayerUpdater* layerHandle) override;
     virtual void drawRenderNode(uirenderer::RenderNode* renderNode) override;
-    virtual void callDrawGLFunction(Functor* functor,
-                                    uirenderer::GlFunctorLifecycleListener* listener) override;
+
+    void drawWebViewFunctor(int functor) override;
 
 private:
-    SkLiteRecorder mRecorder;
+    RecordingCanvas mRecorder;
     std::unique_ptr<SkiaDisplayList> mDisplayList;
     StartReorderBarrierDrawable* mCurrentBarrier;
+
+    static void FilterForImage(SkPaint&);
 
     /**
      *  A new SkiaDisplayList is created or recycled if available.
@@ -86,8 +102,14 @@ private:
      *  @param height used to calculate recording bounds.
      */
     void initDisplayList(uirenderer::RenderNode* renderNode, int width, int height);
+
+    void handleMutableImages(Bitmap& bitmap, DrawImagePayload& payload);
+
+    void onFilterPaint(Paint& paint) override;
+
+    using INHERITED = SkiaCanvas;
 };
 
-}; // namespace skiapipeline
-}; // namespace uirenderer
-}; // namespace android
+}  // namespace skiapipeline
+}  // namespace uirenderer
+}  // namespace android

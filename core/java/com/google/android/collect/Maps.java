@@ -16,6 +16,7 @@
 
 package com.google.android.collect;
 
+import android.compat.annotation.UnsupportedAppUsage;
 import android.util.ArrayMap;
 
 import java.util.HashMap;
@@ -23,12 +24,14 @@ import java.util.HashMap;
 /**
  * Provides static methods for creating mutable {@code Maps} instances easily.
  */
+@android.ravenwood.annotation.RavenwoodKeepWholeClass
 public class Maps {
     /**
      * Creates a {@code HashMap} instance.
      *
      * @return a newly-created, initially-empty {@code HashMap}
      */
+    @UnsupportedAppUsage
     public static <K, V> HashMap<K, V> newHashMap() {
         return new HashMap<K, V>();
     }

@@ -17,15 +17,18 @@
 package android.media;
 
 import android.annotation.NonNull;
+import android.annotation.TestApi;
+import android.hardware.cas.IDescrambler;
+import android.hardware.cas.ScramblingControl;
+import android.hardware.cas.V1_0.IDescramblerBase;
 import android.media.MediaCasException.UnsupportedCasException;
-import android.os.IBinder;
-import android.os.Parcel;
-import android.os.Parcelable;
+import android.os.IHwBinder;
 import android.os.RemoteException;
 import android.os.ServiceSpecificException;
 import android.util.Log;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 
 /**
  * MediaDescrambler class can be used in conjunction with {@link android.media.MediaCodec}
@@ -40,7 +43,141 @@ import java.nio.ByteBuffer;
  */
 public final class MediaDescrambler implements AutoCloseable {
     private static final String TAG = "MediaDescrambler";
-    private IDescrambler mIDescrambler;
+    private DescramblerWrapper mIDescrambler;
+    private boolean mIsAidlHal;
+
+    private interface DescramblerWrapper {
+
+        IHwBinder asBinder();
+
+        int descramble(
+                @NonNull ByteBuffer srcBuf,
+                @NonNull ByteBuffer dstBuf,
+                @NonNull MediaCodec.CryptoInfo cryptoInfo)
+                throws RemoteException;
+
+        boolean requiresSecureDecoderComponent(@NonNull String mime) throws RemoteException;
+
+        void setMediaCasSession(byte[] sessionId) throws RemoteException;
+
+        void release() throws RemoteException;
+    };
+
+    private class AidlDescrambler implements DescramblerWrapper {
+
+        IDescrambler mAidlDescrambler;
+
+        AidlDescrambler(IDescrambler aidlDescrambler) throws Exception {
+            if (aidlDescrambler != null) {
+                mAidlDescrambler = aidlDescrambler;
+            } else {
+                throw new Exception("Descrambler could not be created");
+            }
+        }
+
+        @Override
+        public IHwBinder asBinder() {
+            return null;
+        }
+
+        @Override
+        public int descramble(
+                @NonNull ByteBuffer src,
+                @NonNull ByteBuffer dst,
+                @NonNull MediaCodec.CryptoInfo cryptoInfo)
+                throws RemoteException {
+            throw new RemoteException("Not supported");
+        }
+
+        @Override
+        public boolean requiresSecureDecoderComponent(@NonNull String mime) throws RemoteException {
+            throw new RemoteException("Not supported");
+        }
+
+        @Override
+        public void setMediaCasSession(byte[] sessionId) throws RemoteException {
+            throw new RemoteException("Not supported");
+        }
+
+        @Override
+        public void release() throws RemoteException {
+            mAidlDescrambler.release();
+        }
+    }
+
+    private class HidlDescrambler implements DescramblerWrapper {
+
+        IDescramblerBase mHidlDescrambler;
+
+        HidlDescrambler(IDescramblerBase hidlDescrambler) throws Exception {
+            if (hidlDescrambler != null) {
+                mHidlDescrambler = hidlDescrambler;
+                native_setup(hidlDescrambler.asBinder());
+            } else {
+                throw new Exception("Descrambler could not be created");
+            }
+        }
+
+        @Override
+        public IHwBinder asBinder() {
+            return mHidlDescrambler.asBinder();
+        }
+
+        @Override
+        public int descramble(
+                @NonNull ByteBuffer srcBuf,
+                @NonNull ByteBuffer dstBuf,
+                @NonNull MediaCodec.CryptoInfo cryptoInfo)
+                throws RemoteException {
+
+            try {
+                return native_descramble(
+                        cryptoInfo.key[0],
+                        cryptoInfo.key[1],
+                        cryptoInfo.numSubSamples,
+                        cryptoInfo.numBytesOfClearData,
+                        cryptoInfo.numBytesOfEncryptedData,
+                        srcBuf,
+                        srcBuf.position(),
+                        srcBuf.limit(),
+                        dstBuf,
+                        dstBuf.position(),
+                        dstBuf.limit());
+            } catch (ServiceSpecificException e) {
+                MediaCasStateException.throwExceptionIfNeeded(e.errorCode, e.getMessage());
+            } catch (RemoteException e) {
+                cleanupAndRethrowIllegalState();
+            }
+            return -1;
+        }
+
+        @Override
+        public boolean requiresSecureDecoderComponent(@NonNull String mime) throws RemoteException {
+            return mHidlDescrambler.requiresSecureDecoderComponent(mime);
+        }
+
+        @Override
+        public void setMediaCasSession(byte[] sessionId) throws RemoteException {
+            ArrayList<Byte> byteArray = new ArrayList<>();
+
+            if (sessionId != null) {
+                int length = sessionId.length;
+                byteArray = new ArrayList<Byte>(length);
+                for (int i = 0; i < length; i++) {
+                    byteArray.add(Byte.valueOf(sessionId[i]));
+                }
+            }
+
+            MediaCasStateException.throwExceptionIfNeeded(
+                    mHidlDescrambler.setMediaCasSession(byteArray));
+        }
+
+        @Override
+        public void release() throws RemoteException {
+            mHidlDescrambler.release();
+            native_release();
+        }
+    }
 
     private final void validateInternalStates() {
         if (mIDescrambler == null) {
@@ -54,39 +191,6 @@ public final class MediaDescrambler implements AutoCloseable {
     }
 
     /**
-     * Class for parceling descrambling parameters over IDescrambler binder.
-     */
-    // This class currently is not used by Java binder. descramble() goes through
-    // jni to use shared memory. However, the parcelable is still required for AIDL.
-    static class DescrambleInfo implements Parcelable {
-        private DescrambleInfo() {
-        }
-
-        private DescrambleInfo(Parcel in) {
-        }
-
-        @Override
-        public int describeContents() {
-            return 0;
-        }
-
-        @Override
-        public void writeToParcel(Parcel dest, int flags) {
-        }
-
-        public static final Parcelable.Creator<DescrambleInfo> CREATOR
-                = new Parcelable.Creator<DescrambleInfo>() {
-            public DescrambleInfo createFromParcel(Parcel in) {
-                return new DescrambleInfo(in);
-            }
-
-            public DescrambleInfo[] newArray(int size) {
-                return new DescrambleInfo[size];
-            }
-        };
-    }
-
-    /**
      * Instantiate a MediaDescrambler.
      *
      * @param CA_system_id The system id of the scrambling scheme.
@@ -95,7 +199,18 @@ public final class MediaDescrambler implements AutoCloseable {
      */
     public MediaDescrambler(int CA_system_id) throws UnsupportedCasException {
         try {
-            mIDescrambler = MediaCas.getService().createDescrambler(CA_system_id);
+            if (MediaCas.getService() != null) {
+                mIDescrambler =
+                        new AidlDescrambler(MediaCas.getService().createDescrambler(CA_system_id));
+                mIsAidlHal = true;
+            } else if (MediaCas.getServiceHidl() != null) {
+                mIDescrambler =
+                        new HidlDescrambler(
+                                MediaCas.getServiceHidl().createDescrambler(CA_system_id));
+                mIsAidlHal = false;
+            } else {
+                throw new Exception("No CAS service found!");
+            }
         } catch(Exception e) {
             Log.e(TAG, "Failed to create descrambler: " + e);
             mIDescrambler = null;
@@ -104,10 +219,19 @@ public final class MediaDescrambler implements AutoCloseable {
                 throw new UnsupportedCasException("Unsupported CA_system_id " + CA_system_id);
             }
         }
-        native_setup(mIDescrambler.asBinder());
     }
 
-    IBinder getBinder() {
+    /**
+     * Check if the underlying HAL is AIDL. For CTS testing purpose.
+     *
+     * @hide
+     */
+    @TestApi
+    public boolean isAidlHal() {
+        return mIsAidlHal;
+    }
+
+    IHwBinder getBinder() {
         validateInternalStates();
 
         return mIDescrambler.asBinder();
@@ -152,12 +276,46 @@ public final class MediaDescrambler implements AutoCloseable {
 
         try {
             mIDescrambler.setMediaCasSession(session.mSessionId);
-        } catch (ServiceSpecificException e) {
-            MediaCasStateException.throwExceptions(e);
         } catch (RemoteException e) {
             cleanupAndRethrowIllegalState();
         }
     }
+
+    /**
+     * Scramble control value indicating that the samples are not scrambled.
+     *
+     * @see #descramble(ByteBuffer, ByteBuffer, android.media.MediaCodec.CryptoInfo)
+     */
+    public static final byte SCRAMBLE_CONTROL_UNSCRAMBLED = (byte) ScramblingControl.UNSCRAMBLED;
+
+    /**
+     * Scramble control value reserved and shouldn't be used currently.
+     *
+     * @see #descramble(ByteBuffer, ByteBuffer, android.media.MediaCodec.CryptoInfo)
+     */
+    public static final byte SCRAMBLE_CONTROL_RESERVED = (byte) ScramblingControl.RESERVED;
+
+    /**
+     * Scramble control value indicating that the even key is used.
+     *
+     * @see #descramble(ByteBuffer, ByteBuffer, android.media.MediaCodec.CryptoInfo)
+     */
+    public static final byte SCRAMBLE_CONTROL_EVEN_KEY = (byte) ScramblingControl.EVENKEY;
+
+    /**
+     * Scramble control value indicating that the odd key is used.
+     *
+     * @see #descramble(ByteBuffer, ByteBuffer, android.media.MediaCodec.CryptoInfo)
+     */
+    public static final byte SCRAMBLE_CONTROL_ODD_KEY = (byte) ScramblingControl.ODDKEY;
+
+    /**
+     * Scramble flag for a hint indicating that the descrambling request is for
+     * retrieving the PES header info only.
+     *
+     * @see #descramble(ByteBuffer, ByteBuffer, android.media.MediaCodec.CryptoInfo)
+     */
+    public static final byte SCRAMBLE_FLAG_PES_HEADER = (1 << 0);
 
     /**
      * Descramble a ByteBuffer of data described by a
@@ -168,7 +326,15 @@ public final class MediaDescrambler implements AutoCloseable {
      * @param dstBuf ByteBuffer to hold the descrambled data, which starts at
      * dstBuf.position().
      * @param cryptoInfo a {@link android.media.MediaCodec.CryptoInfo} structure
-     * describing the subsamples contained in src.
+     * describing the subsamples contained in srcBuf. The iv and mode fields in
+     * CryptoInfo are not used. key[0] contains the MPEG2TS scrambling control bits
+     * (as defined in ETSI TS 100 289 (2011): "Digital Video Broadcasting (DVB);
+     * Support for use of the DVB Scrambling Algorithm version 3 within digital
+     * broadcasting systems"), and the value must be one of {@link #SCRAMBLE_CONTROL_UNSCRAMBLED},
+     * {@link #SCRAMBLE_CONTROL_RESERVED}, {@link #SCRAMBLE_CONTROL_EVEN_KEY} or
+     * {@link #SCRAMBLE_CONTROL_ODD_KEY}. key[1] is a set of bit flags, with the
+     * only possible bit being {@link #SCRAMBLE_FLAG_PES_HEADER} currently.
+     * key[2~15] are not used.
      *
      * @return number of bytes that have been successfully descrambled, with negative
      * values indicating errors.
@@ -202,15 +368,11 @@ public final class MediaDescrambler implements AutoCloseable {
         }
 
         try {
-            return native_descramble(
-                    cryptoInfo.key[0],
-                    cryptoInfo.numSubSamples,
-                    cryptoInfo.numBytesOfClearData,
-                    cryptoInfo.numBytesOfEncryptedData,
-                    srcBuf, srcBuf.position(), srcBuf.limit(),
-                    dstBuf, dstBuf.position(), dstBuf.limit());
+            return mIDescrambler.descramble(srcBuf, dstBuf, cryptoInfo);
         } catch (ServiceSpecificException e) {
-            MediaCasStateException.throwExceptions(e);
+            MediaCasStateException.throwExceptionIfNeeded(e.errorCode, e.getMessage());
+        } catch (RemoteException e) {
+            cleanupAndRethrowIllegalState();
         }
         return -1;
     }
@@ -225,7 +387,6 @@ public final class MediaDescrambler implements AutoCloseable {
                 mIDescrambler = null;
             }
         }
-        native_release();
     }
 
     @Override
@@ -234,12 +395,13 @@ public final class MediaDescrambler implements AutoCloseable {
     }
 
     private static native final void native_init();
-    private native final void native_setup(@NonNull IBinder decramblerBinder);
+    private native final void native_setup(@NonNull IHwBinder decramblerBinder);
     private native final void native_release();
     private native final int native_descramble(
-            byte key, int numSubSamples, int[] numBytesOfClearData, int[] numBytesOfEncryptedData,
+            byte key, byte flags, int numSubSamples,
+            int[] numBytesOfClearData, int[] numBytesOfEncryptedData,
             @NonNull ByteBuffer srcBuf, int srcOffset, int srcLimit,
-            ByteBuffer dstBuf, int dstOffset, int dstLimit);
+            ByteBuffer dstBuf, int dstOffset, int dstLimit) throws RemoteException;
 
     static {
         System.loadLibrary("media_jni");

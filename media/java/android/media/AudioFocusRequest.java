@@ -19,7 +19,9 @@ package android.media;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
+import android.annotation.TestApi;
 import android.media.AudioManager.OnAudioFocusChangeListener;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -37,8 +39,8 @@ import android.os.Looper;
  * but there is only one the user would really listen to (focus on), while the other plays in
  * the background. An example of this is driving directions being spoken while music plays at
  * a reduced volume (a.k.a. ducking).
- * <p>When an application requests audio focus, it expresses its intention to “own” audio focus to
- * play audio. Let’s review the different types of focus requests, the return value after a request,
+ * <p>When an application requests audio focus, it expresses its intention to "own" audio focus to
+ * play audio. Let's review the different types of focus requests, the return value after a request,
  * and the responses to a loss.
  * <p class="note">Note: applications should not play anything until granted focus.</p>
  *
@@ -49,7 +51,7 @@ import android.os.Looper;
  * <li>{@link AudioManager#AUDIOFOCUS_GAIN} expresses the fact that your application is now the
  * sole source of audio that the user is listening to. The duration of the audio playback is
  * unknown, and is possibly very long: after the user finishes interacting with your application,
- * (s)he doesn’t expect another audio stream to resume. Examples of uses of this focus gain are
+ * (s)he doesn't expect another audio stream to resume. Examples of uses of this focus gain are
  * for music playback, for a game or a video player.</li>
  *
  * <li>{@link AudioManager#AUDIOFOCUS_GAIN_TRANSIENT} is for a situation when you know your
@@ -58,29 +60,29 @@ import android.os.Looper;
  * for playing an alarm, or during a VoIP call. The playback is known to be finite: the alarm will
  * time-out or be dismissed, the VoIP call has a beginning and an end. When any of those events
  * ends, and if the user was listening to music when it started, the user expects music to resume,
- * but didn’t wish to listen to both at the same time.</li>
+ * but didn't wish to listen to both at the same time.</li>
  *
  * <li>{@link AudioManager#AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK}: this focus request type is similar
  * to {@code AUDIOFOCUS_GAIN_TRANSIENT} for the temporary aspect of the focus request, but it also
  * expresses the fact during the time you own focus, you allow another application to keep playing
- * at a reduced volume, “ducked”. Examples are when playing driving directions or notifications,
- * it’s ok for music to keep playing, but not loud enough that it would prevent the directions to
- * be hard to understand. A typical attenuation by the “ducked” application is a factor of 0.2f
+ * at a reduced volume, "ducked". Examples are when playing driving directions or notifications,
+ * it's ok for music to keep playing, but not loud enough that it would prevent the directions to
+ * be hard to understand. A typical attenuation by the "ducked" application is a factor of 0.2f
  * (or -14dB), that can for instance be applied with {@code MediaPlayer.setVolume(0.2f)} when
  * using this class for playback.</li>
  *
  * <li>{@link AudioManager#AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE} is also for a temporary request,
  * but also expresses that your application expects the device to not play anything else. This is
- * typically used if you are doing audio recording or speech recognition, and don’t want for
+ * typically used if you are doing audio recording or speech recognition, and don't want for
  * examples notifications to be played by the system during that time.</li>
  * </ul>
  *
  * <p>An {@code AudioFocusRequest} instance always contains one of the four types of requests
  * explained above. It is passed when building an {@code AudioFocusRequest} instance with its
  * builder in the {@link Builder} constructor
- * {@link AudioFocusRequest.Builder#AudioFocusRequest.Builder(int)}, or
+ * {@link AudioFocusRequest.Builder#Builder(int)}, or
  * with {@link AudioFocusRequest.Builder#setFocusGain(int)} after copying an existing instance with
- * {@link AudioFocusRequest.Builder#AudioFocusRequest.Builder(AudioFocusRequest)}.
+ * {@link AudioFocusRequest.Builder#Builder(AudioFocusRequest)}.
  *
  * <h3>Qualifying your focus request</h3>
  * <h4>Use case requiring a focus request</h4>
@@ -163,12 +165,12 @@ import android.os.Looper;
  * // requesting audio focus
  * int res = mAudioManager.requestAudioFocus(mFocusRequest);
  * synchronized (mFocusLock) {
- *     if (res == AUDIOFOCUS_REQUEST_FAILED) {
+ *     if (res == AudioManager.AUDIOFOCUS_REQUEST_FAILED) {
  *         mPlaybackDelayed = false;
- *     } else if (res == AUDIOFOCUS_REQUEST_GRANTED) {
+ *     } else if (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
  *         mPlaybackDelayed = false;
  *         playbackNow();
- *     } else if (res == AUDIOFOCUS_REQUEST_DELAYED) {
+ *     } else if (res == AudioManager.AUDIOFOCUS_REQUEST_DELAYED) {
  *        mPlaybackDelayed = true;
  *     }
  * }
@@ -220,9 +222,12 @@ public final class AudioFocusRequest {
     private final static AudioAttributes FOCUS_DEFAULT_ATTR = new AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA).build();
 
-    private final OnAudioFocusChangeListener mFocusListener; // may be null
-    private final Handler mListenerHandler;                  // may be null
-    private final AudioAttributes mAttr;                     // never null
+    /** @hide */
+    public static final String KEY_ACCESSIBILITY_FORCE_FOCUS_DUCKING = "a11y_force_ducking";
+
+    private final @Nullable OnAudioFocusChangeListener mFocusListener;
+    private final @Nullable Handler mListenerHandler;
+    private final @NonNull AudioAttributes mAttr;
     private final int mFocusGain;
     private final int mFlags;
 
@@ -258,6 +263,7 @@ public final class AudioFocusRequest {
      * Returns the focus change listener set for this {@code AudioFocusRequest}.
      * @return null if no {@link AudioManager.OnAudioFocusChangeListener} was set.
      */
+    @TestApi
     public @Nullable OnAudioFocusChangeListener getOnAudioFocusChangeListener() {
         return mFocusListener;
     }
@@ -349,6 +355,7 @@ public final class AudioFocusRequest {
         private boolean mPausesOnDuck = false;
         private boolean mDelayedFocus = false;
         private boolean mFocusLocked = false;
+        private boolean mA11yForceDucking = false;
 
         /**
          * Constructs a new {@code Builder}, and specifies how audio focus
@@ -407,7 +414,9 @@ public final class AudioFocusRequest {
          *   with {@link AudioManager#abandonAudioFocusRequest(AudioFocusRequest)}.
          *   Note that only focus changes (gains and losses) affecting the focus owner are reported,
          *   not gains and losses of other focus requesters in the system.<br>
-         *   Notifications are delivered on the main {@link Looper}.
+         *   Notifications are delivered on the {@link Looper} associated with the one of
+         *   the creation of the {@link AudioManager} used to request focus
+         *   (see {@link AudioManager#requestAudioFocus(AudioFocusRequest)}).
          * @param listener the listener receiving the focus change notifications.
          * @return this {@code Builder} instance.
          * @throws NullPointerException thrown when a null focus listener is used.
@@ -526,6 +535,21 @@ public final class AudioFocusRequest {
         }
 
         /**
+         * Marks this focus request as forcing ducking, regardless of the conditions in which
+         * the system would or would not enforce ducking.
+         * Forcing ducking will only be honored when requesting AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+         * with an {@link AudioAttributes} usage of
+         * {@link AudioAttributes#USAGE_ASSISTANCE_ACCESSIBILITY}, coming from an accessibility
+         * service, and will be ignored otherwise.
+         * @param forceDucking {@code true} to force ducking
+         * @return this {@code Builder} instance
+         */
+        public @NonNull Builder setForceDucking(boolean forceDucking) {
+            mA11yForceDucking = forceDucking;
+            return this;
+        }
+
+        /**
          * Builds a new {@code AudioFocusRequest} instance combining all the information gathered
          * by this {@code Builder}'s configuration methods.
          * @return the {@code AudioFocusRequest} instance qualified by all the properties set
@@ -537,6 +561,17 @@ public final class AudioFocusRequest {
             if ((mDelayedFocus || mPausesOnDuck) && (mFocusListener == null)) {
                 throw new IllegalStateException(
                         "Can't use delayed focus or pause on duck without a listener");
+            }
+            if (mA11yForceDucking) {
+                final Bundle extraInfo;
+                if (mAttr.getBundle() == null) {
+                    extraInfo = new Bundle();
+                } else {
+                    extraInfo = mAttr.getBundle();
+                }
+                // checking of usage and focus request is done server side
+                extraInfo.putBoolean(KEY_ACCESSIBILITY_FORCE_FOCUS_DUCKING, true);
+                mAttr = new AudioAttributes.Builder(mAttr).addBundle(extraInfo).build();
             }
             final int flags = 0
                     | (mDelayedFocus ? AudioManager.AUDIOFOCUS_FLAG_DELAY_OK : 0)

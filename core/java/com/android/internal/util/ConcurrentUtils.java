@@ -17,12 +17,16 @@
 package com.android.internal.util;
 
 import android.os.Process;
+import android.util.Slog;
 
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -34,6 +38,8 @@ public class ConcurrentUtils {
 
     private ConcurrentUtils() {
     }
+
+    public static final Executor DIRECT_EXECUTOR = new DirectExecutor();
 
     /**
      * Creates a thread pool using
@@ -86,4 +92,58 @@ public class ConcurrentUtils {
         }
     }
 
+    /**
+     * Waits for {@link CountDownLatch#countDown()} to be called on the {@param countDownLatch}.
+     * <p>If {@link CountDownLatch#countDown()} doesn't occur within {@param timeoutMs}, this
+     * method will throw {@code IllegalStateException}
+     * <p>If {@code InterruptedException} occurs, this method will interrupt the current thread
+     * and throw {@code IllegalStateException}
+     *
+     * @param countDownLatch the CountDownLatch which {@link CountDownLatch#countDown()} is
+     *                       being waited on.
+     * @param timeoutMs the maximum time waited for {@link CountDownLatch#countDown()}
+     * @param description a short description of the operation
+     */
+    public static void waitForCountDownNoInterrupt(CountDownLatch countDownLatch, long timeoutMs,
+            String description) {
+        try {
+            if (!countDownLatch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+                throw new IllegalStateException(description + " timed out.");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(description + " interrupted.");
+        }
+    }
+
+    /**
+     * Calls {@link Slog#wtf} if a given lock is held.
+     */
+    public static void wtfIfLockHeld(String tag, Object lock) {
+        if (Thread.holdsLock(lock)) {
+            Slog.wtf(tag, "Lock mustn't be held");
+        }
+    }
+
+    /**
+     * Calls {@link Slog#wtf} if a given lock is not held.
+     */
+    public static void wtfIfLockNotHeld(String tag, Object lock) {
+        if (!Thread.holdsLock(lock)) {
+            Slog.wtf(tag, "Lock must be held");
+        }
+    }
+
+    private static class DirectExecutor implements Executor {
+
+        @Override
+        public void execute(Runnable command) {
+            command.run();
+        }
+
+        @Override
+        public String toString() {
+            return "DIRECT_EXECUTOR";
+        }
+    }
 }

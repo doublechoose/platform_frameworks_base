@@ -26,6 +26,8 @@ import com.android.internal.appwidget.IAppWidgetHost;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.widget.RemoteViews;
+import android.app.IApplicationThread;
+import android.app.IServiceConnection;
 
 /** {@hide} */
 interface IAppWidgetService {
@@ -40,8 +42,10 @@ interface IAppWidgetService {
     void deleteAppWidgetId(String callingPackage, int appWidgetId);
     void deleteHost(String packageName, int hostId);
     void deleteAllHosts();
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     RemoteViews getAppWidgetViews(String callingPackage, int appWidgetId);
     int[] getAppWidgetIdsForHost(String callingPackage, int hostId);
+    void setAppWidgetHidden(in String callingPackage, int hostId);
     IntentSender createAppWidgetConfigIntentSender(String callingPackage, int appWidgetId,
             int intentFlags);
 
@@ -54,21 +58,32 @@ interface IAppWidgetService {
     void partiallyUpdateAppWidgetIds(String callingPackage, in int[] appWidgetIds,
             in RemoteViews views);
     void updateAppWidgetProvider(in ComponentName provider, in RemoteViews views);
+    void updateAppWidgetProviderInfo(in ComponentName provider, in String metadataKey);
     void notifyAppWidgetViewDataChanged(String packageName, in int[] appWidgetIds, int viewId);
     ParceledListSlice getInstalledProvidersForProfile(int categoryFilter, int profileId,
             String packageName);
     AppWidgetProviderInfo getAppWidgetInfo(String callingPackage, int appWidgetId);
     boolean hasBindAppWidgetPermission(in String packageName, int userId);
     void setBindAppWidgetPermission(in String packageName, int userId, in boolean permission);
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     boolean bindAppWidgetId(in String callingPackage, int appWidgetId,
             int providerProfileId, in ComponentName providerComponent, in Bundle options);
-    void bindRemoteViewsService(String callingPackage, int appWidgetId, in Intent intent,
-            in IBinder connection);
-    void unbindRemoteViewsService(String callingPackage, int appWidgetId, in Intent intent);
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
+    boolean bindRemoteViewsService(String callingPackage, int appWidgetId, in Intent intent,
+            IApplicationThread caller, IBinder token, IServiceConnection connection, long flags);
+    void notifyProviderInheritance(in ComponentName[] componentNames);
+
+    @UnsupportedAppUsage
     int[] getAppWidgetIds(in ComponentName providerComponent);
     boolean isBoundWidgetPackage(String packageName, int userId);
     boolean requestPinAppWidget(String packageName, in ComponentName providerComponent,
             in Bundle extras, in IntentSender resultIntent);
     boolean isRequestPinAppWidgetSupported();
+    oneway void noteAppWidgetTapped(in String callingPackage, in int appWidgetId);
+    boolean setWidgetPreview(in ComponentName providerComponent, in int widgetCategories,
+            in RemoteViews preview);
+    @nullable RemoteViews getWidgetPreview(in String callingPackage,
+            in ComponentName providerComponent, in int profileId, in int widgetCategory);
+    void removeWidgetPreview(in ComponentName providerComponent, in int widgetCategories);
 }
 

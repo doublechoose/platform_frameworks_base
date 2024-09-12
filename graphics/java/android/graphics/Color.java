@@ -26,7 +26,6 @@ import android.annotation.Nullable;
 import android.annotation.Size;
 import android.annotation.SuppressAutoDoc;
 import android.util.Half;
-import com.android.internal.util.XmlUtils;
 
 import java.util.Arrays;
 import java.util.HashMap;
@@ -73,7 +72,7 @@ import java.util.function.DoubleUnaryOperator;
  * <h4>Encoding</h4>
  * <p>The four components of a color int are encoded in the following way:</p>
  * <pre class="prettyprint">
- * int color = (A & 0xff) << 24 | (R & 0xff) << 16 | (G & 0xff) << 16 | (B & 0xff);
+ * int color = (A & 0xff) << 24 | (R & 0xff) << 16 | (G & 0xff) << 8 | (B & 0xff);
  * </pre>
  *
  * <p>Because of this encoding, color ints can easily be described as an integer
@@ -290,6 +289,9 @@ import java.util.function.DoubleUnaryOperator;
  */
 @AnyThread
 @SuppressAutoDoc
+@android.ravenwood.annotation.RavenwoodKeepWholeClass
+@android.ravenwood.annotation.RavenwoodClassLoadHook(
+        android.ravenwood.annotation.RavenwoodClassLoadHook.LIBANDROID_LOADING_HOOK)
 public class Color {
     @ColorInt public static final int BLACK       = 0xFF000000;
     @ColorInt public static final int DKGRAY      = 0xFF444444;
@@ -768,7 +770,7 @@ public class Color {
      * Returns the alpha component encoded in the specified color long.
      * The returned value is always in the range \([0..1]\).
      *
-     * @param color The color long whose blue channel to extract
+     * @param color The color long whose alpha channel to extract
      * @return A float value in the range \([0..1]\)
      *
      * @see #colorSpace(long)
@@ -1475,29 +1477,6 @@ public class Color {
 
     private static native void nativeRGBToHSV(int red, int greed, int blue, float hsv[]);
     private static native int nativeHSVToColor(int alpha, float hsv[]);
-
-    /**
-     * Converts an HTML color (named or numeric) to an integer RGB value.
-     *
-     * @param color Non-null color string.
-     *
-     * @return A color value, or {@code -1} if the color string could not be interpreted.
-     *
-     * @hide
-     */
-    @ColorInt
-    public static int getHtmlColor(@NonNull String color) {
-        Integer i = sColorNameMap.get(color.toLowerCase(Locale.ROOT));
-        if (i != null) {
-            return i;
-        } else {
-            try {
-                return XmlUtils.convertValueToInt(color, -1);
-            } catch (NumberFormatException nfe) {
-                return -1;
-            }
-        }
-    }
 
     private static final HashMap<String, Integer> sColorNameMap;
     static {

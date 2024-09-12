@@ -18,10 +18,11 @@ package com.android.internal.widget;
 
 import android.content.Context;
 import android.test.AndroidTestCase;
-import android.test.suitebuilder.annotation.SmallTest;
 import android.view.ActionMode;
 import android.view.View;
 import android.view.ViewGroup;
+
+import androidx.test.filters.SmallTest;
 
 /**
  * Tests for {@link ActionBarContainer}.
@@ -60,11 +61,9 @@ public class ActionBarContainerTest extends AndroidTestCase {
         TestViewGroup viewGroup = new TestViewGroup(mContext);
         viewGroup.addView(mActionBarContainer);
 
-        ActionMode mode = mActionBarContainer.startActionModeForChild(
-                null, null, ActionMode.TYPE_FLOATING);
+        mActionBarContainer.startActionModeForChild(null, null, ActionMode.TYPE_FLOATING);
 
         // Should bubble up.
-        assertNotNull(mode);
         assertTrue(viewGroup.isStartActionModeForChildTypedCalled);
     }
 

@@ -14,19 +14,31 @@
 
 package android.util;
 
-import android.util.ArrayMap;
+import static org.junit.Assert.fail;
 
-import junit.framework.TestCase;
+import android.platform.test.annotations.IgnoreUnderRavenwood;
+import android.platform.test.ravenwood.RavenwoodRule;
+
+import androidx.test.filters.LargeTest;
+import androidx.test.runner.AndroidJUnit4;
+
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 
 import java.util.ConcurrentModificationException;
 
 /**
  * Unit tests for ArrayMap that don't belong in CTS.
  */
-public class ArrayMapTest extends TestCase {
+@LargeTest
+@RunWith(AndroidJUnit4.class)
+public class ArrayMapTest {
     private static final String TAG = "ArrayMapTest";
     ArrayMap<String, String> map = new ArrayMap<>();
+
+    @Rule
+    public final RavenwoodRule mRavenwood = new RavenwoodRule();
 
     /**
      * Attempt to generate a ConcurrentModificationException in ArrayMap.
@@ -39,6 +51,7 @@ public class ArrayMapTest extends TestCase {
      * @throws Exception
      */
     @Test
+    @IgnoreUnderRavenwood(reason = "Long test runtime")
     public void testConcurrentModificationException() throws Exception {
         final int TEST_LEN_MS = 5000;
         System.out.println("Starting ArrayMap concurrency test");

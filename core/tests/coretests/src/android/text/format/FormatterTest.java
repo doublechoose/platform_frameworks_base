@@ -16,22 +16,31 @@
 
 package android.text.format;
 
+import static android.text.format.Formatter.FLAG_IEC_UNITS;
+import static android.text.format.Formatter.FLAG_SI_UNITS;
+
 import static org.junit.Assert.assertEquals;
 
 import android.content.Context;
 import android.content.res.Configuration;
 import android.content.res.Resources;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.platform.test.annotations.Presubmit;
 import android.text.format.Formatter.BytesResult;
 
-import java.util.Locale;
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
+
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.math.BigDecimal;
+import java.math.MathContext;
+import java.util.Locale;
+
+@Presubmit
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class FormatterTest {
@@ -54,7 +63,7 @@ public class FormatterTest {
 
     @Test
     public void testFormatBytes() {
-        setLocale(Locale.ENGLISH);
+        setLocale(Locale.US);
 
         checkFormatBytes(0, true, "0", 0);
         checkFormatBytes(0, false, "0", 0);
@@ -99,10 +108,177 @@ public class FormatterTest {
         checkFormatBytes(9123000, false, "9,12", 9120000);
     }
 
+    @Test
+    public void testFormatBytesSi() {
+        setLocale(Locale.US);
+
+        checkFormatBytes(1_000, FLAG_SI_UNITS, "1.00", 1_000);
+        checkFormatBytes(1_024, FLAG_SI_UNITS, "1.02", 1_020);
+        checkFormatBytes(1_500, FLAG_SI_UNITS, "1.50", 1_500);
+        checkFormatBytes(12_582_912L, FLAG_SI_UNITS, "12.58", 12_580_000L);
+    }
+
+    @Test
+    public void testFormatBytesIec() {
+        setLocale(Locale.US);
+
+        checkFormatBytes(1_000, FLAG_IEC_UNITS, "0.98", 1_003);
+        checkFormatBytes(1_024, FLAG_IEC_UNITS, "1.00", 1_024);
+        checkFormatBytes(1_500, FLAG_IEC_UNITS, "1.46", 1_495);
+        checkFormatBytes(12_500_000L, FLAG_IEC_UNITS, "11.92", 12_499_025L);
+        checkFormatBytes(12_582_912L, FLAG_IEC_UNITS, "12.00", 12_582_912L);
+    }
+
+    private static final long SECOND = 1000;
+    private static final long MINUTE = 60 * SECOND;
+    private static final long HOUR = 60 * MINUTE;
+    private static final long DAY = 24 * HOUR;
+
+    @Test
+    public void testFormatShortElapsedTime() {
+        setLocale(Locale.US);
+        assertEquals("3 days", Formatter.formatShortElapsedTime(mContext, 2 * DAY + 12 * HOUR));
+        assertEquals("2 days", Formatter.formatShortElapsedTime(mContext, 2 * DAY + 11 * HOUR));
+        assertEquals("2 days", Formatter.formatShortElapsedTime(mContext, 2 * DAY));
+        assertEquals("1 day, 23 hr",
+                Formatter.formatShortElapsedTime(mContext, 1 * DAY + 23 * HOUR + 59 * MINUTE));
+        assertEquals("1 day",
+                Formatter.formatShortElapsedTime(mContext, 1 * DAY + 59 * MINUTE));
+        assertEquals("1 day", Formatter.formatShortElapsedTime(mContext, 1 * DAY));
+        assertEquals("24 hr", Formatter.formatShortElapsedTime(mContext, 23 * HOUR + 30 * MINUTE));
+        assertEquals("3 hr", Formatter.formatShortElapsedTime(mContext, 2 * HOUR + 30 * MINUTE));
+        assertEquals("2 hr", Formatter.formatShortElapsedTime(mContext, 2 * HOUR));
+        assertEquals("1 hr", Formatter.formatShortElapsedTime(mContext, 1 * HOUR));
+        assertEquals("60 min",
+                Formatter.formatShortElapsedTime(mContext, 59 * MINUTE + 30 * SECOND));
+        assertEquals("59 min",
+                Formatter.formatShortElapsedTime(mContext, 59 * MINUTE));
+        assertEquals("3 min", Formatter.formatShortElapsedTime(mContext, 2 * MINUTE + 30 * SECOND));
+        assertEquals("2 min", Formatter.formatShortElapsedTime(mContext, 2 * MINUTE));
+        assertEquals("1 min, 59 sec",
+                Formatter.formatShortElapsedTime(mContext, 1 * MINUTE + 59 * SECOND + 999));
+        assertEquals("1 min", Formatter.formatShortElapsedTime(mContext, 1 * MINUTE));
+        assertEquals("59 sec", Formatter.formatShortElapsedTime(mContext, 59 * SECOND + 999));
+        assertEquals("1 sec", Formatter.formatShortElapsedTime(mContext, 1 * SECOND));
+        assertEquals("0 sec", Formatter.formatShortElapsedTime(mContext, 1));
+        assertEquals("0 sec", Formatter.formatShortElapsedTime(mContext, 0));
+
+        // Make sure it works on different locales.
+        setLocale(Locale.FRANCE);
+        assertEquals("2\u202fj", Formatter.formatShortElapsedTime(mContext, 2 * DAY));
+    }
+
+    @Test
+    public void testFormatShortElapsedTimeRoundingUpToMinutes() {
+        setLocale(Locale.US);
+        assertEquals("3 days", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 2 * DAY + 12 * HOUR));
+        assertEquals("2 days", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 2 * DAY + 11 * HOUR));
+        assertEquals("2 days", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 2 * DAY));
+        assertEquals("1 day, 23 hr", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 1 * DAY + 23 * HOUR + 59 * MINUTE));
+        assertEquals("1 day", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 1 * DAY + 59 * MINUTE));
+        assertEquals("1 day", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 1 * DAY));
+        assertEquals("24 hr", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 23 * HOUR + 30 * MINUTE));
+        assertEquals("3 hr", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 2 * HOUR + 30 * MINUTE));
+        assertEquals("2 hr", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 2 * HOUR));
+        assertEquals("1 hr", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 1 * HOUR));
+        assertEquals("1 hr", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 59 * MINUTE + 30 * SECOND));
+        assertEquals("59 min", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 59 * MINUTE));
+        assertEquals("3 min", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 2 * MINUTE + 30 * SECOND));
+        assertEquals("2 min", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 2 * MINUTE));
+        assertEquals("2 min", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 1 * MINUTE + 59 * SECOND + 999));
+        assertEquals("1 min", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 1 * MINUTE));
+        assertEquals("1 min", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 59 * SECOND + 999));
+        assertEquals("1 min", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 1 * SECOND));
+        assertEquals("1 min", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 1));
+        assertEquals("0 min", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 0));
+
+        // Make sure it works on different locales.
+        setLocale(new Locale("ru", "RU"));
+        assertEquals("1 мин", Formatter.formatShortElapsedTimeRoundingUpToMinutes(
+                mContext, 1 * SECOND));
+    }
+
+    /**
+     * Regression test for http://b/71580745 and https://unicode-org.atlassian.net/browse/CLDR-10831
+     */
+    @Test
+    public void testFormatFileSize_zhCN() {
+        setLocale(Locale.forLanguageTag("zh-CN"));
+
+        assertFormatFileSize_englishOutput();
+    }
+
+    @Test
+    public void testFormatFileSize_enUS() {
+        setLocale(Locale.US);
+
+        assertFormatFileSize_englishOutput();
+    }
+
+    private void assertFormatFileSize_englishOutput() {
+        final MathContext mc = MathContext.DECIMAL64;
+        final BigDecimal bd = new BigDecimal((long) 1000, mc);
+        // test null Context
+        assertEquals("", Formatter.formatFileSize(null, 0));
+        // test different long values with various length
+        assertEquals("0 B", Formatter.formatFileSize(mContext, 0));
+        assertEquals("1 B", Formatter.formatFileSize(mContext, 1));
+        assertEquals("9 B", Formatter.formatFileSize(mContext, 9));
+        assertEquals("10 B", Formatter.formatFileSize(mContext, 10));
+        assertEquals("99 B", Formatter.formatFileSize(mContext, 99));
+        assertEquals("100 B", Formatter.formatFileSize(mContext, 100));
+        assertEquals("900 B", Formatter.formatFileSize(mContext, 900));
+        assertEquals("0.90 kB", Formatter.formatFileSize(mContext, 901));
+
+        assertEquals("1.00 kB", Formatter.formatFileSize(mContext, bd.pow(1).longValue()));
+        assertEquals("1.50 kB", Formatter.formatFileSize(mContext, bd.pow(1).longValue() * 3 / 2));
+        assertEquals("12.50 kB", Formatter.formatFileSize(mContext,
+                bd.pow(1).longValue() * 25 / 2));
+
+        assertEquals("1.00 MB", Formatter.formatFileSize(mContext, bd.pow(2).longValue()));
+
+        assertEquals("1.00 GB", Formatter.formatFileSize(mContext, bd.pow(3).longValue()));
+
+        assertEquals("1.00 TB", Formatter.formatFileSize(mContext, bd.pow(4).longValue()));
+
+        assertEquals("1.00 PB", Formatter.formatFileSize(mContext, bd.pow(5).longValue()));
+
+        assertEquals("1000 PB", Formatter.formatFileSize(mContext, bd.pow(6).longValue()));
+
+        // test Negative value
+        assertEquals("-1 B", Formatter.formatFileSize(mContext, -1));
+    }
+
     private void checkFormatBytes(long bytes, boolean useShort,
             String expectedString, long expectedRounded) {
+        checkFormatBytes(bytes, (useShort ? Formatter.FLAG_SHORTER : 0),
+                expectedString, expectedRounded);
+    }
+
+    private void checkFormatBytes(long bytes, int flags,
+            String expectedString, long expectedRounded) {
         BytesResult r = Formatter.formatBytes(mContext.getResources(), bytes,
-                Formatter.FLAG_CALCULATE_ROUNDED | (useShort ? Formatter.FLAG_SHORTER : 0));
+                Formatter.FLAG_CALCULATE_ROUNDED | flags);
         assertEquals(expectedString, r.value);
         assertEquals(expectedRounded, r.roundedBytes);
     }

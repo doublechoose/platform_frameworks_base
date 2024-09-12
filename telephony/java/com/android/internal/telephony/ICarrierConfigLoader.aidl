@@ -23,9 +23,24 @@ import android.os.PersistableBundle;
  */
 interface ICarrierConfigLoader {
 
-    PersistableBundle getConfigForSubId(int subId);
+    /** @deprecated Use {@link #getConfigForSubIdWithFeature(int, String, String) instead */
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
+    PersistableBundle getConfigForSubId(int subId, String callingPackage);
+
+    PersistableBundle getConfigForSubIdWithFeature(int subId, String callingPackage,
+            String callingFeatureId);
+
+    @EnforcePermission("MODIFY_PHONE_STATE")
+    void overrideConfig(int subId, in PersistableBundle overrides, boolean persistent);
 
     void notifyConfigChangedForSubId(int subId);
 
+    @EnforcePermission("MODIFY_PHONE_STATE")
     void updateConfigForPhoneId(int phoneId, String simState);
+
+    @EnforcePermission("READ_PRIVILEGED_PHONE_STATE")
+    String getDefaultCarrierServicePackageName();
+
+    PersistableBundle getConfigSubsetForSubIdWithFeature(int subId, String callingPackage,
+                String callingFeatureId, in String[] carrierConfigs);
 }

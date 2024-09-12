@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010 The Android Open Source Project
+ * Copyright (C) 2023 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,18 +18,26 @@ package android.database.sqlite;
 
 import android.content.ContentValues;
 import android.content.Context;
+import android.database.AbstractWindowedCursor;
 import android.database.Cursor;
+import android.database.CursorWindow;
+import android.platform.test.annotations.Presubmit;
 import android.test.AndroidTestCase;
-import android.test.suitebuilder.annotation.LargeTest;
+
+import androidx.test.filters.LargeTest;
 
 import java.io.File;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 
+@Presubmit
+@LargeTest
 public class SQLiteCursorTest extends AndroidTestCase {
+    private static final String TABLE_NAME = "testCursor";
     private SQLiteDatabase mDatabase;
     private File mDatabaseFile;
-    private static final String TABLE_NAME = "testCursor";
+
     @Override
     protected void setUp() throws Exception {
         super.setUp();
@@ -55,7 +63,6 @@ public class SQLiteCursorTest extends AndroidTestCase {
     /**
      * this test could take a while to execute. so, designate it as LargeTest
      */
-    @LargeTest
     public void testFillWindow() {
         // create schema
         final String testTable = "testV";
@@ -138,7 +145,7 @@ public class SQLiteCursorTest extends AndroidTestCase {
             // nothing to do - just scrolling to about half-point in the resultset
         }
         mDatabase.beginTransaction();
-        mDatabase.delete(testTable, "col1 < ?", new String[]{ (3 * M / 4) + ""});
+        mDatabase.delete(testTable, "col1 < ?", new String[]{(3 * M / 4) + ""});
         mDatabase.setTransactionSuccessful();
         mDatabase.endTransaction();
         c.requery();
@@ -148,5 +155,71 @@ public class SQLiteCursorTest extends AndroidTestCase {
             // resultset without any problems
         }
         c.close();
+    }
+
+    public void testCustomWindowSize() {
+        mDatabase.execSQL("CREATE TABLE Tst (Txt BLOB NOT NULL);");
+        byte[] testArr = new byte[10000];
+        Arrays.fill(testArr, (byte) 1);
+        for (int i = 0; i < 10; i++) {
+            mDatabase.execSQL("INSERT INTO Tst VALUES (?)", new Object[]{testArr});
+        }
+        Cursor cursor = mDatabase.rawQuery("SELECT * FROM TST", null);
+        // With default window size, all rows should fit in RAM
+        AbstractWindowedCursor ac = (AbstractWindowedCursor) cursor;
+        int n = 0;
+        while (ac.moveToNext()) {
+            n++;
+            assertEquals(10, ac.getWindow().getNumRows());
+        }
+        assertEquals("All rows should be visited", 10, n);
+
+        // Now reduce window size, so that only 1 row can fit
+        cursor = mDatabase.rawQuery("SELECT * FROM TST", null);
+        CursorWindow cw = new CursorWindow("test", 11000);
+        ac = (AbstractWindowedCursor) cursor;
+        ac.setWindow(cw);
+        ac.move(-10);
+        n = 0;
+        while (ac.moveToNext()) {
+            n++;
+            assertEquals(1, cw.getNumRows());
+        }
+        assertEquals("All rows should be visited", 10, n);
+    }
+
+    // Return the number of columns associated with a new cursor.
+    private int columnCount() {
+        final String query = "SELECT * FROM t1";
+        try (Cursor c = mDatabase.rawQuery(query, null)) {
+            return c.getColumnCount();
+        }
+    }
+
+    /**
+     * Verify that a cursor that is created after the database schema is updated, sees the updated
+     * schema.
+     */
+    public void testSchemaChangeCursor() {
+        // Create the t1 table and put some data in it.
+        mDatabase.beginTransaction();
+        try {
+            mDatabase.execSQL("CREATE TABLE t1 (i int);");
+            mDatabase.execSQL("INSERT INTO t1 (i) VALUES (2)");
+            mDatabase.execSQL("INSERT INTO t1 (i) VALUES (3)");
+            mDatabase.execSQL("INSERT INTO t1 (i) VALUES (5)");
+            mDatabase.setTransactionSuccessful();
+        } finally {
+            mDatabase.endTransaction();
+        }
+
+        mDatabase.beginTransaction();
+        try {
+            assertEquals(1, columnCount());
+            mDatabase.execSQL("ALTER TABLE t1 ADD COLUMN j int");
+            assertEquals(2, columnCount());
+        } finally {
+            mDatabase.endTransaction();
+        }
     }
 }

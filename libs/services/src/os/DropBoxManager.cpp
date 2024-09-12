@@ -18,7 +18,9 @@
 
 #include <android/os/DropBoxManager.h>
 
+#include <android-base/unique_fd.h>
 #include <binder/IServiceManager.h>
+#include <binder/ParcelFileDescriptor.h>
 #include <com/android/internal/os/IDropBoxManagerService.h>
 #include <cutils/log.h>
 
@@ -143,6 +145,29 @@ DropBoxManager::Entry::readFromParcel(const Parcel* in)
     return NO_ERROR;
 }
 
+const vector<uint8_t>&
+DropBoxManager::Entry::getData() const
+{
+    return mData;
+}
+
+const unique_fd&
+DropBoxManager::Entry::getFd() const
+{
+    return mFd;
+}
+
+int32_t
+DropBoxManager::Entry::getFlags() const
+{
+    return mFlags;
+}
+
+int64_t
+DropBoxManager::Entry::getTimestamp() const
+{
+    return mTimeMillis;
+}
 
 DropBoxManager::DropBoxManager()
 {
@@ -155,18 +180,24 @@ DropBoxManager::~DropBoxManager()
 Status
 DropBoxManager::addText(const String16& tag, const string& text)
 {
-    Entry entry(tag, IS_TEXT);
-    entry.mData.assign(text.c_str(), text.c_str() + text.size());
-    return add(entry);
+    return addData(tag, reinterpret_cast<uint8_t const*>(text.c_str()), text.size(), IS_TEXT);
 }
 
 Status
 DropBoxManager::addData(const String16& tag, uint8_t const* data,
         size_t size, int flags)
 {
-    Entry entry(tag, flags);
-    entry.mData.assign(data, data+size);
-    return add(entry);
+    sp<IDropBoxManagerService> service = interface_cast<IDropBoxManagerService>(
+        defaultServiceManager()->getService(android::String16("dropbox")));
+    if (service == NULL) {
+        return Status::fromExceptionCode(Status::EX_NULL_POINTER, "can't find dropbox service");
+    }
+    ALOGD("About to call service->add()");
+    vector<uint8_t> dataArg;
+    dataArg.assign(data, data + size);
+    Status status = service->addData(tag, dataArg, flags);
+    ALOGD("service->add returned %s", status.toString8().c_str());
+    return status;
 }
 
 Status
@@ -179,21 +210,28 @@ DropBoxManager::addFile(const String16& tag, const string& filename, int flags)
         ALOGW("DropboxManager: %s", message.c_str());
         return Status::fromExceptionCode(Status::EX_ILLEGAL_STATE, message.c_str());
     }
-
-    Entry entry(tag, flags, fd);
-    return add(entry);
+    return addFile(tag, fd, flags);
 }
 
 Status
-DropBoxManager::add(const Entry& entry)
+DropBoxManager::addFile(const String16& tag, int fd, int flags)
 {
+    if (fd == -1) {
+        string message("invalid fd (-1) passed to to addFile");
+        ALOGW("DropboxManager: %s", message.c_str());
+        return Status::fromExceptionCode(Status::EX_ILLEGAL_STATE, message.c_str());
+    }
     sp<IDropBoxManagerService> service = interface_cast<IDropBoxManagerService>(
         defaultServiceManager()->getService(android::String16("dropbox")));
     if (service == NULL) {
         return Status::fromExceptionCode(Status::EX_NULL_POINTER, "can't find dropbox service");
     }
-    return service->add(entry);
+    ALOGD("About to call service->add()");
+    android::base::unique_fd uniqueFd(fd);
+    android::os::ParcelFileDescriptor parcelFd(std::move(uniqueFd));
+    Status status = service->addFile(tag, parcelFd, flags);
+    ALOGD("service->add returned %s", status.toString8().c_str());
+    return status;
 }
 
 }} // namespace android::os
-

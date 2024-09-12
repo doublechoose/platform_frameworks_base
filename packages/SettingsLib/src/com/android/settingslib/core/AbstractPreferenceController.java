@@ -1,100 +1,176 @@
+/*
+ * Copyright (C) 2023 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.settingslib.core;
 
+import android.app.admin.DevicePolicyManager;
 import android.content.Context;
-import android.support.v7.preference.Preference;
-import android.support.v7.preference.PreferenceGroup;
-import android.support.v7.preference.PreferenceScreen;
-import java.util.List;
+import android.os.Build;
+import android.text.TextUtils;
+import android.util.Log;
+
+import androidx.annotation.EmptySuper;
+import androidx.annotation.NonNull;
+import androidx.annotation.RequiresApi;
+import androidx.core.os.BuildCompat;
+import androidx.lifecycle.LifecycleOwner;
+import androidx.preference.Preference;
+import androidx.preference.PreferenceGroup;
+import androidx.preference.PreferenceScreen;
 
 /**
  * A controller that manages event for preference.
  */
 public abstract class AbstractPreferenceController {
 
-  protected final Context mContext;
+    private static final String TAG = "AbstractPrefController";
 
-  public AbstractPreferenceController(Context context) {
-    mContext = context;
-  }
+    protected final Context mContext;
+    private final DevicePolicyManager mDevicePolicyManager;
 
-  /**
-   * Displays preference in this controller.
-   */
-  public void displayPreference(PreferenceScreen screen) {
-      if (isAvailable()) {
-          if (this instanceof Preference.OnPreferenceChangeListener) {
-              final Preference preference = screen.findPreference(getPreferenceKey());
-              preference.setOnPreferenceChangeListener(
-                      (Preference.OnPreferenceChangeListener) this);
-          }
-      } else {
-          removePreference(screen, getPreferenceKey());
-      }
-  }
+    public AbstractPreferenceController(Context context) {
+        mContext = context;
+        mDevicePolicyManager =
+                (DevicePolicyManager) mContext.getSystemService(Context.DEVICE_POLICY_SERVICE);
+    }
 
-  /**
-   * Updates the current status of preference (summary, switch state, etc)
-   */
-  public void updateState(Preference preference) {
+    /**
+     * Displays preference in this controller.
+     */
+    public void displayPreference(PreferenceScreen screen) {
+        final String prefKey = getPreferenceKey();
+        if (TextUtils.isEmpty(prefKey)) {
+            Log.w(TAG, "Skipping displayPreference because key is empty:" + getClass().getName());
+            return;
+        }
+        if (isAvailable()) {
+            setVisible(screen, prefKey, true /* visible */);
+            if (this instanceof Preference.OnPreferenceChangeListener) {
+                final Preference preference = screen.findPreference(prefKey);
+                if (preference != null) {
+                    preference.setOnPreferenceChangeListener(
+                            (Preference.OnPreferenceChangeListener) this);
+                }
+            }
+        } else {
+            setVisible(screen, prefKey, false /* visible */);
+        }
+    }
 
-  }
+    /**
+     * Called on view created.
+     */
+    @EmptySuper
+    public void onViewCreated(@NonNull LifecycleOwner viewLifecycleOwner) {
+    }
 
-  /**
-   * Updates non-indexable keys for search provider.
-   *
-   * Called by SearchIndexProvider#getNonIndexableKeys
-   */
-  public void updateNonIndexableKeys(List<String> keys) {
-      if (!isAvailable()) {
-          keys.add(getPreferenceKey());
-      }
-  }
+    /**
+     * Updates the current status of preference (summary, switch state, etc)
+     */
+    public void updateState(Preference preference) {
+        refreshSummary(preference);
+    }
 
-  /**
-   * Returns true if preference is available (should be displayed)
-   */
-  public abstract boolean isAvailable();
+    /**
+     * Refresh preference summary with getSummary()
+     */
+    protected void refreshSummary(Preference preference) {
+        if (preference == null) {
+            return;
+        }
+        final CharSequence summary = getSummary();
+        if (summary == null) {
+            // Default getSummary returns null. If subclass didn't override this, there is nothing
+            // we need to do.
+            return;
+        }
+        preference.setSummary(summary);
+    }
 
-  /**
-   * Handles preference tree click
-   *
-   * @param preference the preference being clicked
-   * @return true if click is handled
-   */
-  public boolean handlePreferenceTreeClick(Preference preference) {
-      return false;
-  }
+    /**
+     * Returns true if preference is available (should be displayed)
+     */
+    public abstract boolean isAvailable();
 
-  /**
-   * Returns the key for this preference.
-   */
-  public abstract String getPreferenceKey();
+    /**
+     * Handles preference tree click
+     *
+     * @param preference the preference being clicked
+     * @return true if click is handled
+     */
+    public boolean handlePreferenceTreeClick(Preference preference) {
+        return false;
+    }
 
-  /**
-   * Removes preference from screen.
-   */
-  protected final void removePreference(PreferenceScreen screen, String key) {
-      findAndRemovePreference(screen, key);
-  }
+    /**
+     * Returns the key for this preference.
+     */
+    public abstract String getPreferenceKey();
 
-  // finds the preference recursively and removes it from its parent
-  private boolean findAndRemovePreference(PreferenceGroup prefGroup, String key) {
-      final int preferenceCount = prefGroup.getPreferenceCount();
-      for (int i = 0; i < preferenceCount; i++) {
-          final Preference preference = prefGroup.getPreference(i);
-          final String curKey = preference.getKey();
+    /**
+     * Show/hide a preference.
+     */
+    protected final void setVisible(PreferenceGroup group, String key, boolean isVisible) {
+        final Preference pref = group.findPreference(key);
+        if (pref != null) {
+            pref.setVisible(isVisible);
+        }
+    }
 
-          if (curKey != null && curKey.equals(key)) {
-              return prefGroup.removePreference(preference);
-          }
 
-          if (preference instanceof PreferenceGroup) {
-              if (findAndRemovePreference((PreferenceGroup) preference, key)) {
-                  return true;
-              }
-          }
-      }
-      return false;
-  }
+    /**
+     * @return a {@link CharSequence} for the summary of the preference.
+     */
+    public CharSequence getSummary() {
+        return null;
+    }
 
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    protected void replaceEnterpriseStringTitle(PreferenceScreen screen,
+            String preferenceKey, String overrideKey, int resource) {
+        if (!BuildCompat.isAtLeastT() || mDevicePolicyManager == null) {
+            return;
+        }
+
+        Preference preference = screen.findPreference(preferenceKey);
+        if (preference == null) {
+            Log.d(TAG, "Could not find enterprise preference " + preferenceKey);
+            return;
+        }
+
+        preference.setTitle(
+                mDevicePolicyManager.getResources().getString(overrideKey,
+                        () -> mContext.getString(resource)));
+    }
+
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    protected void replaceEnterpriseStringSummary(
+            PreferenceScreen screen, String preferenceKey, String overrideKey, int resource) {
+        if (!BuildCompat.isAtLeastT() || mDevicePolicyManager == null) {
+            return;
+        }
+
+        Preference preference = screen.findPreference(preferenceKey);
+        if (preference == null) {
+            Log.d(TAG, "Could not find enterprise preference " + preferenceKey);
+            return;
+        }
+
+        preference.setSummary(
+                mDevicePolicyManager.getResources().getString(overrideKey,
+                        () -> mContext.getString(resource)));
+    }
 }

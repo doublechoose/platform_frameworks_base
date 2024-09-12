@@ -18,12 +18,13 @@
 #include "utils/Log.h"
 
 #include "jni.h"
-#include <nativehelper/JNIHelp.h>
+#include <nativehelper/JNIPlatformHelp.h>
+#include <nativehelper/ScopedUtfChars.h>
 #include "android_runtime/AndroidRuntime.h"
 #include "android_runtime/Log.h"
+#include "MtpDescriptors.h"
 
 #include <stdio.h>
-#include <asm/byteorder.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -87,6 +88,7 @@ static jobject android_server_UsbDeviceManager_openAccessory(JNIEnv *env, jobjec
     }
     jobject fileDescriptor = jniCreateFileDescriptor(env, fd);
     if (fileDescriptor == NULL) {
+        close(fd);
         return NULL;
     }
     return env->NewObject(gParcelFileDescriptorOffsets.mClass,
@@ -106,27 +108,41 @@ static jboolean android_server_UsbDeviceManager_isStartRequested(JNIEnv* /* env 
     return (result == 1);
 }
 
-static jint android_server_UsbDeviceManager_getAudioMode(JNIEnv* /* env */, jobject /* thiz */)
-{
-    int fd = open(DRIVER_NAME, O_RDWR);
-    if (fd < 0) {
-        ALOGE("could not open %s", DRIVER_NAME);
-        return false;
+static jobject android_server_UsbDeviceManager_openControl(JNIEnv *env, jobject /* thiz */, jstring jFunction) {
+    ScopedUtfChars function(env, jFunction);
+    bool ptp = false;
+    int fd = -1;
+    if (!strcmp(function.c_str(), "ptp")) {
+        ptp = true;
     }
-    int result = ioctl(fd, ACCESSORY_GET_AUDIO_MODE);
-    close(fd);
-    return result;
+    if (!strcmp(function.c_str(), "mtp") || ptp) {
+        fd = TEMP_FAILURE_RETRY(open(ptp ? FFS_PTP_EP0 : FFS_MTP_EP0, O_RDWR));
+        if (fd < 0) {
+            ALOGE("could not open control for %s %s", function.c_str(), strerror(errno));
+            return NULL;
+        }
+        if (!writeDescriptors(fd, ptp)) {
+            close(fd);
+            return NULL;
+        }
+    }
+
+    jobject jifd = jniCreateFileDescriptor(env, fd);
+    if (jifd == NULL) {
+        // OutOfMemoryError will be pending.
+        close(fd);
+    }
+    return jifd;
 }
 
 static const JNINativeMethod method_table[] = {
-    { "nativeGetAccessoryStrings",  "()[Ljava/lang/String;",
-                                    (void*)android_server_UsbDeviceManager_getAccessoryStrings },
-    { "nativeOpenAccessory",        "()Landroid/os/ParcelFileDescriptor;",
-                                    (void*)android_server_UsbDeviceManager_openAccessory },
-    { "nativeIsStartRequested",     "()Z",
-                                    (void*)android_server_UsbDeviceManager_isStartRequested },
-    { "nativeGetAudioMode",         "()I",
-                                    (void*)android_server_UsbDeviceManager_getAudioMode },
+        {"nativeGetAccessoryStrings", "()[Ljava/lang/String;",
+         (void *)android_server_UsbDeviceManager_getAccessoryStrings},
+        {"nativeOpenAccessory", "()Landroid/os/ParcelFileDescriptor;",
+         (void *)android_server_UsbDeviceManager_openAccessory},
+        {"nativeIsStartRequested", "()Z", (void *)android_server_UsbDeviceManager_isStartRequested},
+        {"nativeOpenControl", "(Ljava/lang/String;)Ljava/io/FileDescriptor;",
+         (void *)android_server_UsbDeviceManager_openControl},
 };
 
 int register_android_server_UsbDeviceManager(JNIEnv *env)

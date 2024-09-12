@@ -16,23 +16,30 @@
 #ifndef DRAWFRAMETASK_H
 #define DRAWFRAMETASK_H
 
-#include <vector>
-
 #include <utils/Condition.h>
 #include <utils/Mutex.h>
 #include <utils/StrongPointer.h>
 
-#include "RenderTask.h"
+#include <optional>
+#include <vector>
 
-#include "../Rect.h"
 #include "../FrameInfo.h"
+#include "../Rect.h"
 #include "../TreeInfo.h"
+#include "RenderTask.h"
+#include "SkColorSpace.h"
+#include "SwapBehavior.h"
+#include "utils/TimeUtils.h"
+#ifdef __ANDROID__  // Layoutlib does not support hardware acceleration
+#include <android/hardware_buffer.h>
+#endif
+#include "HardwareBufferRenderParams.h"
 
 namespace android {
+
 namespace uirenderer {
 
 class DeferredLayerUpdater;
-class DisplayList;
 class RenderNode;
 
 namespace renderthread {
@@ -46,6 +53,7 @@ enum {
     UIRedrawRequired = 1 << 0,
     LostSurfaceRewardIfFound = 1 << 1,
     ContextIsStopped = 1 << 2,
+    FrameDropped = 1 << 3,
 };
 }
 
@@ -55,12 +63,15 @@ enum {
  * tracked across many frames not just a single frame.
  * It is the sync-state task, and will kick off the post-sync draw
  */
-class DrawFrameTask : public RenderTask {
+class DrawFrameTask {
 public:
     DrawFrameTask();
     virtual ~DrawFrameTask();
 
     void setContext(RenderThread* thread, CanvasContext* context, RenderNode* targetNode);
+    void setContentDrawBounds(int left, int top, int right, int bottom) {
+        mContentDrawBounds.set(left, top, right, bottom);
+    }
 
     void pushLayerUpdate(DeferredLayerUpdater* layer);
     void removeLayerUpdate(DeferredLayerUpdater* layer);
@@ -69,7 +80,27 @@ public:
 
     int64_t* frameInfo() { return mFrameInfo; }
 
-    virtual void run() override;
+    void run();
+
+    void setFrameCallback(std::function<std::function<void(bool)>(int32_t, int64_t)>&& callback) {
+        mFrameCallback = std::move(callback);
+    }
+
+    void setFrameCommitCallback(std::function<void(bool)>&& callback) {
+        mFrameCommitCallback = std::move(callback);
+    }
+
+    void setFrameCompleteCallback(std::function<void()>&& callback) {
+        mFrameCompleteCallback = std::move(callback);
+    }
+
+    void forceDrawNextFrame() { mForceDrawFrame = true; }
+
+    void setHardwareBufferRenderParams(const HardwareBufferRenderParams& params) {
+        mHardwareBufferParams = params;
+    }
+
+    void setRenderSdrHdrRatio(float ratio) { mRenderSdrHdrRatio = ratio; }
 
 private:
     void postAndWait();
@@ -82,16 +113,25 @@ private:
     RenderThread* mRenderThread;
     CanvasContext* mContext;
     RenderNode* mTargetNode = nullptr;
+    Rect mContentDrawBounds;
+    float mRenderSdrHdrRatio = 1.f;
 
     /*********************************************
      *  Single frame data
      *********************************************/
-    std::vector< sp<DeferredLayerUpdater> > mLayers;
+    std::vector<sp<DeferredLayerUpdater> > mLayers;
 
     int mSyncResult;
     int64_t mSyncQueued;
 
     int64_t mFrameInfo[UI_THREAD_FRAME_INFO_SIZE];
+
+    HardwareBufferRenderParams mHardwareBufferParams;
+    std::function<std::function<void(bool)>(int32_t, int64_t)> mFrameCallback;
+    std::function<void(bool)> mFrameCommitCallback;
+    std::function<void()> mFrameCompleteCallback;
+
+    bool mForceDrawFrame = false;
 };
 
 } /* namespace renderthread */

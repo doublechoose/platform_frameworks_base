@@ -54,7 +54,8 @@ import java.util.HashMap;
  * Note that this class cannot be used in the same process as real settings. This is because it
  * works by passing an alternate ContentResolver to Settings operations. Unfortunately, the Settings
  * class only fetches the content provider from the passed-in ContentResolver the first time it's
- * used, and after that stores it in a per-process static.
+ * used, and after that stores it in a per-process static. If this needs to be used in this case,
+ * then call {@link #clearSettingsProvider()} before and after using this.
  *
  * TODO: evaluate implementing settings change notifications. This would require:
  *
@@ -88,6 +89,23 @@ public class FakeSettingsProvider extends MockContentProvider {
             default:
                 throw new UnsupportedOperationException("Unknown settings table " + table);
         }
+    }
+
+    /**
+     * Creates a {@link org.junit.rules.TestRule} that makes sure {@link #clearSettingsProvider()}
+     * is triggered before and after each test.
+     */
+    public static FakeSettingsProviderRule rule() {
+        return new FakeSettingsProviderRule();
+    }
+
+    /**
+     * This needs to be called before and after using the FakeSettingsProvider class.
+     */
+    public static void clearSettingsProvider() {
+        Settings.Secure.clearProviderForTest();
+        Settings.Global.clearProviderForTest();
+        Settings.System.clearProviderForTest();
     }
 
     public Bundle call(String method, String arg, Bundle extras) {

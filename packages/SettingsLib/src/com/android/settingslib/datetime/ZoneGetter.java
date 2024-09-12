@@ -18,9 +18,8 @@ package com.android.settingslib.datetime;
 
 import android.content.Context;
 import android.content.res.XmlResourceParser;
+import android.icu.text.TimeZoneFormat;
 import android.icu.text.TimeZoneNames;
-import android.support.v4.text.BidiFormatter;
-import android.support.v4.text.TextDirectionHeuristicsCompat;
 import android.text.SpannableString;
 import android.text.SpannableStringBuilder;
 import android.text.TextUtils;
@@ -29,11 +28,21 @@ import android.text.style.TtsSpan;
 import android.util.Log;
 import android.view.View;
 
+import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
+import androidx.core.text.BidiFormatter;
+import androidx.core.text.TextDirectionHeuristicsCompat;
+
+import com.android.i18n.timezone.CountryTimeZones;
+import com.android.i18n.timezone.CountryTimeZones.TimeZoneMapping;
+import com.android.i18n.timezone.TimeZoneFinder;
+import com.android.internal.app.LocaleHelper;
 import com.android.settingslib.R;
 
 import org.xmlpull.v1.XmlPullParserException;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -88,10 +97,12 @@ public class ZoneGetter {
     private static final String XMLTAG_TIMEZONE = "timezone";
 
     public static CharSequence getTimeZoneOffsetAndName(Context context, TimeZone tz, Date now) {
-        Locale locale = Locale.getDefault();
-        CharSequence gmtText = getGmtOffsetText(context, locale, tz, now);
+        Locale locale = context.getResources().getConfiguration().locale;
+        TimeZoneFormat tzFormatter = TimeZoneFormat.getInstance(locale);
+        CharSequence gmtText = getGmtOffsetText(tzFormatter, locale, tz, now);
         TimeZoneNames timeZoneNames = TimeZoneNames.getInstance(locale);
-        String zoneNameString = getZoneLongName(timeZoneNames, tz, now);
+        String zoneNameString = capitalizeForStandaloneDisplay(
+                locale, getZoneLongName(locale, timeZoneNames, tz, now));
         if (zoneNameString == null) {
             return gmtText;
         }
@@ -100,15 +111,33 @@ public class ZoneGetter {
         return TextUtils.concat(gmtText, " ", zoneNameString);
     }
 
+    /**
+     * Capitalizes {@code toCapitalize} for standalone display, i.e. in lists. This is intended for
+     * use with "display name" strings from sources like ICU/CLDR which typically capitalize strings
+     * for the inclusion in the middle of sentences. Some locales (such as Polish) do not capitalize
+     * terms like "Coordinated Universal Time" as in English but do capitalize the first letter for
+     * standalone locations like lists, and so must be explicitly capitalized.
+     *
+     * @return the capitalized string, or {@code null} if the argument is null
+     */
+    @Nullable
+    public static String capitalizeForStandaloneDisplay(
+            Locale locale, @Nullable String toCapitalize) {
+        if (TextUtils.isEmpty(toCapitalize)) {
+            return toCapitalize;
+        }
+        return LocaleHelper.toSentenceCase(toCapitalize, locale);
+    }
+
     public static List<Map<String, Object>> getZonesList(Context context) {
-        final Locale locale = Locale.getDefault();
+        final Locale locale = context.getResources().getConfiguration().locale;
         final Date now = new Date();
         final TimeZoneNames timeZoneNames = TimeZoneNames.getInstance(locale);
         final ZoneGetterData data = new ZoneGetterData(context);
 
         // Work out whether the display names we would show by default would be ambiguous.
         final boolean useExemplarLocationForLocalNames =
-                shouldUseExemplarLocationForLocalNames(data, timeZoneNames);
+                shouldUseExemplarLocationForLocalNames(locale, data, timeZoneNames);
 
         // Generate the list of zone entries to return.
         List<Map<String, Object>> zones = new ArrayList<Map<String, Object>>();
@@ -116,7 +145,7 @@ public class ZoneGetter {
             TimeZone tz = data.timeZones[i];
             CharSequence gmtOffsetText = data.gmtOffsetTexts[i];
 
-            CharSequence displayName = getTimeZoneDisplayName(data, timeZoneNames,
+            CharSequence displayName = getTimeZoneDisplayName(locale, data, timeZoneNames,
                     useExemplarLocationForLocalNames, tz, data.olsonIdsToDisplay[i]);
             if (TextUtils.isEmpty(displayName)) {
                 displayName = gmtOffsetText;
@@ -173,15 +202,15 @@ public class ZoneGetter {
         return olsonIds;
     }
 
-    private static boolean shouldUseExemplarLocationForLocalNames(ZoneGetterData data,
-            TimeZoneNames timeZoneNames) {
+    private static boolean shouldUseExemplarLocationForLocalNames(Locale locale,
+            ZoneGetterData data, TimeZoneNames timeZoneNames) {
         final Set<CharSequence> localZoneNames = new HashSet<>();
         final Date now = new Date();
         for (int i = 0; i < data.zoneCount; i++) {
             final String olsonId = data.olsonIdsToDisplay[i];
             if (data.localZoneIds.contains(olsonId)) {
                 final TimeZone tz = data.timeZones[i];
-                CharSequence displayName = getZoneLongName(timeZoneNames, tz, now);
+                CharSequence displayName = getZoneLongName(locale, timeZoneNames, tz, now);
                 if (displayName == null) {
                     displayName = data.gmtOffsetTexts[i];
                 }
@@ -195,7 +224,7 @@ public class ZoneGetter {
         return false;
     }
 
-    private static CharSequence getTimeZoneDisplayName(ZoneGetterData data,
+    private static CharSequence getTimeZoneDisplayName(Locale locale, ZoneGetterData data,
             TimeZoneNames timeZoneNames, boolean useExemplarLocationForLocalNames, TimeZone tz,
             String olsonId) {
         final Date now = new Date();
@@ -204,7 +233,7 @@ public class ZoneGetter {
         String displayName;
 
         if (preferLongName) {
-            displayName = getZoneLongName(timeZoneNames, tz, now);
+            displayName = getZoneLongName(locale, timeZoneNames, tz, now);
         } else {
             // Canonicalize the zone ID for ICU. It will only return valid strings for zone IDs
             // that match ICUs zone IDs (which are similar but not guaranteed the same as those
@@ -215,10 +244,11 @@ public class ZoneGetter {
             if (canonicalZoneId == null) {
                 canonicalZoneId = tz.getID();
             }
-            displayName = timeZoneNames.getExemplarLocationName(canonicalZoneId);
+            displayName = capitalizeForStandaloneDisplay(
+                    locale, timeZoneNames.getExemplarLocationName(canonicalZoneId));
             if (displayName == null || displayName.isEmpty()) {
                 // getZoneExemplarLocation can return null. Fall back to the long name.
-                displayName = getZoneLongName(timeZoneNames, tz, now);
+                displayName = getZoneLongName(locale, timeZoneNames, tz, now);
             }
         }
 
@@ -229,11 +259,22 @@ public class ZoneGetter {
      * Returns the long name for the timezone for the given locale at the time specified.
      * Can return {@code null}.
      */
-    private static String getZoneLongName(TimeZoneNames names, TimeZone tz, Date now) {
+    private static String getZoneLongName(
+            Locale locale, TimeZoneNames names, TimeZone tz, Date now) {
         final TimeZoneNames.NameType nameType =
                 tz.inDaylightTime(now) ? TimeZoneNames.NameType.LONG_DAYLIGHT
                         : TimeZoneNames.NameType.LONG_STANDARD;
-        return names.getDisplayName(tz.getID(), nameType, now.getTime());
+        return capitalizeForStandaloneDisplay(locale,
+                names.getDisplayName(getCanonicalZoneId(tz), nameType, now.getTime()));
+    }
+
+    private static String getCanonicalZoneId(TimeZone timeZone) {
+        final String id = timeZone.getID();
+        final String canonicalId = android.icu.util.TimeZone.getCanonicalID(id);
+        if (canonicalId != null) {
+            return canonicalId;
+        }
+        return id;
     }
 
     private static void appendWithTtsSpan(SpannableStringBuilder builder, CharSequence content,
@@ -243,12 +284,15 @@ public class ZoneGetter {
         builder.setSpan(span, start, builder.length(), 0);
     }
 
-    private static String twoDigits(int input) {
-        StringBuilder builder = new StringBuilder(3);
-        if (input < 0) builder.append('-');
-        String string = Integer.toString(Math.abs(input));
-        if (string.length() == 1) builder.append("0");
-        builder.append(string);
+    // Input must be positive. minDigits must be 1 or 2.
+    private static String formatDigits(int input, int minDigits, String localizedDigits) {
+        final int tens = input / 10;
+        final int units = input % 10;
+        StringBuilder builder = new StringBuilder(minDigits);
+        if (input >= 10 || minDigits == 2) {
+            builder.append(localizedDigits.charAt(tens));
+        }
+        builder.append(localizedDigits.charAt(units));
         return builder.toString();
     }
 
@@ -256,36 +300,83 @@ public class ZoneGetter {
      * Get the GMT offset text label for the given time zone, in the format "GMT-08:00". This will
      * also add TTS spans to give hints to the text-to-speech engine for the type of data it is.
      *
-     * @param context The context which the string is displayed in.
+     * @param tzFormatter The timezone formatter to use.
      * @param locale The locale which the string is displayed in. This should be the same as the
-     *               locale of the context.
+     *               locale of the time zone formatter.
      * @param tz Time zone to get the GMT offset from.
      * @param now The current time, used to tell whether daylight savings is active.
      * @return A CharSequence suitable for display as the offset label of {@code tz}.
      */
-    private static CharSequence getGmtOffsetText(Context context, Locale locale, TimeZone tz,
-            Date now) {
-        SpannableStringBuilder builder = new SpannableStringBuilder();
+    public static CharSequence getGmtOffsetText(TimeZoneFormat tzFormatter, Locale locale,
+            TimeZone tz, Date now) {
+        final SpannableStringBuilder builder = new SpannableStringBuilder();
 
-        appendWithTtsSpan(builder, "GMT",
-                new TtsSpan.TextBuilder(context.getString(R.string.time_zone_gmt)).build());
-
-        int offsetMillis = tz.getOffset(now.getTime());
-        if (offsetMillis >= 0) {
-            appendWithTtsSpan(builder, "+", new TtsSpan.VerbatimBuilder("+").build());
+        final String gmtPattern = tzFormatter.getGMTPattern();
+        final int placeholderIndex = gmtPattern.indexOf("{0}");
+        final String gmtPatternPrefix, gmtPatternSuffix;
+        if (placeholderIndex == -1) {
+            // Bad pattern. Replace with defaults.
+            gmtPatternPrefix = "GMT";
+            gmtPatternSuffix = "";
+        } else {
+            gmtPatternPrefix = gmtPattern.substring(0, placeholderIndex);
+            gmtPatternSuffix = gmtPattern.substring(placeholderIndex + 3); // After the "{0}".
         }
 
+        if (!gmtPatternPrefix.isEmpty()) {
+            appendWithTtsSpan(builder, gmtPatternPrefix,
+                    new TtsSpan.TextBuilder(gmtPatternPrefix).build());
+        }
+
+        int offsetMillis = tz.getOffset(now.getTime());
+        final boolean negative = offsetMillis < 0;
+        final TimeZoneFormat.GMTOffsetPatternType patternType;
+        if (negative) {
+            offsetMillis = -offsetMillis;
+            patternType = TimeZoneFormat.GMTOffsetPatternType.NEGATIVE_HM;
+        } else {
+            patternType = TimeZoneFormat.GMTOffsetPatternType.POSITIVE_HM;
+        }
+        final String gmtOffsetPattern = tzFormatter.getGMTOffsetPattern(patternType);
+        final String localizedDigits = tzFormatter.getGMTOffsetDigits();
+
         final int offsetHours = (int) (offsetMillis / DateUtils.HOUR_IN_MILLIS);
-        appendWithTtsSpan(builder, twoDigits(offsetHours),
-                new TtsSpan.MeasureBuilder().setNumber(offsetHours).setUnit("hour").build());
-
-        builder.append(":");
-
         final int offsetMinutes = (int) (offsetMillis / DateUtils.MINUTE_IN_MILLIS);
         final int offsetMinutesRemaining = Math.abs(offsetMinutes) % 60;
-        appendWithTtsSpan(builder, twoDigits(offsetMinutesRemaining),
-                new TtsSpan.MeasureBuilder().setNumber(offsetMinutesRemaining)
-                        .setUnit("minute").build());
+
+        for (int i = 0; i < gmtOffsetPattern.length(); i++) {
+            char c = gmtOffsetPattern.charAt(i);
+            if (c == '+' || c == '-' || c == '\u2212' /* MINUS SIGN */) {
+                final String sign = String.valueOf(c);
+                appendWithTtsSpan(builder, sign, new TtsSpan.VerbatimBuilder(sign).build());
+            } else if (c == 'H' || c == 'm') {
+                final int numDigits;
+                if (i + 1 < gmtOffsetPattern.length() && gmtOffsetPattern.charAt(i + 1) == c) {
+                    numDigits = 2;
+                    i++; // Skip the next formatting character.
+                } else {
+                    numDigits = 1;
+                }
+                final int number;
+                final String unit;
+                if (c == 'H') {
+                    number = offsetHours;
+                    unit = "hour";
+                } else { // c == 'm'
+                    number = offsetMinutesRemaining;
+                    unit = "minute";
+                }
+                appendWithTtsSpan(builder, formatDigits(number, numDigits, localizedDigits),
+                        new TtsSpan.MeasureBuilder().setNumber(number).setUnit(unit).build());
+            } else {
+                builder.append(c);
+            }
+        }
+
+        if (!gmtPatternSuffix.isEmpty()) {
+            appendWithTtsSpan(builder, gmtPatternSuffix,
+                    new TtsSpan.TextBuilder(gmtPatternSuffix).build());
+        }
 
         CharSequence gmtText = new SpannableString(builder);
 
@@ -297,7 +388,8 @@ public class ZoneGetter {
         return gmtText;
     }
 
-    private static final class ZoneGetterData {
+    @VisibleForTesting
+    public static final class ZoneGetterData {
         public final String[] olsonIdsToDisplay;
         public final CharSequence[] gmtOffsetTexts;
         public final TimeZone[] timeZones;
@@ -305,7 +397,8 @@ public class ZoneGetter {
         public final int zoneCount;
 
         public ZoneGetterData(Context context) {
-            final Locale locale = Locale.getDefault();
+            final Locale locale = context.getResources().getConfiguration().locale;
+            final TimeZoneFormat tzFormatter = TimeZoneFormat.getInstance(locale);
             final Date now = new Date();
             final List<String> olsonIdsToDisplayList = readTimezonesToDisplay(context);
 
@@ -319,14 +412,31 @@ public class ZoneGetter {
                 olsonIdsToDisplay[i] = olsonId;
                 final TimeZone tz = TimeZone.getTimeZone(olsonId);
                 timeZones[i] = tz;
-                gmtOffsetTexts[i] = getGmtOffsetText(context, locale, tz, now);
+                gmtOffsetTexts[i] = getGmtOffsetText(tzFormatter, locale, tz, now);
             }
 
             // Create a lookup of local zone IDs.
-            localZoneIds = new HashSet<String>();
-            for (String olsonId : libcore.icu.TimeZoneNames.forLocale(locale)) {
-                localZoneIds.add(olsonId);
+            final List<String> zoneIds = lookupTimeZoneIdsByCountry(locale.getCountry());
+            localZoneIds = zoneIds != null ? new HashSet<>(zoneIds) : new HashSet<>();
+        }
+
+        @VisibleForTesting
+        public List<String> lookupTimeZoneIdsByCountry(String country) {
+            final CountryTimeZones countryTimeZones =
+                    TimeZoneFinder.getInstance().lookupCountryTimeZones(country);
+            if (countryTimeZones == null) {
+                return null;
             }
+            final List<TimeZoneMapping> mappings = countryTimeZones.getTimeZoneMappings();
+            return extractTimeZoneIds(mappings);
+        }
+
+        private static List<String> extractTimeZoneIds(List<TimeZoneMapping> timeZoneMappings) {
+            final List<String> zoneIds = new ArrayList<>(timeZoneMappings.size());
+            for (TimeZoneMapping timeZoneMapping : timeZoneMappings) {
+                zoneIds.add(timeZoneMapping.getTimeZoneId());
+            }
+            return Collections.unmodifiableList(zoneIds);
         }
     }
 }

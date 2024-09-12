@@ -6,6 +6,7 @@
 #include "Main.h"
 #include "Bundle.h"
 
+#include <build/version.h>
 #include <utils/Compat.h>
 #include <utils/Log.h>
 #include <utils/threads.h>
@@ -20,10 +21,6 @@ using namespace android;
 
 static const char* gProgName = "aapt";
 
-#ifndef AAPT_VERSION
-    #define AAPT_VERSION ""
-#endif
-
 /*
  * Show version info.  All the cool kids do it.
  */
@@ -32,7 +29,7 @@ int doVersion(Bundle* bundle)
     if (bundle->getFileSpecCount() != 0) {
         printf("(ignoring extra arguments)\n");
     }
-    printf("Android Asset Packaging Tool, v0.2-" AAPT_VERSION "\n");
+    printf("Android Asset Packaging Tool, v0.2-%s\n", android::build::GetBuildNumber().c_str());
 
     return 0;
 }
@@ -190,7 +187,7 @@ void usage(void)
         "       be loaded alongside the base APK at runtime.\n"
         "   --feature-of\n"
         "       Builds a split APK that is a feature of the apk specified here. Resources\n"
-        "       in the base APK can be referenced from the the feature APK.\n"
+        "       in the base APK can be referenced from the feature APK.\n"
         "   --feature-after\n"
         "       An app can have multiple Feature Split APKs which must be totally ordered.\n"
         "       If --feature-of is specified, this flag specifies which Feature Split APK\n"
